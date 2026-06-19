@@ -83,6 +83,12 @@ bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
 /** Objects relocated by copying collection so far (Immix defrag, etc.). */
 size_t mmtk_ocaml_objects_copied(void);
 
+/** Number of collections performed so far. */
+size_t mmtk_ocaml_gc_count(void);
+
+/** Total stop-the-world GC time so far, in milliseconds. */
+uint64_t mmtk_ocaml_gc_time_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

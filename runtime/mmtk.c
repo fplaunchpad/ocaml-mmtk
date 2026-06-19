@@ -76,7 +76,10 @@ void caml_mmtk_init(void)
    happened during a run (and exercise the infix-pointer fixup path). */
 static void caml_mmtk_report_copied(void)
 {
-  fprintf(stderr, "[mmtk] objects copied (total): %zu\n",
+  fprintf(stderr,
+          "[mmtk] GCs: %zu, GC time: %llu ms, objects copied: %zu\n",
+          mmtk_ocaml_gc_count(),
+          (unsigned long long) mmtk_ocaml_gc_time_ms(),
           mmtk_ocaml_objects_copied());
 }
 

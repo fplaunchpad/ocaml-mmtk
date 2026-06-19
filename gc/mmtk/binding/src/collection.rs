@@ -16,9 +16,9 @@
 //! don't wedge it), and visits each mutator. `resume_mutators` un-poisons and
 //! wakes everyone.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mmtk::memory_manager;
 use mmtk::util::alloc::AllocationError;
@@ -42,6 +42,24 @@ struct StwState {
 }
 static STW: Mutex<StwState> = Mutex::new(StwState { epoch: 0, stopped: 0 });
 static STW_COND: Condvar = Condvar::new();
+
+/// GC-pause accounting: number of collections and total stop-the-world wall time
+/// (the span from stop_all_mutators to resume_mutators). Lets the runtime report
+/// GC time separately from mutator/allocation time — e.g. to see whether parallel
+/// marking actually scales. Reported at exit under MMTK_VERBOSE.
+static GC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GC_NANOS: AtomicU64 = AtomicU64::new(0);
+static GC_PAUSE_START: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_gc_count() -> usize {
+    GC_COUNT.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_gc_time_ms() -> u64 {
+    GC_NANOS.load(Ordering::Relaxed) / 1_000_000
+}
 
 extern "C" {
     fn caml_mmtk_interrupt(domain: usize);
@@ -103,6 +121,7 @@ impl Collection<OCamlVM> for VMCollection {
     {
         use mmtk::vm::ActivePlan;
 
+        *GC_PAUSE_START.lock().unwrap() = Some(Instant::now());
         GC_ACTIVE.store(true, Ordering::SeqCst);
 
         // Poison every domain so running ones trap to a safepoint and park.
@@ -139,6 +158,11 @@ impl Collection<OCamlVM> for VMCollection {
         GC_ACTIVE.store(false, Ordering::SeqCst);
         s.epoch = s.epoch.wrapping_add(1);
         STW_COND.notify_all();
+        drop(s);
+        if let Some(start) = GC_PAUSE_START.lock().unwrap().take() {
+            GC_NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            GC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The domain whose allocation triggered GC parks here until collection
