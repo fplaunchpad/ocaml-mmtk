@@ -131,11 +131,11 @@ in mmtk-core, or decide to track/contribute upstream.
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
 - **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) —
-  **PRIORITY: currently crash** (segfault), not just a semantic gap. OCaml links
-  them into `domain->ephe_info->{live,todo}`, which MMTk neither roots nor
-  processes, so they dangle. See `gc/mmtk/NOTES.md` for the diagnosis and fix
-  options (interim: root the ephe lists to keep them alive; proper: MMTk
-  weak-reference processing). Probe: `features.ml`.
+  *interim crash-fix landed* (`caml_mmtk_scan_ephe_roots` roots the
+  `domain->ephe_info` lists so they can't dangle; probe `gc/mmtk/features.ml` no
+  longer segfaults). Still TODO: **proper weak-reference processing** — currently
+  everything is kept alive (weak refs never clear; a leak). Replace with MMTk's
+  weak/finalizable processing to clear dead keys/data. See `gc/mmtk/NOTES.md`.
 - **Finalisers** — first-class (`Gc.finalise`) and last-ditch
   (`Gc.finalise_last`). Don't run yet — the root scan passes `do_final=1` to keep
   finalisable values alive. Wire MMTk's finalizable processing.

@@ -5,9 +5,23 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## Weak arrays & ephemerons CRASH under MMTk (high priority, workstream E)
+## Weak arrays & ephemerons CRASH under MMTk — interim fix landed
 
 *2026-06-19*
+
+**Update: the crash is fixed (conservatively).** `caml_mmtk_scan_ephe_roots`
+(runtime/mmtk.c, called per domain from `scan_roots_in_mutator_thread`) now walks
+`domain->ephe_info->{todo,live}` and reports every ephemeron/weak-array field
+(link, data, keys) and the list heads as strong roots — so MMTk keeps the whole
+ephemeron graph alive and pointer-updates it instead of letting it dangle. The
+feature probe (`gc/mmtk/features.ml`) now completes under MarkSweep and Immix
+(incl. forced defrag) with no crash, and the moving/multidomain battery is
+unregressed. Tradeoff: weak references never clear yet (everything kept alive,
+a leak), exactly like finalisable values under `do_final=1`. Proper MMTk
+weak-reference processing (clear dead keys/data, run finalisers) is still the
+real workstream-E task. Original diagnosis below.
+
+---
 
 **Confirmed bug, not just a missing feature.** A program that creates weak
 arrays / ephemerons and later triggers ephemeron processing (e.g. `Gc.full_major`,

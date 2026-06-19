@@ -17,6 +17,7 @@
 
 #include "config.h"
 #include "mlvalues.h"
+#include "roots.h"
 
 /* Set to 1 once MMTk is initialised and the current domain's mutator is bound.
  * The allocation macros consult this to decide MMTk vs. the stock minor heap;
@@ -49,6 +50,12 @@ extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
  * young_limit; they are called by the GC worker (via the binding). */
 extern void caml_mmtk_stw_poll(void);
 extern void caml_mmtk_park(void);
+
+/* Report a domain's weak arrays / ephemerons (domain->ephe_info lists) as strong
+ * roots, so MMTk keeps them alive and updated instead of letting them dangle.
+ * Conservative interim until proper weak-reference processing exists. */
+extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
+                                      caml_domain_state *domain);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 

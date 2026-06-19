@@ -35,6 +35,9 @@ extern "C" {
         do_final_val: i32,
     );
     fn caml_scan_global_roots(f: ScanningAction, data: *mut c_void);
+    /// Report a domain's weak arrays / ephemerons as strong roots (interim, until
+    /// proper weak-reference processing) so they cannot dangle under MMTk.
+    fn caml_mmtk_scan_ephe_roots(f: ScanningAction, data: *mut c_void, domain: *mut c_void);
 }
 
 /// Callback handed to `caml_do_roots`/`caml_scan_global_roots`. `data` points to
@@ -58,14 +61,18 @@ impl Scanning<OCamlVM> for VMScanning {
         let domain = mutator.mutator_tls.0 .0.to_address().to_mut_ptr::<c_void>();
 
         let mut buf: Vec<FieldSlot> = Vec::new();
+        let buf_ptr = (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>();
         unsafe {
             caml_do_roots(
                 collect_root_slot,
                 0, // darken_scanning_flags: scan everything
-                (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>(),
+                buf_ptr,
                 domain,
                 1, // keep finalisable values alive (we don't run finalisers yet)
             );
+            // Keep this domain's weak arrays / ephemerons alive + updated (interim;
+            // they are otherwise unreachable and would dangle — see runtime/mmtk.c).
+            caml_mmtk_scan_ephe_roots(collect_root_slot, buf_ptr, domain);
         }
         if !buf.is_empty() {
             factory.create_process_roots_work(buf);

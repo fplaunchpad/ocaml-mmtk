@@ -23,6 +23,8 @@
 #include "caml/domain.h"
 #include "caml/fail.h"
 #include "caml/misc.h"
+#include "caml/roots.h"
+#include "caml/weak.h"
 #include "caml/mmtk.h"
 
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
@@ -141,6 +143,45 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
                              caml_mmtk_semantics(wosize));
   if (p == NULL) caml_raise_out_of_memory();
   return (value)p;
+}
+
+/* Report every ephemeron / weak-array field in this domain as a strong root.
+
+   OCaml links weak arrays and ephemerons into per-domain lists
+   (domain->ephe_info->{todo,live}); the stock major GC (major_gc.c) is what
+   normally marks, updates, and weakly-clears them. We bypass that GC, and these
+   blocks are Abstract_tag (so scan_object skips them) and are reachable *only*
+   via ephe_info — so without this, MMTk would treat them as dead, collect/move
+   them, and leave dangling pointers in the lists that crash any later ephemeron
+   walk (e.g. Gc.full_major). Until proper MMTk weak-reference processing exists
+   (ROADMAP workstream E), keep the whole ephemeron graph alive and
+   pointer-updated by reporting each block's fields (link, data, keys) and the
+   list heads as ordinary roots. This is memory-safe but conservative: weak
+   references never clear (the same tradeoff as keeping finalisable values alive).
+
+   Called per domain from the binding's root scan (scan_roots_in_mutator_thread),
+   alongside caml_do_roots. */
+void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
+                               caml_domain_state *domain)
+{
+  struct caml_ephe_info *ei = domain->ephe_info;
+  if (ei == NULL) return;
+
+  value *heads[2];
+  heads[0] = &ei->todo;
+  heads[1] = &ei->live;
+
+  for (int h = 0; h < 2; h++) {
+    value *headp = heads[h];
+    if (*headp != (value) NULL) f(fdata, *headp, headp);
+    for (value e = *headp; e != (value) NULL; e = Ephe_link(e)) {
+      mlsize_t wo = Wosize_val(e);  /* fields: 0 link, 1 data, 2.. keys */
+      for (mlsize_t i = 0; i < wo; i++) {
+        volatile value *slot = Op_val(e) + i;
+        f(fdata, *slot, slot);
+      }
+    }
+  }
 }
 
 /* ── Stop-the-world ──────────────────────────────────────────────────── */
