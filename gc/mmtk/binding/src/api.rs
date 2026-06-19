@@ -114,6 +114,14 @@ pub extern "C" fn mmtk_ocaml_alloc(
     let alloc_start: Address =
         memory_manager::alloc::<OCamlVM>(mutator, total_bytes, WORD_SIZE, 0, semantics);
 
+    // Heap exhausted: MMTk has already collected, called VMCollection::out_of_memory
+    // (which returns rather than aborting), and handed us a null address. Propagate
+    // null so the C alloc wrapper raises OCaml's Out_of_memory from a C frame —
+    // raising here would longjmp through MMTk's Rust frames.
+    if alloc_start.is_zero() {
+        return std::ptr::null_mut();
+    }
+
     let header = make_header(wosize, tag as u8);
     unsafe { alloc_start.store(header) };
 

@@ -21,6 +21,7 @@
 #include "caml/mlvalues.h"
 #include "caml/domain_state.h"
 #include "caml/domain.h"
+#include "caml/fail.h"
 #include "caml/misc.h"
 #include "caml/mmtk.h"
 
@@ -122,15 +123,21 @@ Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
 value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag, reserved_t reserved)
 {
   (void)reserved;
-  return (value)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                                 CAML_MMTK_SEM_DEFAULT);
+  void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
+                             CAML_MMTK_SEM_DEFAULT);
+  /* NULL => heap exhausted after collection. Raise from this C frame (safe to
+     longjmp; raising inside MMTk's Rust alloc path would not be). */
+  if (p == NULL) caml_raise_out_of_memory();
+  return (value)p;
 }
 
 value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
 {
   (void)reserved;
-  return (value)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                                 caml_mmtk_semantics(wosize));
+  void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
+                             caml_mmtk_semantics(wosize));
+  if (p == NULL) caml_raise_out_of_memory();
+  return (value)p;
 }
 
 /* ── Stop-the-world ──────────────────────────────────────────────────── */

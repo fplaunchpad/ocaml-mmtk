@@ -21,6 +21,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use mmtk::memory_manager;
+use mmtk::util::alloc::AllocationError;
 use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread};
 use mmtk::vm::Collection;
 use mmtk::vm::GCThreadContext;
@@ -147,6 +148,13 @@ impl Collection<OCamlVM> for VMCollection {
     fn block_for_gc(_tls: VMMutatorThread) {
         unsafe { caml_mmtk_park() };
     }
+
+    /// The heap is full and a collection could not free enough space. The
+    /// default impl panics (aborts the process); instead we return, so the
+    /// allocation hands a null pointer back to `mmtk_ocaml_alloc`, and the C
+    /// alloc wrapper raises OCaml's `Out_of_memory` from a C frame (a raise here
+    /// would longjmp through MMTk's Rust frames). Called on the mutator thread.
+    fn out_of_memory(_tls: VMThread, _err_kind: AllocationError) {}
 
     fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<OCamlVM>) {
         match ctx {
