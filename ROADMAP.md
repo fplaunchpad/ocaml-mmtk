@@ -31,8 +31,8 @@ movement for testing).
 | M1 | MMTk **NoGC** backs every bytecode allocation | ✅ done |
 | M2 | **MarkSweep**: precise root scanning + stop-the-world (real collection) | ✅ done |
 | M2+ | **Multi-domain** stop-the-world (`Domain.spawn` programs) | ✅ done |
-| M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots | 🟡 core done |
-| — | Clean `Out_of_memory`; pinning validation across runtime/FFI | ⬜ M3 remainder |
+| M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
+| — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | Generational plans (GenImmix / StickyImmix) — needs write barrier | ⬜ |
 | M5 | Runtime features: Lazy, finalisers, weak arrays, ephemerons | ⬜ |
 | M6 | Native-code integration | ⬜ |
@@ -44,8 +44,10 @@ What works today: NoGC, MarkSweep, and Immix back all bytecode allocation under
 `MMTK_ENABLED=1`. MarkSweep and Immix collect correctly single- and
 multi-domain; Immix relocates objects (validated: ordinary blocks, closures,
 **infix/interior pointers**, and the multi-domain + moving combination all
-produce correct results after forced defrag). Collections are **parallel**
-(multiple GC worker threads) and **stop-the-world**.
+produce correct results after forced defrag — a 150-iteration soak under
+`MMTK_IMMIX_ALWAYS_DEFRAG`+`DEFRAG_EVERY_BLOCK` was clean). Heap exhaustion
+raises a catchable OCaml `Out_of_memory` (not an abort). Collections are
+**parallel** (multiple GC worker threads) and **stop-the-world**.
 
 ---
 
@@ -93,19 +95,21 @@ not in new trait code.
 ## Workstreams (not strictly ordered)
 
 ### A. Finish M3 (Immix)
-- **Clean `Out_of_memory`.** Today `copy_object` asserts (aborts) if evacuation
-  can't allocate, and the mutator alloc path doesn't handle a null result.
-  Implement `VMCollection::out_of_memory` to raise OCaml's `Out_of_memory`.
-  Caution: the OCaml raise longjmps; do it from a C frame (set a flag / return
-  from the Rust hook, then `caml_raise_out_of_memory` in `caml_mmtk_alloc*`),
-  not by longjmping through MMTk's Rust frames.
-- **Pinning validation.** Audit places that hold a raw `value`/interior pointer
-  across a potential GC without it being a registered, updatable root —
-  especially C primitives and the FFI. Pin where needed (`object_pinning` is
-  enabled, pinning bit reserved). No pin has been required by the tests so far,
-  but this is the tier-2 "real work."
-- **Soak** the moving + multi-domain combination under forced defrag (the
-  gdb-as-parent hang catcher / gauntlet scripts used for M2 multi-domain apply).
+- ✅ **Clean `Out_of_memory`** (commit). `VMCollection::out_of_memory` returns
+  instead of panicking; `mmtk_ocaml_alloc` propagates the null, and the C alloc
+  wrappers raise `caml_raise_out_of_memory` from a C frame (raising through
+  MMTk's Rust frames would be unsound). Validated under MarkSweep and Immix.
+- ✅ **Soak** done: 150 iterations of multi-domain + infix under forced defrag,
+  clean (see `gc/mmtk/NOTES.md`).
+- **Pinning validation** — *largely covered, broaden later*. OCaml's stock GC
+  already moves objects, so correct C code already roots its values; the residual
+  risk is unrooted raw pointers to assumed-immovable old objects. Forced
+  defrag-every-block (moves everything) is the stress test and currently passes;
+  broaden via the testsuite (workstream G). Pin explicitly only if a real failure
+  surfaces (`object_pinning` is enabled, pinning bit reserved).
+- **Evacuation-time OOM** still asserts in `copy_object` if `alloc_copy` fails
+  mid-defrag (Immix reserves headroom to avoid it); convert to a graceful path
+  if it ever bites.
 
 ### B. Parallel collection (works; verify + tune)
 Collections already run on multiple GC worker threads. Explicitly test

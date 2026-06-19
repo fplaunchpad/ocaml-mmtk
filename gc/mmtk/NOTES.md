@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Pinning under a moving plan — why OCaml's existing rooting mostly suffices
+
+*2026-06-19*
+
+A moving plan (Immix defrag) relocates objects, so any reference into the MMTk
+heap must either be a precise, updatable root/slot or the target must be pinned.
+The reassuring fact: **OCaml's stock GC already moves objects** (minor-heap
+objects are relocated on promotion), so all correctly-written C code already
+roots the `value`s it holds across an allocation (via `CAMLparam`/`CAMLlocal`,
+which land in `caml_local_roots` and are scanned + updated). MMTk-moving inherits
+that safety for free.
+
+The residual risk is narrow: code that holds an **unrooted raw pointer to an
+object it assumes won't move** — safe under the stock GC because *major*-heap
+(old) objects don't move there, but unsafe under Immix, which can move any
+object. Finding such spots is the "tier-2 validation" in the roadmap.
+
+Validation strategy (in lieu of an exhaustive audit): run under
+`MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true`, which
+relocates **every** live object on **every** GC — the harshest possible test for
+a stale pointer. So far this passes: the torture, retain (200k-list), infix
+(mutually-recursive closures), and multi-domain churn tests all run correctly
+under it, and a 150-iteration soak (multidom8 + infix, alternating) was clean.
+No explicit pin has been needed yet. The next broadening step is OCaml's own
+testsuite under forced defrag (roadmap M7), which exercises far more C
+primitives and object shapes.
+
+## MMTk fixed-address metadata mmap can fail with EEXIST (ASLR collision)
+
+*2026-06-19*
+
+Intermittently, a fresh run aborts at startup with:
+
+```
+panicked at mmtk-0.32.0/src/policy/space.rs:724: failed to mmap meta memory: File exists (os error 17)
+```
+
+On Linux mmtk-core maps its side-metadata with `MAP_FIXED_NOREPLACE`
+(`util/memory.rs`), which returns `EEXIST` when something ASLR placed lands in
+MMTk's fixed metadata range. It is intermittent (depends on ASLR), happens at
+init (not during GC), and is unrelated to our binding or the moving code — a
+soak hit it roughly once per ~30 fresh processes.
+
+Workaround for testing: run under `setarch -R` (disables ASLR), and/or retry the
+process on this specific panic (our soak script does both). It still recurred
+once even with ASLR off, so it's not fully eliminated. Proper fix is upstream
+(mmtk-core mmap strategy); track there. Not a correctness issue for a successful
+run.
+
 ## Backup threads vs. MMTk's own GC threads (deferred)
 
 *2026-06-19*
