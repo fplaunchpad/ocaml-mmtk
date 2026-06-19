@@ -44,6 +44,8 @@ static int caml_mmtk_collection_started = 0;
 #define CAML_MMTK_SEM_DEFAULT 0
 #define CAML_MMTK_SEM_LOS     2
 
+static void caml_mmtk_report_copied(void);
+
 void caml_mmtk_init(void)
 {
   if (caml_mmtk_initialised) return;
@@ -62,8 +64,19 @@ void caml_mmtk_init(void)
   caml_mmtk_initialised = 1;
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
 
-  if (getenv("MMTK_VERBOSE") != NULL)
+  if (getenv("MMTK_VERBOSE") != NULL) {
     fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB\n", plan, heap_mb);
+    atexit(caml_mmtk_report_copied);
+  }
+}
+
+/* Report how many objects copying collection relocated (Immix defrag, etc.).
+   Registered with atexit under MMTK_VERBOSE so we can confirm movement actually
+   happened during a run (and exercise the infix-pointer fixup path). */
+static void caml_mmtk_report_copied(void)
+{
+  fprintf(stderr, "[mmtk] objects copied (total): %zu\n",
+          mmtk_ocaml_objects_copied());
 }
 
 /* MMTk is opt-in during bring-up: it manages the heap only when MMTK_ENABLED is

@@ -80,6 +80,9 @@ void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
 
+/** Objects relocated by copying collection so far (Immix defrag, etc.). */
+size_t mmtk_ocaml_objects_copied(void);
+
 #ifdef __cplusplus
 }
 #endif

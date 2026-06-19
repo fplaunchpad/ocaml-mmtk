@@ -8,11 +8,17 @@
 //! The object reference points to field 0; the header is one word before it.
 //! MMTk's `ref_to_object_start` must return the header address (= alloc result).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use mmtk::util::copy::{CopySemantics, GCWorkerCopyContext};
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::VMBinding;
 
 use crate::header::{tag_of, wosize_of, WORD_SIZE};
+
+/// Count of objects relocated by copying collectors (Immix defrag, etc.).
+/// Exposed so the runtime can confirm/report that movement actually happened.
+pub static OBJECTS_COPIED: AtomicUsize = AtomicUsize::new(0);
 
 /// Byte offset from the MMTk allocation result to the OCaml object reference.
 pub const OBJECT_REF_OFFSET: usize = WORD_SIZE;
@@ -95,6 +101,7 @@ pub fn copy_object<VM: VMBinding>(
         ObjectReference::from_raw_address_unchecked(to_start + OBJECT_REF_OFFSET)
     };
     copy_context.post_copy(to_ref, size, semantics);
+    OBJECTS_COPIED.fetch_add(1, Ordering::Relaxed);
     to_ref
 }
 

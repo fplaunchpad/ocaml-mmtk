@@ -143,6 +143,13 @@ pub extern "C" fn mmtk_ocaml_handle_user_collection_request(domain_state_addr: u
 
 // ── Object queries ────────────────────────────────────────────────────────
 
+/// Total number of objects relocated by copying collection so far (Immix
+/// defrag, etc.). Lets the runtime confirm/report that movement happened.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_objects_copied() -> usize {
+    mmtk_ocaml_common::object_model::OBJECTS_COPIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> bool {
     let addr = Address::from_ptr(addr);
