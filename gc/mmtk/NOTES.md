@@ -5,6 +5,66 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native-code integration (M5) — strategy & plan
+
+*2026-06-19*
+
+**The native allocation mechanism** (examined on arm64; amd64 is analogous).
+The compiler *inlines* allocation at every site: a dedicated register
+`ALLOC_PTR` holds `young_ptr`; the sequence is `ALLOC_PTR -= whsize; cmp
+ALLOC_PTR, young_limit; b.lo caml_call_gc` — a **downward** bump. Comballoc
+merges several allocations into one decrement. Slow path: `caml_call_gc` (asm,
+arm64.S) saves regs and calls `caml_garbage_collection` (signals_nat.c), which
+reads the **frame descriptor** at the return address to recover the allocation
+count/sizes, then calls `caml_alloc_small_dispatch`; on return `young_ptr` is
+valid again and the inlined code proceeds. Native **roots** also come from frame
+descriptors (each return address lists live registers/stack slots);
+`caml_scan_stack` already walks native frames precisely — so feeding MMTk reuses
+the same `caml_do_roots` path as bytecode.
+
+So unlike bytecode (plain C entry points we redirect), native allocation can't be
+swapped by replacing a C function — the bump is inlined.
+
+**Two strategies:**
+
+- **A. Nursery aliasing / TLAB** — point `young_ptr`/`young_limit` at an
+  MMTk-backed bump region; refill from MMTk on overflow. Keeps the inlined
+  fast-path. Problems: OCaml bumps *downward*, MMTk Immix bumps *upward*; and
+  MMTk needs per-object metadata (post_alloc) that the inlined bump won't set.
+  Highest performance, hardest.
+
+- **B. Keep the stock minor heap; MMTk owns the major heap (RECOMMENDED FIRST).**
+  Leave the inlined fast-path and the stock minor heap **unchanged** — young
+  objects allocate in the stock nursery exactly as today (no compiler change).
+  Redirect only: (1) `caml_alloc_shr` → MMTk (as in bytecode); (2) the minor
+  GC's *promotion* — surviving minor objects get copied into MMTk via
+  `mmtk_ocaml_alloc` instead of into the stock major heap; (3) disable the stock
+  major GC. This is exactly how the bdwgc fork did native, and it sidesteps the
+  inlined-bump problem entirely. The existing minor-GC remembered set / write
+  barrier stay (major→minor = MMTk→nursery), with promotion targets in MMTk.
+
+**Concrete plan (Strategy B):**
+1. Build `libasmrun` with the MMTk glue: today every MMTk patch is `#ifndef
+   NATIVE_CODE`; selectively enable init + `caml_alloc_shr` redirection +
+   promotion hook for native. Link the staticlib into native exes too
+   (`Makefile.mmtk`).
+2. MMTk init for the native domain (mirror `caml_mmtk_domain_init`).
+3. Promotion: in the minor GC (`minor_gc.c` `oldify`/promote path), allocate the
+   promoted copy via `caml_mmtk_alloc_shr` instead of the stock major heap;
+   update the forwarding so references point into MMTk.
+4. Roots: feed `caml_do_roots` (native stacks via frame descriptors + globals)
+   to MMTk — same `scan_roots_in_mutator_thread` as bytecode (verify native
+   frame scanning produces the same `FieldSlot`s).
+5. STW: native already has `young_limit`-poison interrupts (`caml_call_gc` does an
+   `acquire` fence for exactly this) — reuse the multi-domain STW machinery.
+6. Disable the stock major GC slices; route `Gc.*` like bytecode.
+
+**Risks:** native roots include callee-save registers and frame layouts that must
+be reported precisely; promotion correctness under a moving MMTk major heap
+(forwarded pointers); C FFI (`CAMLparam`) across native↔C; the `-DNATIVE_CODE`
+build must stay green for the stock GC when MMTk is off. Test with a tiny native
+program first (`ocamlopt`), then the moving/multidomain battery natively.
+
 ## Generational write barrier (GenImmix / StickyImmix)
 
 *2026-06-19*

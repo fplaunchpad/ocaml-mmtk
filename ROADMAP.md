@@ -165,10 +165,18 @@ OCaml semantics MMTk must preserve:
   work in isolation but operate on the bypassed stock heap structures; audit for
   correctness/meaning under MMTk (e.g. `Gc.stat` reports stock counters).
 
-### F. Native-code integration
-The hard part deferred from day one: native code inlines a bump-pointer
-allocation sequence at every allocation site (`asmcomp`/`emit`). Strategy:
-major-heap routing first, then nursery aliasing. This is a large milestone.
+### F. Native-code integration — 🔜 active (scoped)
+Native inlines a downward bump-pointer alloc in a dedicated register
+(`ALLOC_PTR`=`young_ptr`), with the slow path via `caml_call_gc` →
+`caml_garbage_collection` → `caml_alloc_small_dispatch` and roots via frame
+descriptors — so the bump can't be swapped by replacing a C function.
+**Chosen strategy: keep the stock minor heap, make MMTk the major heap** (as the
+bdwgc fork did): leave the inlined fast-path untouched; redirect `caml_alloc_shr`
+and the minor-GC *promotion* to MMTk; disable the stock major GC; feed native
+roots (frame descriptors via `caml_do_roots`) to MMTk; reuse the multi-domain
+STW. Full mechanism, step-by-step plan, and risks in `gc/mmtk/NOTES.md`. This is
+a large milestone; the nursery-aliasing/TLAB approach (option A) is a later
+performance step.
 
 ### G. Testsuite
 Run OCaml's own testsuite under each MMTk plan; pass modulo features not yet
