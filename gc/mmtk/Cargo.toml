@@ -1,0 +1,20 @@
+# In-tree MMTk binding for the OCaml 5.x fork.
+#
+# This is a self-contained Cargo workspace living inside the OCaml compiler
+# tree (the OCaml tree itself is not a Cargo project). The `binding` crate
+# builds a staticlib (`libmmtk_ocaml.a`) that is linked into the patched
+# OCaml runtime; `common` holds the version-independent value-layout code.
+#
+# mmtk-core is depended on from crates.io (NOT vendored, NOT a path dep).
+[workspace]
+members = ["common", "binding"]
+resolver = "2"
+
+[workspace.dependencies]
+mmtk        = { version = "0.32", features = ["object_pinning"] }
+lazy_static = "1.5"
+libc        = "0.2"
+
+[profile.release]
+# Bring-up: keep debug info in the release staticlib for easier gdb/lldb work.
+debug = true

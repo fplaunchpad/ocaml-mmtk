@@ -1,0 +1,137 @@
+//! C-exported API for the OCaml 5.x MMTk binding.
+//!
+//! `tls` for a mutator is the address of the domain's `caml_domain_state`
+//! struct.  All exported symbols use the `mmtk_ocaml_*` prefix.
+
+use std::ffi::CStr;
+
+use mmtk::memory_manager;
+use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread};
+use mmtk::util::{Address, ObjectReference};
+use mmtk::AllocationSemantics;
+use mmtk::MMTKBuilder;
+
+use mmtk_ocaml_common::header::{make_header, WORD_SIZE};
+use mmtk_ocaml_common::object_model::OBJECT_REF_OFFSET;
+
+use crate::active_plan::{deregister_by_ptr, register_mutator};
+use crate::{mmtk, OCamlVM, SINGLETON};
+
+// ── Init ──────────────────────────────────────────────────────────────────
+
+/// Initialise MMTk.  Call once (from `caml_main`/startup) before any domain
+/// is bound. `plan` is a GC plan name: "NoGC", "MarkSweep", "Immix", …
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
+    let plan_str = unsafe { CStr::from_ptr(plan).to_str().expect("invalid plan string") };
+
+    let mut builder = MMTKBuilder::new();
+    assert!(
+        memory_manager::process(&mut builder, "plan", plan_str),
+        "unknown MMTk plan: {}", plan_str
+    );
+    assert!(
+        memory_manager::process(
+            &mut builder,
+            "gc_trigger",
+            &format!("FixedHeapSize:{}", heap_size)
+        ),
+        "failed to set gc_trigger/heap_size"
+    );
+
+    let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
+    SINGLETON
+        .set(mmtk_instance)
+        .ok()
+        .expect("mmtk_ocaml_init called more than once");
+}
+
+/// Start MMTk GC worker threads.  Call once after `mmtk_ocaml_init`, before
+/// any allocation.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_initialize_collection(tls: usize) {
+    let tls = VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(tls) }));
+    memory_manager::initialize_collection::<OCamlVM>(mmtk(), tls);
+}
+
+// ── Mutator (domain) lifecycle ────────────────────────────────────────────
+
+/// Bind a new OCaml 5.x domain as an MMTk mutator.
+/// `domain_state_addr` — the address of the domain's `caml_domain_state` struct.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_bind_mutator(domain_state_addr: usize) -> *mut libc::c_void {
+    let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+        Address::from_usize(domain_state_addr)
+    })));
+    let mutator = memory_manager::bind_mutator(mmtk(), tls);
+    let raw = Box::into_raw(mutator);
+    register_mutator(domain_state_addr, raw);
+    raw as *mut libc::c_void
+}
+
+/// Destroy the mutator for a terminating OCaml 5.x domain.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_destroy_mutator(mutator: *mut libc::c_void) {
+    let mutator_ptr = mutator as *mut mmtk::Mutator<OCamlVM>;
+    deregister_by_ptr(mutator_ptr);
+    // Reconstruct the Box so the allocation is freed after destroy_mutator runs.
+    let mut mutator_box = unsafe { Box::from_raw(mutator_ptr) };
+    memory_manager::destroy_mutator(&mut *mutator_box);
+    // mutator_box drops here, freeing the Mutator allocation.
+}
+
+// ── Allocation ────────────────────────────────────────────────────────────
+
+/// Allocate an OCaml block.  Writes the header and returns a pointer to field 0.
+///
+/// `wosize` — number of word-sized fields; `tag` — OCaml block tag (0..255);
+/// `semantics` — 0 Default, 1 Immortal, 2 Los, 6 NonMoving.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_alloc(
+    mutator: *mut libc::c_void,
+    wosize: usize,
+    tag: usize,
+    semantics: usize,
+) -> *mut libc::c_void {
+    let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
+    let total_bytes = (wosize + 1) * WORD_SIZE;
+    let semantics = match semantics {
+        0 => AllocationSemantics::Default,
+        1 => AllocationSemantics::Immortal,
+        2 => AllocationSemantics::Los,
+        6 => AllocationSemantics::NonMoving,
+        _ => AllocationSemantics::Default,
+    };
+
+    let alloc_start: Address =
+        memory_manager::alloc::<OCamlVM>(mutator, total_bytes, WORD_SIZE, 0, semantics);
+
+    let header = make_header(wosize, tag as u8);
+    unsafe { alloc_start.store(header) };
+
+    let obj_ref = alloc_start + OBJECT_REF_OFFSET;
+    let object = unsafe { ObjectReference::from_raw_address_unchecked(obj_ref) };
+    memory_manager::post_alloc::<OCamlVM>(mutator, object, total_bytes, semantics);
+
+    obj_ref.to_mut_ptr::<libc::c_void>()
+}
+
+// ── GC control ────────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_handle_user_collection_request(domain_state_addr: usize) {
+    let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+        Address::from_usize(domain_state_addr)
+    })));
+    memory_manager::handle_user_collection_request::<OCamlVM>(mmtk(), tls);
+}
+
+// ── Object queries ────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> bool {
+    let addr = Address::from_ptr(addr);
+    memory_manager::is_in_mmtk_spaces(unsafe {
+        ObjectReference::from_raw_address_unchecked(addr)
+    })
+}

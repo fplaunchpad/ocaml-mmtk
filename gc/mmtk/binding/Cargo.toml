@@ -1,0 +1,16 @@
+[package]
+name    = "mmtk-ocaml"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mmtk_ocaml"
+# staticlib: links into the patched OCaml 5.x runtime (libmmtk_ocaml.a)
+# rlib:      allows unit tests within this crate
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+mmtk              = { workspace = true }
+mmtk-ocaml-common = { path = "../common" }
+lazy_static       = { workspace = true }
+libc              = { workspace = true }

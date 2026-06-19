@@ -29,6 +29,10 @@ include Makefile.best_binaries
 .PHONY: defaultentry
 defaultentry: $(DEFAULT_BUILD_TARGET)
 
+# MMTk build glue. Included *after* `defaultentry` so OCaml's default build
+# target stays the default goal (the mmtk-lib rule must not become it).
+include Makefile.mmtk
+
 include stdlib/StdlibModules
 
 CAMLC = $(BOOT_OCAMLC) $(BOOT_STDLIBFLAGS) -use-prims runtime/primitives
@@ -941,7 +945,8 @@ FLEXDLL_MANIFEST = default$(filter-out _i386,_$(ARCH)).manifest
 
 DOC_FILES=\
   Changes \
-  README.adoc \
+  README.md \
+  README.upstream.adoc \
   README.win32.adoc \
   LICENSE
 
@@ -1263,6 +1268,7 @@ runtime_BYTECODE_ONLY_C_SOURCES = \
   fail_byt \
   fix_code \
   interp \
+  mmtk \
   startup_byt \
   zstd
 runtime_BYTECODE_C_SOURCES = \
@@ -1422,11 +1428,15 @@ runtime/prims.$(O): runtime/build_config.h
 
 ## Runtime libraries and programs
 
-runtime/ocamlrun$(EXE): runtime/prims.$(O) runtime/libcamlrun.$(A)
-	$(V_MKEXE)$(MKEXE) -o $@ $^ $(BYTECCLIBS)
+# MMTk: the in-tree binding staticlib ($(MMTK_LIB)) is linked into the bytecode
+# runtime. The allocation redirection in the C runtime is guarded by
+# #ifndef NATIVE_CODE, so only bytecode runtime archives reference mmtk_ocaml_*
+# symbols; libasmrun (native) stays clean. See Makefile.mmtk.
+runtime/ocamlrun$(EXE): runtime/prims.$(O) runtime/libcamlrun.$(A) $(MMTK_LIB)
+	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlrun.$(A) $(MMTK_LINK) $(BYTECCLIBS)
 
-runtime/ocamlruns$(EXE): runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A)
-	$(V_MKEXE)$(call MKEXE_VIA_CC,$@,$^ $(BYTECCLIBS))
+runtime/ocamlruns$(EXE): runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A) $(MMTK_LIB)
+	$(V_MKEXE)$(call MKEXE_VIA_CC,$@,runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A) $(MMTK_LINK) $(BYTECCLIBS))
 
 runtime/libcamlrun.$(A): $(libcamlrun_OBJECTS)
 	$(V_MKLIB)$(call MKLIB,$@, $^)
@@ -1434,14 +1444,14 @@ runtime/libcamlrun.$(A): $(libcamlrun_OBJECTS)
 runtime/libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS)
 	$(V_MKLIB)$(call MKLIB,$@, $^)
 
-runtime/ocamlrund$(EXE): runtime/prims.$(O) runtime/libcamlrund.$(A)
-	$(V_MKEXE)$(MKEXE) $(MKEXEDEBUGFLAG) -o $@ $^ $(BYTECCLIBS)
+runtime/ocamlrund$(EXE): runtime/prims.$(O) runtime/libcamlrund.$(A) $(MMTK_LIB)
+	$(V_MKEXE)$(MKEXE) $(MKEXEDEBUGFLAG) -o $@ runtime/prims.$(O) runtime/libcamlrund.$(A) $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/libcamlrund.$(A): $(libcamlrund_OBJECTS)
 	$(V_MKLIB)$(call MKLIB,$@, $^)
 
-runtime/ocamlruni$(EXE): runtime/prims.$(O) runtime/libcamlruni.$(A)
-	$(V_MKEXE)$(MKEXE) -o $@ $^ $(INSTRUMENTED_RUNTIME_LIBS) $(BYTECCLIBS)
+runtime/ocamlruni$(EXE): runtime/prims.$(O) runtime/libcamlruni.$(A) $(MMTK_LIB)
+	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlruni.$(A) $(INSTRUMENTED_RUNTIME_LIBS) $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/libcamlruni.$(A): $(libcamlruni_OBJECTS)
 	$(V_MKLIB)$(call MKLIB,$@, $^)

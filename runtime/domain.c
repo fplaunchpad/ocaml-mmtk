@@ -53,6 +53,7 @@ typedef cpuset_t cpu_set_t;
 #include "caml/debugger.h"
 #include "caml/domain.h"
 #include "caml/domain_state.h"
+#include "caml/mmtk.h"
 #include "caml/runtime_events.h"
 #include "caml/fail.h"
 #include "caml/fiber.h"
@@ -1001,6 +1002,13 @@ static void domain_create(uintnat initial_minor_heap_wsize,
   domain_state->trap_sp_off = 1;
   domain_state->trap_barrier_off = 0;
   domain_state->trap_barrier_block = -1;
+#endif
+
+#ifndef NATIVE_CODE
+  /* MMTk: bind this domain as a mutator now that its state is fully
+     initialised (minor/shared heap, stacks, roots). Enables the MMTk
+     allocation path for the bytecode runtime. */
+  caml_mmtk_domain_init(domain_state);
 #endif
 
   activate_parked_domain(d);

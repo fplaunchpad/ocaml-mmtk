@@ -244,6 +244,34 @@ enum caml_alloc_small_flags {
 #define Alloc_small(result, wosize, tag, GC) \
   Alloc_small_with_reserved(result, wosize, tag, GC, (uintnat)0)
 
+#ifndef NATIVE_CODE
+/* MMTk bytecode bring-up: route small allocations through MMTk once enabled.
+   Until caml_mmtk_enabled is set (early runtime bootstrap), fall back to the
+   stock minor-heap bump path. See runtime/mmtk.c. */
+extern int caml_mmtk_enabled;
+extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
+                                   reserved_t reserved);
+#undef Alloc_small_with_reserved
+#define Alloc_small_with_reserved(result, wosize, tag, GC, reserved) do{    \
+                                                CAMLassert ((wosize) >= 1); \
+                                          CAMLassert ((tag_t) (tag) < 256); \
+                                 CAMLassert ((wosize) <= Max_young_wosize); \
+  if (caml_mmtk_enabled) {                                                  \
+    (result) = caml_mmtk_alloc_small((wosize), (tag), (reserved));          \
+  } else {                                                                  \
+    caml_domain_state* dom_st = Caml_state;                                 \
+    dom_st->young_ptr -=  Whsize_wosize(wosize);                            \
+    if (Caml_check_gc_interrupt(dom_st)) {                                  \
+      GC(dom_st, wosize);                                                   \
+    }                                                                       \
+    Hd_hp (dom_st->young_ptr) =                                             \
+      Make_header_with_reserved((wosize), (tag), 0, (reserved));            \
+    (result) = Val_hp (dom_st->young_ptr);                                  \
+  }                                                                         \
+  DEBUG_clear ((result), (wosize));                                         \
+}while(0)
+#endif /* NATIVE_CODE */
+
 #endif /* CAML_INTERNALS */
 
 struct caml__roots_block {

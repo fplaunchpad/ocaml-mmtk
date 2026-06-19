@@ -205,5 +205,10 @@ DOMAIN_STATE(struct caml_exception_context*, external_raise)
 DOMAIN_STATE(struct memprof_domain_s *, memprof)
 DOMAIN_STATE(value *, memprof_young_trigger)
 
+DOMAIN_STATE(void*, mmtk_mutator)
+/* MMTk: opaque MMTk_Mutator handle for this domain (NULL until bound by
+   caml_mmtk_domain_init). Appended near the end so it does not shift the
+   offsets of fields baked into native codegen (young_ptr/young_limit/...). */
+
 DOMAIN_STATE(extra_params_area, extra_params)
 /* This member must occur last, because it is an array, not a scalar */

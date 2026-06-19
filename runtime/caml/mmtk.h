@@ -1,0 +1,49 @@
+/**************************************************************************/
+/*                                                                        */
+/*                MMTk garbage collector glue (bytecode)                  */
+/*                                                                        */
+/**************************************************************************/
+
+/* C glue between the OCaml bytecode runtime and the in-tree MMTk binding
+ * (gc/mmtk). This header is only meaningful for the bytecode runtime; the
+ * allocation redirection in memory.h/memory.c is guarded by #ifndef
+ * NATIVE_CODE, so none of this is referenced by the native runtime. */
+
+#ifndef CAML_MMTK_H
+#define CAML_MMTK_H
+
+#ifdef CAML_INTERNALS
+#ifndef NATIVE_CODE
+
+#include "config.h"
+#include "mlvalues.h"
+
+/* Set to 1 once MMTk is initialised and the current domain's mutator is bound.
+ * The allocation macros consult this to decide MMTk vs. the stock minor heap;
+ * it stays 0 during early runtime bootstrap (before MMTk is ready). */
+extern int caml_mmtk_enabled;
+
+/* Initialise MMTk once for the process. Reads the plan from the MMTK_PLAN
+ * environment variable (default "NoGC") and the heap size from
+ * MMTK_HEAP_SIZE_MB (default 1024 MiB). Idempotent. */
+extern void caml_mmtk_init(void);
+
+/* Bind the given domain as an MMTk mutator and store the handle in
+ * dom->mmtk_mutator. Calls caml_mmtk_init() first if needed, then enables the
+ * MMTk allocation path. */
+extern void caml_mmtk_domain_init(caml_domain_state *dom);
+
+/* Allocate a small block through MMTk and write its header. Returns the OCaml
+ * value (pointer to field 0). Mirrors the result of Alloc_small. */
+extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
+                                   reserved_t reserved);
+
+/* Allocate a (possibly large) block through MMTk; replacement for the body of
+ * alloc_shr. Returns the OCaml value. */
+extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
+                                 reserved_t reserved);
+
+#endif /* NATIVE_CODE */
+#endif /* CAML_INTERNALS */
+
+#endif /* CAML_MMTK_H */

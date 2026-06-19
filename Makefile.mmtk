@@ -1,0 +1,38 @@
+#**************************************************************************
+#*                                                                        *
+#*                     MMTk in-tree binding build glue                    *
+#*                                                                        *
+#**************************************************************************
+
+# Build glue for the in-tree MMTk binding (gc/mmtk). The binding is a Rust
+# Cargo workspace producing a staticlib (libmmtk_ocaml.a) that is linked into
+# the bytecode runtime. This is the bytecode bring-up integration (M0/M1);
+# native-code integration comes later.
+#
+# This fragment is included by the top-level Makefile after Makefile.common.
+
+MMTK_DIR   = $(ROOTDIR)/gc/mmtk
+MMTK_LIB   = $(MMTK_DIR)/target/release/libmmtk_ocaml.a
+MMTK_CARGO ?= cargo
+
+# Native libraries the Rust staticlib transitively depends on. Obtained via:
+#   cargo rustc --release -p mmtk-ocaml --lib -- --print native-static-libs
+# TODO(M4/packaging): derive these at ./configure time instead of hardcoding
+# per-OS here.
+MMTK_UNAME_S := $(shell uname -s)
+ifeq ($(MMTK_UNAME_S),Darwin)
+  MMTK_NATIVE_LIBS = -lobjc -framework IOKit -framework CoreFoundation -liconv
+else
+  MMTK_NATIVE_LIBS = -ldl -lpthread -lm
+endif
+
+# Everything to append to a bytecode-runtime link line so the binding resolves.
+MMTK_LINK = $(MMTK_LIB) $(MMTK_NATIVE_LIBS)
+
+# Build the staticlib via Cargo. Declared PHONY so Cargo's own incremental
+# build decides whether a rebuild is needed (cheap when up to date).
+.PHONY: mmtk-lib
+mmtk-lib:
+	$(MMTK_CARGO) build --release --manifest-path $(MMTK_DIR)/Cargo.toml
+
+$(MMTK_LIB): mmtk-lib
