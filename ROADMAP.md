@@ -40,7 +40,14 @@ movement for testing).
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
 
-**Current focus:** native-code integration (M5).
+**Current focus:** re-architect allocation to **vanilla minor heap + MMTk major
+heap** (bytecode first, MarkSweep major) — keep OCaml's stock nursery + minor GC,
+redirect *promotion* (`alloc_shared`, minor_gc.c) to MMTk, re-enable the stock
+write barrier, disable the stock major GC. This replaces the bytecode all-MMTk
+bypass and is the route to native (the inlined native fast-path keeps bumping the
+stock nursery). Key hazard: promotion must not trigger an MMTk GC inside the
+minor-GC STW (nested STW). Exact choke points + plan in `gc/mmtk/NOTES.md`. Then
+native (M5) becomes mostly build/link + native-root verification.
 
 Weak/ephemeron + finaliser processing is parked. Note the current constraint:
 the conservative interim (rooting `ephe_info`) keeps them alive safely **only

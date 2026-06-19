@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Vanilla minor heap + MMTk major heap (chosen architecture)
+
+*2026-06-20*
+
+Decision: keep OCaml's **stock minor heap + minor GC**, make **MMTk the major
+heap**. Validate on bytecode first, with **MarkSweep** as the major plan (non-moving
+→ no minor→major dangling, simplest). This both replaces the bytecode all-MMTk
+bypass and is the route to native (the inlined native fast-path keeps bumping the
+stock nursery; no compiler changes).
+
+**Exact choke points (all in shared files, so bytecode + native get it):**
+1. **Promotion → MMTk**: `alloc_shared` (minor_gc.c:152) is the single function
+   the minor GC uses to allocate the promoted copy (currently
+   `caml_shared_try_alloc` on the stock major heap). Redirect to
+   `caml_mmtk_alloc_shr` under `caml_mmtk_enabled`.
+2. **Young allocation stays stock**: revert/gate the `Alloc_small` all-MMTk
+   redirect (memory.h) so it bumps `young_ptr` again; re-enable the stock minor
+   GC (M1 disabled it).
+3. **Direct major alloc → MMTk**: `caml_alloc_shr` already routes to MMTk.
+4. **Write barrier**: re-enable OCaml's stock one (currently disabled under MMTk)
+   — it maintains the minor remembered set (`major_ref`) for MMTk(major)→minor
+   pointers, which the minor GC scans as roots.
+5. **Disable the stock major GC** (mark/sweep slices); route `Gc.*`.
+
+**THE hazard — nested stop-the-world.** Minor GC runs inside an OCaml STW
+(`caml_empty_minor_heaps` via `caml_try_run_on_all_domains`). If a promotion
+(`alloc_shared` → MMTk) finds the MMTk heap full, `mmtk_ocaml_alloc` would trigger
+an MMTk GC (`block_for_gc`) *inside* the minor-GC STW → nested STW → the same
+MMTk-STW-vs-OCaml-STW deadlock class fixed for multi-domain. Promotion must
+**allocate without triggering a collection**, and any needed MMTk GC must run
+*after* the minor GC (at the next safepoint). Plan: reserve MMTk headroom and/or
+trigger an MMTk GC *before* a minor GC when MMTk is near-full (minor-before-major
+ordering), so promotion never collects. This coordination is the main work.
+
+**Test:** revert bytecode to stock-minor, run the existing battery; old→young and
+churn must survive; compare against the all-MMTk mode. Then native.
+
 ## Native-code integration (M5) — strategy & plan
 
 *2026-06-19*
