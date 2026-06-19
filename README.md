@@ -12,6 +12,8 @@ switch.
   (not vendored).
 - The upstream OCaml README is preserved at
   [`README.upstream.adoc`](README.upstream.adoc).
+- **Plan & status: [`ROADMAP.md`](ROADMAP.md)** — milestones, GC-plan tiers, and
+  the full workstream list (start here to continue the project).
 - Design background and rationale: [`fork-handoff.md`](fork-handoff.md).
 - Design notes & deferred investigations: [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md).
 
