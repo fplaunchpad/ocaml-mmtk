@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Weak arrays & ephemerons CRASH under MMTk (high priority, workstream E)
+
+*2026-06-19*
+
+**Confirmed bug, not just a missing feature.** A program that creates weak
+arrays / ephemerons and later triggers ephemeron processing (e.g. `Gc.full_major`,
+or enough GC activity) **segfaults** under MMTk (MarkSweep and Immix), while it
+runs fine on the stock GC. lldb pins the fault in `Ephe_key` (`weak.h:84`)
+reading a key field of a garbage ephemeron pointer (`EXC_BAD_ACCESS`).
+
+Root cause: OCaml links every weak array / ephemeron into per-domain lists
+`domain->ephe_info->{live,todo}`, walked by the stock major GC (`major_gc.c`).
+Our MMTk integration neither scans those lists as roots nor processes them, and
+ephemerons/weak arrays are `Abstract_tag` (≥ NO_SCAN) so `scan_ocaml_object`
+skips them. So an ephemeron/weak array reachable *only* via `ephe_info` is
+treated as dead, collected (or moved) by MMTk, and left dangling in the list —
+any later walk (`Gc.full_major`, the next ephemeron pass) dereferences garbage.
+
+This affects a lot of real code: `Weak`, `Ephemeron`, weak hash tables
+(`Weak.Make`, `Ephemeron.K1.Make`), memo caches, etc. So it's a priority item.
+
+Fix options:
+- *Interim (conservative, stops the crash):* scan `ephe_info->live`/`todo` as
+  roots and trace the ephemeron link chain + blocks, keeping weak arrays /
+  ephemerons alive and their links updated under moving. Weak refs would then
+  never clear (like our finaliser handling keeps finalisable values alive via
+  `do_final=1`) — semantically loose but memory-safe.
+- *Proper (workstream E):* implement MMTk weak-reference / finalizable
+  processing — register ephemerons with MMTk, clear dead keys/data, run
+  finalisers — replacing the stock `major_gc.c` ephemeron pass.
+
+Status of other runtime features probed at the same time (MarkSweep + Immix):
+`Lazy` works; `Gc.full_major`/`minor`/`stat`/`allocated_bytes` work *in
+isolation*; finalisers don't run yet (`do_final=1` keeps values alive); weak
+refs read as "still alive" (not cleared). Only the weak/ephemeron-list dangling
+above actually crashes.
+
 ## Parallel collection — verified (correct, and marking scales ~8x)
 
 *2026-06-19*

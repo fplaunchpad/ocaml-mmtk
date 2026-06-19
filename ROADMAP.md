@@ -130,14 +130,20 @@ in mmtk-core, or decide to track/contribute upstream.
 
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
-- **Lazy values** (`Lazy`, forcing, `Obj.*` shape changes).
-- **Finalisers** — both *first-class* (`Gc.finalise`) and *last-ditch*
-  (`Gc.finalise_last`); MMTk has a finalizable-processing path we currently
-  bypass (root scan passes `do_final=1` to keep finalisable values alive).
-- **Weak arrays** and **ephemerons** (`Weak`, `Ephemeron`) — need MMTk's weak
-  reference processing wired to OCaml's weak/ephemeron tables.
-  Currently none of these are integrated; they're kept alive conservatively or
-  unsupported. Each needs MMTk's corresponding VM hook implemented.
+- **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) —
+  **PRIORITY: currently crash** (segfault), not just a semantic gap. OCaml links
+  them into `domain->ephe_info->{live,todo}`, which MMTk neither roots nor
+  processes, so they dangle. See `gc/mmtk/NOTES.md` for the diagnosis and fix
+  options (interim: root the ephe lists to keep them alive; proper: MMTk
+  weak-reference processing). Probe: `features.ml`.
+- **Finalisers** — first-class (`Gc.finalise`) and last-ditch
+  (`Gc.finalise_last`). Don't run yet — the root scan passes `do_final=1` to keep
+  finalisable values alive. Wire MMTk's finalizable processing.
+- **Lazy values** — work today (ordinary mutable blocks; no special GC support
+  needed). Verified under MarkSweep + Immix.
+- **`Gc` module** (`full_major`/`minor`/`stat`/`compact`/`allocated_bytes`) —
+  work in isolation but operate on the bypassed stock heap structures; audit for
+  correctness/meaning under MMTk (e.g. `Gc.stat` reports stock counters).
 
 ### F. Native-code integration
 The hard part deferred from day one: native code inlines a bump-pointer
