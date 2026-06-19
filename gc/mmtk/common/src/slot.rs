@@ -11,6 +11,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use mmtk::memory_manager;
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::slot::{MemorySlice, Slot};
 
@@ -65,9 +66,24 @@ impl Slot for FieldSlot {
     fn load(&self) -> Option<ObjectReference> {
         let raw = self.raw_value();
         if raw & 1 == 0 && raw != 0 {
-            // LSB=0, non-null → word-aligned heap pointer
-            unsafe {
-                Some(ObjectReference::from_raw_address_unchecked(Address::from_usize(raw)))
+            // LSB=0, non-null → word-aligned heap pointer.
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(raw)) };
+            // Only objects MMTk actually manages are references it can trace.
+            // OCaml has pointers that live outside any MMTk space — atoms (static
+            // zero-size blocks in caml_atom_table), code addresses, and the few
+            // objects allocated before MMTk was enabled. Tracing those would make
+            // mmtk-core panic, so we filter them out here.
+            //
+            // Bring-up assumption: such foreign objects are leaves w.r.t. the MMTk
+            // heap (they don't hold the sole reference to a live MMTk object). This
+            // holds because MMTk is enabled very early (in domain_create), so all
+            // real program data is MMTk-allocated.
+            // TODO(M3): revisit for moving plans / if foreign->MMTk edges appear.
+            if memory_manager::is_in_mmtk_spaces(obj) {
+                Some(obj)
+            } else {
+                None
             }
         } else {
             None // tagged integer (LSB=1) or null

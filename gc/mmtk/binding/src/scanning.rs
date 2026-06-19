@@ -1,13 +1,18 @@
 //! VMScanning for OCaml 5.x — root enumeration and object tracing.
 //!
-//! Root enumeration (M2):
-//!   OCaml 5.x provides `caml_do_roots(scanning_action f, flags, void* fdata,
-//!   caml_domain_state* domain, int do_final)`.  The callback is
-//!   `void f(void* fdata, value v, volatile value* slot_addr)`.
-//!   We collect every `slot_addr` as a FieldSlot and pass to MMTk.
+//! Roots mirror what OCaml's own major-GC mark phase scans (major_gc.c):
+//!   - per domain: `caml_do_roots` (local roots, the value stack, the
+//!     scan-roots hook, and finalisable values);
+//!   - once globally: `caml_scan_global_roots` (caml_globals[] and registered
+//!     C global roots).
+//! Both take a `scanning_action` callback `(void* data, value v, value* slot)`;
+//! we turn each `slot` address into a FieldSlot (which filters immediates) and
+//! hand the batch to MMTk via `create_process_roots_work`.
+
+use std::ffi::c_void;
 
 use mmtk::util::opaque_pointer::VMWorkerThread;
-use mmtk::util::ObjectReference;
+use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::SlotVisitor;
 use mmtk::vm::{RootsWorkFactory, Scanning};
 use mmtk::Mutator;
@@ -17,30 +22,72 @@ use mmtk_ocaml_common::slot::FieldSlot;
 
 use crate::OCamlVM;
 
+// OCaml runtime entry points (resolved when the binding's staticlib is linked
+// into the bytecode runtime). `caml_do_roots` and `caml_scan_global_roots` are
+// CAMLexport functions in runtime/roots.c and runtime/globroots.c.
+type ScanningAction = extern "C" fn(*mut c_void, usize, *mut usize);
+extern "C" {
+    fn caml_do_roots(
+        f: ScanningAction,
+        flags: i32,
+        data: *mut c_void,
+        domain: *mut c_void,
+        do_final_val: i32,
+    );
+    fn caml_scan_global_roots(f: ScanningAction, data: *mut c_void);
+}
+
+/// Callback handed to `caml_do_roots`/`caml_scan_global_roots`. `data` points to
+/// the `Vec<FieldSlot>` being filled; `slot` is the address of a root value.
+extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) {
+    let buf = unsafe { &mut *(data as *mut Vec<FieldSlot>) };
+    buf.push(FieldSlot::from_address(Address::from_mut_ptr(slot)));
+}
+
 pub struct VMScanning;
 
 impl Scanning<OCamlVM> for VMScanning {
-    /// Enumerate all GC roots for a single OCaml 5.x domain.
+    /// Enumerate the roots of a single OCaml domain (the parked mutator).
     fn scan_roots_in_mutator_thread(
         _tls: VMWorkerThread,
-        _mutator: &'static mut Mutator<OCamlVM>,
-        _factory: impl RootsWorkFactory<FieldSlot>,
+        mutator: &'static mut Mutator<OCamlVM>,
+        mut factory: impl RootsWorkFactory<FieldSlot>,
     ) {
-        todo!(
-            "OCaml 5.x scan_roots_in_mutator_thread: \
-             call caml_do_roots per domain with a FieldSlot-collecting callback"
-        )
+        // The mutator's tls is the address of this domain's caml_domain_state,
+        // which is exactly what caml_do_roots wants as its `domain` argument.
+        let domain = mutator.mutator_tls.0 .0.to_address().to_mut_ptr::<c_void>();
+
+        let mut buf: Vec<FieldSlot> = Vec::new();
+        unsafe {
+            caml_do_roots(
+                collect_root_slot,
+                0, // darken_scanning_flags: scan everything
+                (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>(),
+                domain,
+                1, // keep finalisable values alive (we don't run finalisers yet)
+            );
+        }
+        if !buf.is_empty() {
+            factory.create_process_roots_work(buf);
+        }
     }
 
-    /// Enumerate global roots not owned by any specific domain.
+    /// Enumerate program-wide roots not owned by a domain: caml_globals[] and
+    /// registered C global roots.
     fn scan_vm_specific_roots(
         _tls: VMWorkerThread,
-        _factory: impl RootsWorkFactory<FieldSlot>,
+        mut factory: impl RootsWorkFactory<FieldSlot>,
     ) {
-        todo!(
-            "OCaml 5.x scan_vm_specific_roots: \
-             enumerate caml_global_roots and any shared heap roots"
-        )
+        let mut buf: Vec<FieldSlot> = Vec::new();
+        unsafe {
+            caml_scan_global_roots(
+                collect_root_slot,
+                (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>(),
+            );
+        }
+        if !buf.is_empty() {
+            factory.create_process_roots_work(buf);
+        }
     }
 
     /// Trace all pointer fields of a live OCaml heap block.

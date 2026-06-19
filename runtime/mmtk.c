@@ -29,6 +29,10 @@
 int caml_mmtk_enabled = 0;
 
 static int caml_mmtk_initialised = 0;
+/* Whether the active plan collects (anything but NoGC). NoGC must NOT start
+   collection: forcing a GC it cannot perform would spin/fail. */
+static int caml_mmtk_collects = 0;
+static int caml_mmtk_collection_started = 0;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
  * space. Conservative: smaller than the smallest line/block in collecting
@@ -55,6 +59,7 @@ void caml_mmtk_init(void)
 
   mmtk_ocaml_init(heap_mb * 1024 * 1024, plan);
   caml_mmtk_initialised = 1;
+  caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
 
   if (getenv("MMTK_VERBOSE") != NULL)
     fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB\n", plan, heap_mb);
@@ -77,6 +82,12 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   if (!caml_mmtk_wanted()) return;  /* stock GC unless explicitly enabled */
   caml_mmtk_init();
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
+  /* For collecting plans, spawn the GC worker threads once (must happen before
+     an allocation can trigger a collection). */
+  if (caml_mmtk_collects && !caml_mmtk_collection_started) {
+    mmtk_ocaml_initialize_collection((uintptr_t)dom);
+    caml_mmtk_collection_started = 1;
+  }
   caml_mmtk_enabled = 1;
 }
 

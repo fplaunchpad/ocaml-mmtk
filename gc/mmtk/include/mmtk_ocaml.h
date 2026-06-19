@@ -59,19 +59,6 @@ void* mmtk_ocaml_alloc(MMTk_Mutator mutator, size_t wosize, size_t tag, int sema
 
 void mmtk_ocaml_handle_user_collection_request(uintptr_t domain_state_addr);
 
-/* ── Safepoint protocol (called from patched caml_handle_gc_interrupt) ─ */
-
-/** True if a GC cycle is pending.  Polled from the domain interrupt handler. */
-bool mmtk_ocaml_wants_to_stop(void);
-
-/**
- * Called by each domain when it reaches the GC interrupt safepoint.
- * Spins until the GC worker resumes all domains.
- *
- * @param num_domains  Total live domain count (for barrier coordination).
- */
-void mmtk_ocaml_safepoint_reached(size_t num_domains);
-
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
