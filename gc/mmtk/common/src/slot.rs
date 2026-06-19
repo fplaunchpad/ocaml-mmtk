@@ -15,6 +15,8 @@ use mmtk::memory_manager;
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::slot::{MemorySlice, Slot};
 
+use crate::header::{tag_of, wosize_of, TAG_INFIX, WORD_SIZE};
+
 // ── FieldSlot ─────────────────────────────────────────────────────────────
 
 /// A slot (address of a memory location) that holds an OCaml value.
@@ -65,29 +67,35 @@ impl Slot for FieldSlot {
     /// Return the heap object stored in this slot, or None if it holds an immediate.
     fn load(&self) -> Option<ObjectReference> {
         let raw = self.raw_value();
-        if raw & 1 == 0 && raw != 0 {
-            // LSB=0, non-null → word-aligned heap pointer.
-            let obj =
-                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(raw)) };
-            // Only objects MMTk actually manages are references it can trace.
-            // OCaml has pointers that live outside any MMTk space — atoms (static
-            // zero-size blocks in caml_atom_table), code addresses, and the few
-            // objects allocated before MMTk was enabled. Tracing those would make
-            // mmtk-core panic, so we filter them out here.
-            //
-            // Bring-up assumption: such foreign objects are leaves w.r.t. the MMTk
-            // heap (they don't hold the sole reference to a live MMTk object). This
-            // holds because MMTk is enabled very early (in domain_create), so all
-            // real program data is MMTk-allocated.
-            // TODO(M3): revisit for moving plans / if foreign->MMTk edges appear.
-            if memory_manager::is_in_mmtk_spaces(obj) {
-                Some(obj)
-            } else {
-                None
-            }
-        } else {
-            None // tagged integer (LSB=1) or null
+        if raw & 1 != 0 || raw == 0 {
+            return None; // tagged integer (LSB=1) or null
         }
+        let addr = unsafe { Address::from_usize(raw) };
+        let obj = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
+
+        // Only objects MMTk actually manages are references it can trace. OCaml
+        // has pointers outside any MMTk space — atoms (static zero-size blocks in
+        // caml_atom_table), code addresses, and objects allocated before MMTk was
+        // enabled. Tracing those would make mmtk-core panic, so filter them out.
+        if !memory_manager::is_in_mmtk_spaces(obj) {
+            // Atoms (static zero-size blocks), code addresses, etc. live outside
+            // MMTk spaces and are not traceable. They are true leaves now that
+            // unmarshalled data is MMTk-allocated (see runtime/intern.c).
+            return None;
+        }
+
+        // Infix pointers point *into* a closure block (at an Infix_tag header),
+        // not at an object start. The GC must mark/trace the PARENT closure, not
+        // the infix object. The infix header's size field is the offset, in
+        // words, from the parent closure to the infix object (verified GC paper,
+        // Fig. 3): parent = infix - wosize(infix_header) * WORD_SIZE.
+        let header = unsafe { (addr - WORD_SIZE).load::<usize>() };
+        if tag_of(header) == TAG_INFIX {
+            let parent = addr - wosize_of(header) * WORD_SIZE;
+            return Some(unsafe { ObjectReference::from_raw_address_unchecked(parent) });
+        }
+
+        Some(obj)
     }
 
     /// Overwrite the slot with a (possibly relocated) object reference.

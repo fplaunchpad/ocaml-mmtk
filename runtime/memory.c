@@ -187,6 +187,15 @@ Caml_inline void write_barrier(
   /* HACK: can't assert when get old C-api style pointers
     CAMLassert (Is_block(obj)); */
 
+#ifndef NATIVE_CODE
+  /* Under MMTk the heap is managed by MMTk, not OCaml's generational/incremental
+     major GC. OCaml's write barrier (the SATB deletion barrier caml_darken on
+     the old value, and the minor remembered-set update) operates on OCaml GC
+     state we have bypassed and must not run. MarkSweep needs no write barrier;
+     moving plans will install their own via the MMTk barrier API later. */
+  if (caml_mmtk_enabled) return;
+#endif
+
   if (!Is_young(obj)) {
 
     if (Is_block(old_val)) {

@@ -251,13 +251,30 @@ enum caml_alloc_small_flags {
 extern int caml_mmtk_enabled;
 extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                    reserved_t reserved);
+/* An MMTk allocation may stop-the-world and scan roots at any point. In
+   contexts that keep live values in registers/C-locals not yet on the OCaml
+   stack (the bytecode interpreter keeps accu/env there and an unpublished sp),
+   those must be made scannable before the allocation and restored after.
+   interp.c overrides these to Setup_for_gc / Restore_after_gc; everywhere else
+   (C callers using CAMLparam roots, with sp already published) they are no-ops. */
+#ifndef CAML_MMTK_SETUP_ROOTS
+#define CAML_MMTK_SETUP_ROOTS    ((void)0)
+#define CAML_MMTK_RESTORE_ROOTS  ((void)0)
+#endif
 #undef Alloc_small_with_reserved
 #define Alloc_small_with_reserved(result, wosize, tag, GC, reserved) do{    \
                                                 CAMLassert ((wosize) >= 1); \
                                           CAMLassert ((tag_t) (tag) < 256); \
                                  CAMLassert ((wosize) <= Max_young_wosize); \
   if (caml_mmtk_enabled) {                                                  \
-    (result) = caml_mmtk_alloc_small((wosize), (tag), (reserved));          \
+    /* Publish interp roots, allocate into a temp (the allocation may GC),   \
+       restore roots, THEN assign result. The temp is essential: when result \
+       is `accu`/`env`, Restore_after_gc would otherwise clobber it. */      \
+    value caml_mmtk_blk;                                                     \
+    CAML_MMTK_SETUP_ROOTS;                                                   \
+    caml_mmtk_blk = caml_mmtk_alloc_small((wosize), (tag), (reserved));      \
+    CAML_MMTK_RESTORE_ROOTS;                                                 \
+    (result) = caml_mmtk_blk;                                               \
   } else {                                                                  \
     caml_domain_state* dom_st = Caml_state;                                 \
     dom_st->young_ptr -=  Whsize_wosize(wosize);                            \
@@ -267,8 +284,11 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
     Hd_hp (dom_st->young_ptr) =                                             \
       Make_header_with_reserved((wosize), (tag), 0, (reserved));            \
     (result) = Val_hp (dom_st->young_ptr);                                  \
+    /* DEBUG_clear asserts the fresh cell holds the minor-heap poison       \
+       (Debug_free_minor); only the stock minor heap maintains that. MMTk   \
+       cells are not poisoned, so DEBUG_clear is stock-path only. */         \
+    DEBUG_clear ((result), (wosize));                                       \
   }                                                                         \
-  DEBUG_clear ((result), (wosize));                                         \
 }while(0)
 #endif /* NATIVE_CODE */
 

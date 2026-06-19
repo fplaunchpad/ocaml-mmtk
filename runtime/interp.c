@@ -78,6 +78,19 @@ sp is a local copy of the global variable Caml_state->current_stack->sp. */
     domain_state->current_stack->sp = sp; }
 #define Restore_after_gc \
   { sp = domain_state->current_stack->sp; accu = sp[0]; env = sp[1]; sp += 3; }
+/* MMTk can collect inside any allocation, so the redirected Alloc_small must
+   publish the interpreter roots (accu/env/sp) around the allocation, exactly
+   like the stock GC slow path does. These hooks (no-ops outside interp.c) make
+   the shared Alloc_small macro do that here. See runtime/caml/memory.h. */
+#undef CAML_MMTK_SETUP_ROOTS
+#undef CAML_MMTK_RESTORE_ROOTS
+#define CAML_MMTK_SETUP_ROOTS   Setup_for_gc
+#define CAML_MMTK_RESTORE_ROOTS Restore_after_gc
+/* Unlike the stock runtime (where caml_alloc_shr never triggers a GC), an MMTk
+   caml_alloc_shr can stop-the-world. Wrap the interpreter's direct shr calls so
+   accu/env and the stack pointer are published around them when MMTk is on. */
+#define Mmtk_shr_enter do { if (caml_mmtk_enabled) Setup_for_gc; } while (0)
+#define Mmtk_shr_leave do { if (caml_mmtk_enabled) Restore_after_gc; } while (0)
 /* Do call asynchronous callbacks from allocation functions */
 #define Enter_gc(dom_st, wosize) do {                            \
     Setup_for_gc;                                                \
@@ -645,9 +658,12 @@ value caml_bytecode_interpreter(code_t prog, asize_t prog_size,
         for (int i = 0; i < nvars; i++) Field(accu, i + 2) = sp[i];
       } else {
         /* PR#6385: must allocate in major heap */
-        /* caml_alloc_shr and caml_initialize never trigger a GC,
-           so no need to Setup_for_gc */
-        accu = caml_alloc_shr(2 + nvars, Closure_tag);
+        /* Under MMTk, caml_alloc_shr can stop-the-world, so publish roots
+           (Mmtk_shr_*); capture into a temp because Restore reassigns accu. */
+        Mmtk_shr_enter;
+        { value blk = caml_alloc_shr(2 + nvars, Closure_tag);
+          Mmtk_shr_leave;
+          accu = blk; }
         for (int i = 0; i < nvars; i++)
           caml_initialize(&Field(accu, i + 2), sp[i]);
       }
@@ -673,9 +689,12 @@ value caml_bytecode_interpreter(code_t prog, asize_t prog_size,
         for (int i = 0; i < nvars; i++, p++) *p = sp[i];
       } else {
         /* PR#6385: must allocate in major heap */
-        /* caml_alloc_shr and caml_initialize never trigger a GC,
-           so no need to Setup_for_gc */
-        accu = caml_alloc_shr(blksize, Closure_tag);
+        /* Under MMTk, caml_alloc_shr can stop-the-world, so publish roots
+           (Mmtk_shr_*); capture into a temp because Restore reassigns accu. */
+        Mmtk_shr_enter;
+        { value blk = caml_alloc_shr(blksize, Closure_tag);
+          Mmtk_shr_leave;
+          accu = blk; }
         p = &Field(accu, envofs);
         for (int i = 0; i < nvars; i++, p++) caml_initialize(p, sp[i]);
       }
@@ -767,7 +786,9 @@ value caml_bytecode_interpreter(code_t prog, asize_t prog_size,
         Field(block, 0) = accu;
         for (mlsize_t i = 1; i < wosize; i++) Field(block, i) = *sp++;
       } else {
+        Mmtk_shr_enter;
         block = caml_alloc_shr(wosize, tag);
+        Mmtk_shr_leave;
         caml_initialize(&Field(block, 0), accu);
         for (mlsize_t i = 1; i < wosize; i++)
           caml_initialize(&Field(block, i), *sp++);
@@ -810,7 +831,9 @@ value caml_bytecode_interpreter(code_t prog, asize_t prog_size,
       if (size <= Max_young_wosize / Double_wosize) {
         Alloc_small(block, size * Double_wosize, Double_array_tag, Enter_gc);
       } else {
+        Mmtk_shr_enter;
         block = caml_alloc_shr(size * Double_wosize, Double_array_tag);
+        Mmtk_shr_leave;
       }
       Store_double_flat_field(block, 0, Double_val(accu));
       for (mlsize_t i = 1; i < size; i++){

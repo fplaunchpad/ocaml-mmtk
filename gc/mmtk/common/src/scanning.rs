@@ -43,14 +43,21 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
         }
 
         TAG_CLOSURE => {
-            // Field 0 is a raw code pointer (address into .text section).
-            // It is *not* a GC root and must not be treated as one.
-            // Scan fields 1..wosize (the closure environment).
+            // OCaml closure layout (runtime/caml/mlvalues.h):
+            //   field 0      : code pointer (raw, not a value)
+            //   field 1      : closinfo (packed: arity in the top bits, and the
+            //                  word offset to the environment; LSB=1 so it reads
+            //                  as an immediate)
+            //   fields 2..   : for mutually-recursive / multi-arity closures,
+            //                  additional code/closinfo pairs and infix headers
+            //   [start_env..]: the actual captured environment (the only values)
             //
-            // TODO: multi-entry closures (arity > 1) have an arity word and
-            // additional code-pointer slots interspersed — audit once we have
-            // closures in benchmarks.
-            for i in 1..wosize {
+            // Only the environment holds GC pointers, so scan exactly
+            // [start_env, wosize). Everything before it is code/closinfo/infix.
+            let closinfo = unsafe { (base + WORD_SIZE).load::<usize>() };
+            // Start_env_closinfo(info) = (info << 8) >> 9   (see mlvalues.h)
+            let start_env = (closinfo << 8) >> 9;
+            for i in start_env..wosize {
                 let slot_addr = base + i * WORD_SIZE;
                 slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
             }

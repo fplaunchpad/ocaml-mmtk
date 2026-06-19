@@ -31,6 +31,7 @@
 #include "caml/intext.h"
 #include "caml/io.h"
 #include "caml/memory.h"
+#include "caml/mmtk.h"
 #include "caml/memprof.h"
 #include "caml/mlvalues.h"
 #include "caml/misc.h"
@@ -455,7 +456,15 @@ static void intern_alloc_storage(struct caml_intern_state* s, mlsize_t whsize,
   }
   wosize = Wosize_whsize(whsize);
 
-  if (wosize <= Max_young_wosize && wosize != 0) {
+  if (wosize <= Max_young_wosize && wosize != 0
+#ifndef NATIVE_CODE
+      /* Under MMTk, never use the bulk minor-heap pre-allocation: it packs many
+         sub-objects into one no-scan String_tag block, which MMTk would not
+         trace into. Instead leave intern_dest NULL so each object is allocated
+         individually via MMTk (see intern_alloc_obj). */
+      && !caml_mmtk_enabled
+#endif
+     ) {
     /* don't track bulk allocation in minor heap with statmemprof;
      * individual block allocations are tracked instead */
     Alloc_small(v, wosize, String_tag, Alloc_small_enter_GC_no_track);
@@ -500,6 +509,15 @@ static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
                               CAML_MEMPROF_SRC_MARSHAL);
     s->intern_dest += 1 + wosize;
   } else {
+#ifndef NATIVE_CODE
+    /* Under MMTk, unmarshalled objects must be MMTk-allocated and traceable;
+       otherwise (as with caml_shared_try_alloc) they live outside MMTk spaces,
+       are dropped by the root-scan pointer filter, and everything reachable
+       only through them (e.g. caml_global_data and its globals) is collected. */
+    if (caml_mmtk_enabled) {
+      return caml_mmtk_alloc_shr(wosize, tag, 0);
+    }
+#endif
     p = caml_shared_try_alloc(d->shared_heap, wosize, tag,
                               0 /* no reserved bits */);
     if (p == NULL) {
