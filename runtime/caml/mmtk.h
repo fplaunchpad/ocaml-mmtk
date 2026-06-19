@@ -56,6 +56,11 @@ extern void caml_mmtk_park(void);
  * Conservative interim until proper weak-reference processing exists. */
 extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
                                       caml_domain_state *domain);
+
+/* Generational write barrier: record that `count` value-sized slots at `start`
+ * may now point into the nursery. Self-gated (no-op unless a generational plan
+ * is active). Called from write_barrier, caml_initialize, and array blits. */
+extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 

@@ -24,6 +24,7 @@
 #include "caml/mlvalues.h"
 #include "caml/signals.h"
 #include "caml/runtime_events.h"
+#include "caml/mmtk.h"
 
 static const mlsize_t mlsize_t_max = CAML_UINTNAT_MAX;
 
@@ -751,6 +752,16 @@ CAMLprim value caml_uniform_array_fill(
      implementation of that function for a description of GC
      invariants we need to enforce.*/
   fp = &Field(array, ofs);
+#ifndef NATIVE_CODE
+  if (caml_mmtk_enabled) {
+    /* MMTk owns the heap: do the fill, then remember the whole filled range for
+       generational plans (no-op otherwise). Skips OCaml's bypassed
+       remembered-set / SATB logic below. */
+    for (intnat i = 0; i < len; i++) fp[i] = val;
+    caml_mmtk_region_barrier(fp, len);
+    return Val_unit;
+  }
+#endif
   if (Is_young(array)) {
     for (; len > 0; len--, fp++) *fp = val;
   } else {

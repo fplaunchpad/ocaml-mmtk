@@ -138,25 +138,84 @@ impl Slot for FieldSlot {
     }
 }
 
-// ── UnimplementedMemorySlice ───────────────────────────────────────────────
+// ── OCamlMemorySlice ───────────────────────────────────────────────────────
 
-/// Placeholder for write-barrier memory-slice operations.
+/// A contiguous run of OCaml value-sized slots, used by the region (array-copy)
+/// write barrier of generational plans (GenImmix, StickyImmix). `start` is the
+/// address of the first slot; `count` is the number of value-sized slots.
 ///
-/// Required by the `VMMemorySlice` associated type on `VMBinding`.
-/// Must be implemented to support generational plans (GenImmix, GenCopy)
-/// that use array-copy write barriers.  Panics if called until then.
+/// We use this not only for true array blits but also for scalar field writes
+/// (a 1-slot region) — OCaml's `caml_modify` is given only a field address, not
+/// the containing object, so the object-remembering barrier doesn't fit; the
+/// region barrier remembers the slot itself (matching OCaml's own slot-based
+/// minor remembered set).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UnimplementedMemorySlice;
+pub struct OCamlMemorySlice {
+    start: Address,
+    count: usize,
+}
 
-impl MemorySlice for UnimplementedMemorySlice {
+impl OCamlMemorySlice {
+    #[inline]
+    pub fn from_slots(start: Address, count: usize) -> Self {
+        Self { start, count }
+    }
+}
+
+/// Iterator over the slots of an `OCamlMemorySlice`.
+pub struct OCamlSliceIter {
+    cur: Address,
+    end: Address,
+}
+
+impl Iterator for OCamlSliceIter {
+    type Item = FieldSlot;
+    #[inline]
+    fn next(&mut self) -> Option<FieldSlot> {
+        if self.cur < self.end {
+            let slot = FieldSlot::from_address(self.cur);
+            self.cur += WORD_SIZE;
+            Some(slot)
+        } else {
+            None
+        }
+    }
+}
+
+impl MemorySlice for OCamlMemorySlice {
     type SlotType = FieldSlot;
-    type SlotIterator = std::iter::Empty<FieldSlot>;
+    type SlotIterator = OCamlSliceIter;
 
     fn iter_slots(&self) -> Self::SlotIterator {
-        unimplemented!("MemorySlice::iter_slots — implement for generational GC")
+        OCamlSliceIter {
+            cur: self.start,
+            end: self.start + self.count * WORD_SIZE,
+        }
     }
-    fn object(&self) -> Option<ObjectReference> { unimplemented!() }
-    fn start(&self) -> Address { unimplemented!() }
-    fn bytes(&self) -> usize { unimplemented!() }
-    fn copy(_src: &Self, _tgt: &Self) { unimplemented!() }
+
+    /// Free-floating region (a field range), not a whole object: return None so
+    /// the barrier classifies it by address (`start`).
+    fn object(&self) -> Option<ObjectReference> {
+        None
+    }
+
+    fn start(&self) -> Address {
+        self.start
+    }
+
+    fn bytes(&self) -> usize {
+        self.count * WORD_SIZE
+    }
+
+    fn copy(src: &Self, tgt: &Self) {
+        debug_assert_eq!(src.count, tgt.count, "MemorySlice::copy size mismatch");
+        // Word-wise copy; handles overlap like memmove.
+        unsafe {
+            std::ptr::copy::<usize>(
+                src.start.to_ptr::<usize>(),
+                tgt.start.to_mut_ptr::<usize>(),
+                src.count,
+            );
+        }
+    }
 }

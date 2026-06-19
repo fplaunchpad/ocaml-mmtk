@@ -29,7 +29,7 @@ impl VMBinding for OCamlVM {
     type VMActivePlan    = active_plan::VMActivePlan;
     type VMReferenceGlue = reference_glue::VMReferenceGlue;
     type VMSlot          = mmtk_ocaml_common::slot::FieldSlot;
-    type VMMemorySlice   = mmtk_ocaml_common::slot::UnimplementedMemorySlice;
+    type VMMemorySlice   = mmtk_ocaml_common::slot::OCamlMemorySlice;
 
     // Every OCaml allocation requests WORD_SIZE alignment and offset=0.
     // MIN = MAX = WORD_SIZE: no alignment padding ever needed for copies.

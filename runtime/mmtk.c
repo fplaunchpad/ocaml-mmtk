@@ -36,6 +36,9 @@ static int caml_mmtk_initialised = 0;
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
 static int caml_mmtk_collects = 0;
+/* Whether the active plan is generational (needs the mutator write barrier).
+   Read on every mutable pointer write, so keep it a plain int. */
+static int caml_mmtk_generational = 0;
 static int caml_mmtk_collection_started = 0;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
@@ -44,8 +47,8 @@ static int caml_mmtk_collection_started = 0;
 #define CAML_MMTK_LOS_THRESHOLD (16 * 1024)
 
 /* AllocationSemantics codes shared with the Rust ABI (see api.rs). */
-#define CAML_MMTK_SEM_DEFAULT 0
-#define CAML_MMTK_SEM_LOS     2
+#define CAML_MMTK_SEM_DEFAULT   0
+#define CAML_MMTK_SEM_LOS       2
 
 static void caml_mmtk_report_copied(void);
 
@@ -66,6 +69,9 @@ void caml_mmtk_init(void)
   mmtk_ocaml_init(heap_mb * 1024 * 1024, plan);
   caml_mmtk_initialised = 1;
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
+  caml_mmtk_generational = (strcmp(plan, "GenImmix") == 0
+                           || strcmp(plan, "StickyImmix") == 0
+                           || strcmp(plan, "GenCopy") == 0);
 
   if (getenv("MMTK_VERBOSE") != NULL) {
     fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB\n", plan, heap_mb);
@@ -182,6 +188,18 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
       }
     }
   }
+}
+
+/* Generational write barrier. Records that `count` value-sized slots starting
+   at `start` may now hold pointers into the nursery, so a young collection
+   scans them. Called from caml_modify/write_barrier (count 1, slot-based —
+   OCaml hands a field address, not the object), caml_initialize, and array
+   blits. Self-gated: a no-op unless an MMTk generational plan is active. */
+void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
+{
+  if (caml_mmtk_enabled && caml_mmtk_generational)
+    mmtk_ocaml_region_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
+                              (size_t) count);
 }
 
 /* ── Stop-the-world ──────────────────────────────────────────────────── */

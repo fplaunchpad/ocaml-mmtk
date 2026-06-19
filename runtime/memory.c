@@ -189,11 +189,16 @@ Caml_inline void write_barrier(
 
 #ifndef NATIVE_CODE
   /* Under MMTk the heap is managed by MMTk, not OCaml's generational/incremental
-     major GC. OCaml's write barrier (the SATB deletion barrier caml_darken on
-     the old value, and the minor remembered-set update) operates on OCaml GC
-     state we have bypassed and must not run. MarkSweep needs no write barrier;
-     moving plans will install their own via the MMTk barrier API later. */
-  if (caml_mmtk_enabled) return;
+     major GC. OCaml's own write barrier (the SATB deletion barrier caml_darken
+     on the old value, and the minor remembered-set update) operates on GC state
+     we have bypassed and must not run. Instead, remember the modified slot via
+     MMTk's barrier — needed by MMTk generational plans (GenImmix/StickyImmix),
+     a no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address
+     (for caml_modify, obj is the field pointer and field is 0). */
+  if (caml_mmtk_enabled) {
+    caml_mmtk_region_barrier(Op_val(obj) + field, 1);
+    return;
+  }
 #endif
 
   if (!Is_young(obj)) {
@@ -321,6 +326,14 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
              || *fp == Debug_uninit_minor);
 #endif
   *fp = val;
+#ifndef NATIVE_CODE
+  if (caml_mmtk_enabled) {
+    /* An initialising write into a possibly-mature block; remember the slot for
+       MMTk generational plans (no-op otherwise). */
+    caml_mmtk_region_barrier(fp, 1);
+    return;
+  }
+#endif
   if (!Is_young((value)fp) && Is_block_and_young (val))
     Ref_table_add(&Caml_state->minor_tables->major_ref, fp);
 }

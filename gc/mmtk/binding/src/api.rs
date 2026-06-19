@@ -13,6 +13,7 @@ use mmtk::MMTKBuilder;
 
 use mmtk_ocaml_common::header::{make_header, WORD_SIZE};
 use mmtk_ocaml_common::object_model::OBJECT_REF_OFFSET;
+use mmtk_ocaml_common::slot::OCamlMemorySlice;
 
 use crate::active_plan::{deregister_by_ptr, register_mutator};
 use crate::{mmtk, OCamlVM, SINGLETON};
@@ -130,6 +131,25 @@ pub extern "C" fn mmtk_ocaml_alloc(
     memory_manager::post_alloc::<OCamlVM>(mutator, object, total_bytes, semantics);
 
     obj_ref.to_mut_ptr::<libc::c_void>()
+}
+
+/// Generational write barrier (region form). Records that `count` value-sized
+/// slots starting at `start` may now hold pointers into the nursery, so a young
+/// collection scans them. Used for both scalar field writes (`count == 1`,
+/// remembering the slot — OCaml's `caml_modify` gives a field address, not the
+/// object) and array blits. A no-op for non-generational plans (NoBarrier).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_region_barrier(
+    mutator: *mut libc::c_void,
+    start: usize,
+    count: usize,
+) {
+    let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
+    let start = unsafe { Address::from_usize(start) };
+    let dst = OCamlMemorySlice::from_slots(start, count);
+    // The gen barrier's region path ignores src; pass an empty slice.
+    let src = OCamlMemorySlice::from_slots(start, 0);
+    memory_manager::memory_region_copy_post::<OCamlVM>(mutator, src, dst);
 }
 
 /// Deregister a terminating domain (by its caml_domain_state address) so the

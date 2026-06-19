@@ -76,6 +76,15 @@ void mmtk_ocaml_leave_blocking(void);
 /** Deregister a terminating domain (by caml_domain_state address). */
 void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
 
+/* ── Write barrier (generational plans) ─────────────────────────────── */
+
+/**
+ * Generational region write barrier: record that `count` value-sized slots at
+ * `start` may now point into the nursery. Used for scalar field writes
+ * (count == 1) and array blits. No-op for non-generational plans.
+ */
+void mmtk_ocaml_region_barrier(MMTk_Mutator mutator, uintptr_t start, size_t count);
+
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
