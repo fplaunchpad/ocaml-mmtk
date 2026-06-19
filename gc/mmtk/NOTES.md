@@ -5,21 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## Weak arrays & ephemerons CRASH under MMTk — interim fix landed
+## Generational write barrier (GenImmix / StickyImmix)
 
 *2026-06-19*
 
-**Update: the crash is fixed (conservatively).** `caml_mmtk_scan_ephe_roots`
-(runtime/mmtk.c, called per domain from `scan_roots_in_mutator_thread`) now walks
-`domain->ephe_info->{todo,live}` and reports every ephemeron/weak-array field
-(link, data, keys) and the list heads as strong roots — so MMTk keeps the whole
-ephemeron graph alive and pointer-updates it instead of letting it dangle. The
-feature probe (`gc/mmtk/features.ml`) now completes under MarkSweep and Immix
-(incl. forced defrag) with no crash, and the moving/multidomain battery is
-unregressed. Tradeoff: weak references never clear yet (everything kept alive,
-a leak), exactly like finalisable values under `do_final=1`. Proper MMTk
-weak-reference processing (clear dead keys/data, run finalisers) is still the
-real workstream-E task. Original diagnosis below.
+OCaml's `caml_modify(field_ptr, val)` is handed only the **field address**, not
+the containing object, so MMTk's object-remembering barrier (`object_reference_write_post`,
+which re-scans the remembered *object*) doesn't fit. Instead we use the **region
+barrier** (`memory_region_copy_post`), which remembers the modified *slice* — for
+a scalar write, a 1-slot region = the slot itself. This matches OCaml's own
+remembered set, which is also slot-based (`Ref_table_add` stores field
+addresses). `OCamlMemorySlice` (common/slot.rs) is the `VMMemorySlice` impl.
+
+Wired from `write_barrier` (covers `caml_modify`, `caml_modify_field`, atomics,
+and bytecode `SETFIELD`/`SETVECTITEM`), `caml_initialize`, and
+`caml_uniform_array_fill` (which inlines caml_modify's logic). `caml_uniform_array_blit`'s
+old-destination path already uses `caml_modify`. Self-gated by
+`caml_mmtk_generational` so it's a no-op for non-gen plans (NoBarrier). Validated:
+aged array ← young tuples survives nursery GCs with stock-matching checksums.
+
+## Weak arrays & ephemerons — interim fix is MarkSweep-only (unsafe under moving)
+
+*2026-06-19*
+
+`caml_mmtk_scan_ephe_roots` (runtime/mmtk.c, per-domain in
+`scan_roots_in_mutator_thread`) walks `domain->ephe_info->{todo,live}` and reports
+every ephemeron/weak-array field (link, data, keys) + the list heads as strong
+roots, so MMTk keeps the graph alive instead of letting it dangle. This fixes the
+segfault **under non-moving MarkSweep**.
+
+**It is NOT safe under moving plans.** It reports *interior field slots* of the
+ephemeron blocks; when a moving plan relocates a block (Immix opportunistically,
+GenImmix/StickyImmix nursery always), those slot addresses go stale and weak/
+ephemeron programs crash or hang. Tried allocating ephemerons in MMTk's
+non-moving space (so the blocks never move) — this regressed MarkSweep (hang)
+and NoGC (NonMoving unsupported → panic), so it was reverted. The real fix is
+MMTk weak-reference processing (register ephemerons, trace/update them as objects,
+clear dead keys/data). Parked. Tradeoff even on MarkSweep: weak refs never clear
+(everything kept alive, a leak), like finalisable values under `do_final=1`.
+Original diagnosis below.
 
 ---
 

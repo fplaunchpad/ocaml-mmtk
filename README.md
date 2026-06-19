@@ -19,9 +19,12 @@ switch.
 
 > **Status: bring-up.** MMTk backs the **bytecode** runtime, **opt-in** (off by
 > default, so a normal build and the compiler bootstrap run on OCaml's stock GC).
-> `NoGC`, `MarkSweep`, and `Immix` all work — MarkSweep and Immix collect single-
-> and multi-domain, Immix relocates objects, and collection is parallel. Native
-> code is unchanged and uses the stock GC (native integration is future work).
+> `NoGC`, `MarkSweep`, `Immix`, `GenImmix`, and `StickyImmix` all work — the
+> collecting plans collect single- and multi-domain, the moving plans relocate
+> objects, the generational plans use a write barrier, and collection is parallel.
+> Known limitation: weak arrays / ephemerons are only safe under non-moving
+> `MarkSweep` for now (parked — see `ROADMAP.md`). Native code is unchanged and
+> uses the stock GC (native integration is future work).
 
 ## Why bytecode first?
 
@@ -41,8 +44,9 @@ integration comes later.
 | M1 | MMTk **NoGC** backs every bytecode allocation | ✅ done |
 | M2 | **MarkSweep**: precise root scanning + stop-the-world, incl. multi-domain (`Domain.spawn`) | ✅ done |
 | M3 | **Immix** (moving): infix-pointer fixup, clean `Out_of_memory` | ✅ done |
+| M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
 | — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | 🟡 |
-| next | Weak/ephemeron + finalisers, generational plans, native code, testsuite, benchmarks | ⬜ |
+| next | Native code, testsuite, benchmarks (weak/ephemeron + finalisers parked) | ⬜ |
 
 GC-plan bring-up ladder: `NoGC` → `MarkSweep` → `Immix`. Collections are parallel
 and stop-the-world. **See [`ROADMAP.md`](ROADMAP.md) for the full plan, GC-plan

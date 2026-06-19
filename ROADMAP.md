@@ -33,16 +33,22 @@ movement for testing).
 | M2+ | **Multi-domain** stop-the-world (`Domain.spawn` programs) | ✅ done |
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
-| M4 | **Generational plans (GenImmix / StickyImmix) — needs write barrier** | 🔜 active |
-| M5 | **Native-code integration** | 🔜 active (after M4) |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked (interim crash-fix in place) |
+| M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
+| M5 | **Native-code integration** | 🔜 active |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
 
-**Current focus:** generational plans (M4), then native integration (M5).
-Weak/ephemeron + finaliser *proper* processing is parked — the conservative
-interim keeps them alive so nothing crashes; revisit later.
+**Current focus:** native-code integration (M5).
+
+Weak/ephemeron + finaliser processing is parked. Note the current constraint:
+the conservative interim (rooting `ephe_info`) keeps them alive safely **only
+under non-moving MarkSweep**. Under moving plans (Immix opportunistically,
+GenImmix/StickyImmix always) the interior field slots it reports go stale when
+the ephemeron block is relocated → weak/ephemeron programs can crash/hang there.
+Proper fix (MMTk weak-reference processing) is the unpark task. See
+`gc/mmtk/NOTES.md`.
 
 What works today: NoGC, MarkSweep, and Immix back all bytecode allocation under
 `MMTK_ENABLED=1`. MarkSweep and Immix collect correctly single- and
@@ -123,10 +129,18 @@ latency-bound). See `gc/mmtk/NOTES.md`. GC pause time/count are now instrumented
 (`mmtk_ocaml_gc_count`/`_gc_time_ms`, reported under `MMTK_VERBOSE`), which also
 feeds workstream H. Remaining: tune default thread count; broader benchmarking.
 
-### C. Generational plans (GenImmix / StickyImmix)
-Implement the GC **write barrier** on the mutator side and the `MemorySlice`
-impl. Wire `caml_modify` / bytecode `SETFIELD`/`SETVECTITEM` / `caml_initialize`
-to MMTk's object barrier. Then validate as a moving plan (tier 2).
+### C. Generational plans (GenImmix / StickyImmix) — ✅ done
+Mutator write barrier implemented. OCaml's `caml_modify` gets only a field
+address, not the object, so the object-remembering barrier doesn't fit; we use
+MMTk's **region barrier** (`memory_region_copy_post`) to remember the modified
+*slot* — matching OCaml's own slot-based remembered set — via a real
+`OCamlMemorySlice` (`MemorySlice`). Wired from `write_barrier` (covers
+`caml_modify`/`caml_modify_field`/atomics/bytecode `SETFIELD`/`SETVECTITEM`),
+`caml_initialize`, and `caml_uniform_array_fill`; gated by `caml_mmtk_generational`
+so it's a no-op for non-gen plans. Validated: aged-array ← young-tuple survives
+nursery GCs (checksum matches stock) under GenImmix and StickyImmix; the full
+moving/multidomain/oom battery passes too. Caveat: weak/ephemeron unsafe under
+moving plans (see E).
 
 ### D. Concurrent collection
 Upstream-dependent (see tier 4). Scope only once a concurrent plan is available
@@ -135,11 +149,13 @@ in mmtk-core, or decide to track/contribute upstream.
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
 - **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) —
-  *interim crash-fix landed* (`caml_mmtk_scan_ephe_roots` roots the
-  `domain->ephe_info` lists so they can't dangle; probe `gc/mmtk/features.ml` no
-  longer segfaults). Still TODO: **proper weak-reference processing** — currently
-  everything is kept alive (weak refs never clear; a leak). Replace with MMTk's
-  weak/finalizable processing to clear dead keys/data. See `gc/mmtk/NOTES.md`.
+  interim `caml_mmtk_scan_ephe_roots` roots the `domain->ephe_info` lists so they
+  don't dangle, **but only safe under non-moving MarkSweep**: it reports interior
+  field slots of the ephemeron blocks, which go stale when those blocks are
+  relocated under a moving plan (Immix/GenImmix/StickyImmix) → crash/hang. A
+  non-moving-allocation attempt regressed MarkSweep/NoGC and was reverted. Proper
+  fix = MMTk weak-reference processing (register ephemerons, clear dead keys/data,
+  update under moving). Still TODO; weak refs also never clear yet. See NOTES.
 - **Finalisers** — first-class (`Gc.finalise`) and last-ditch
   (`Gc.finalise_last`). Don't run yet — the root scan passes `do_final=1` to keep
   finalisable values alive. Wire MMTk's finalizable processing.
