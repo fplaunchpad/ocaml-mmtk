@@ -40,6 +40,20 @@ pub fn register_mutator(domain_state_addr: usize, mutator: *mut Mutator<OCamlVM>
     );
 }
 
+/// Addresses (caml_domain_state*) of all registered domains. Used by the STW
+/// code to interrupt every domain.
+pub fn domain_addrs() -> Vec<usize> {
+    DOMAIN_REGISTRY.read().unwrap().keys().copied().collect()
+}
+
+/// Remove a domain from the registry by its caml_domain_state address. Called
+/// when a domain terminates so it is no longer counted by stop-the-world.
+/// (The Mutator allocation itself is intentionally leaked here — retiring it
+/// safely w.r.t. an in-progress collection is left for later.)
+pub fn deregister_by_addr(domain_state_addr: usize) {
+    DOMAIN_REGISTRY.write().unwrap().remove(&domain_state_addr);
+}
+
 /// Deregister the mutator by pointer match. Panics if the pointer is not registered.
 pub fn deregister_by_ptr(mutator_ptr: *mut Mutator<OCamlVM>) {
     let mut map = DOMAIN_REGISTRY.write().unwrap();

@@ -2159,6 +2159,12 @@ void caml_handle_gc_interrupt(void)
 {
   CAMLalloc_point_here;
 
+#ifndef NATIVE_CODE
+  /* MMTk multi-domain STW: if a collection is in progress, park this domain at
+     the safepoint (roots are published) until it finishes. */
+  caml_mmtk_stw_poll();
+#endif
+
   if (caml_incoming_interrupts_queued()) {
     /* interrupt */
     CAML_EV_BEGIN(EV_INTERRUPT_REMOTE);
@@ -2280,6 +2286,13 @@ void caml_domain_terminate(bool last)
      this. */
   caml_domain_stop_hook();
   call_timing_hook(&caml_domain_terminated_hook);
+
+#ifndef NATIVE_CODE
+  /* No OCaml code runs on this domain after this point: deregister it from MMTk
+     so a future stop-the-world doesn't wait for it (parking first if a
+     collection is currently in progress). */
+  caml_mmtk_domain_terminate(domain_state);
+#endif
 
   while (!finished) {
     caml_finish_sweeping();

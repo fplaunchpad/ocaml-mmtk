@@ -13,6 +13,7 @@ switch.
 - The upstream OCaml README is preserved at
   [`README.upstream.adoc`](README.upstream.adoc).
 - Design background and rationale: [`fork-handoff.md`](fork-handoff.md).
+- Design notes & deferred investigations: [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md).
 
 > **Status: early bring-up.** MMTk currently backs the **bytecode** runtime only,
 > and is **opt-in** (off by default, so a normal build and the compiler bootstrap

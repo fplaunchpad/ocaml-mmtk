@@ -59,6 +59,23 @@ void* mmtk_ocaml_alloc(MMTk_Mutator mutator, size_t wosize, size_t tag, int sema
 
 void mmtk_ocaml_handle_user_collection_request(uintptr_t domain_state_addr);
 
+/* ── Stop-the-world (multi-domain) ──────────────────────────────────── */
+
+/** True while a collection is in progress (queried at domain safepoints). */
+bool mmtk_ocaml_stw_active(void);
+
+/** Park the calling domain at a safepoint until the collection finishes. */
+void mmtk_ocaml_stw_park(void);
+
+/** A domain is entering a C blocking section (counts as safe-stopped). */
+void mmtk_ocaml_enter_blocking(void);
+
+/** A domain is leaving a blocking section; waits if a collection is active. */
+void mmtk_ocaml_leave_blocking(void);
+
+/** Deregister a terminating domain (by caml_domain_state address). */
+void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
+
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);

@@ -1,18 +1,24 @@
-//! VMCollection for OCaml 5.x — stop-the-world coordination.
+//! VMCollection for OCaml 5.x — multi-domain stop-the-world coordination.
 //!
-//! Single-domain bring-up (M2): the OCaml main domain is the only mutator.
-//! When an allocation can't be satisfied, mmtk-core calls `block_for_gc` on the
-//! mutator thread; the mutator parks here and publishes `WORLD_STOPPED`. An MMTk
-//! GC worker thread then runs `stop_all_mutators` (which waits for the mutator
-//! to park, then visits it so its roots are scanned), marks/sweeps, and finally
-//! `resume_mutators` wakes the parked mutator.
+//! When MMTk collects, every OCaml domain (mutator) must be at a safe point
+//! before marking. A domain is "safe" if it is either parked at a bytecode
+//! safepoint or inside a C blocking section (not mutating OCaml objects; its sp
+//! is published). We track a single `stopped` count covering both:
 //!
-//! TODO(multi-domain): this only stops the domain that triggered GC. Supporting
-//! several domains needs OCaml's interrupt_word / caml_try_run_on_all_domains
-//! machinery so every domain reaches a safepoint.
+//!   - park (block_for_gc on the triggering domain; the poll hook on others):
+//!       stopped += 1; wait for the collection to finish; stopped -= 1.
+//!   - blocking section: enter -> stopped += 1; leave -> wait if a collection
+//!       is active, then stopped -= 1.
+//!
+//! `stop_all_mutators` (GC worker) sets GC active, poisons every domain's
+//! young_limit so running domains trap to a safepoint and park, then waits until
+//! `stopped >= number_of_mutators` (recomputed, so domains terminating mid-cycle
+//! don't wedge it), and visits each mutator. `resume_mutators` un-poisons and
+//! wakes everyone.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use mmtk::memory_manager;
 use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread};
@@ -24,57 +30,128 @@ use crate::OCamlVM;
 
 pub struct VMCollection;
 
-/// true while the parked mutator should keep blocking (protected by STW_LOCK).
-static STW_LOCK: Mutex<bool> = Mutex::new(false);
+/// True for the duration of a collection. Read at safepoints (incl. the C hook).
+static GC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct StwState {
+    /// Bumped once per completed collection; parked domains wait for a change.
+    epoch: u64,
+    /// Domains currently safe-stopped (parked or in a blocking section).
+    stopped: usize,
+}
+static STW: Mutex<StwState> = Mutex::new(StwState { epoch: 0, stopped: 0 });
 static STW_COND: Condvar = Condvar::new();
-/// Set by the mutator once it has parked in `block_for_gc`; the GC worker spins
-/// on this before scanning the mutator's roots.
-static WORLD_STOPPED: AtomicBool = AtomicBool::new(false);
+
+extern "C" {
+    fn caml_mmtk_interrupt(domain: usize);
+    fn caml_mmtk_uninterrupt(domain: usize);
+    /// Cooperative park (runtime side): hands this domain's OCaml-STW
+    /// participation to its backup thread, waits for the MMTk resume epoch, then
+    /// re-enters OCaml. Used so MMTk's STW can't deadlock against OCaml's own.
+    fn caml_mmtk_park();
+}
+
+/// Park the calling domain at a safepoint until the current collection finishes.
+fn park_until_resumed() {
+    let mut s = STW.lock().unwrap();
+    let my_epoch = s.epoch;
+    s.stopped += 1;
+    STW_COND.notify_all();
+    while s.epoch == my_epoch {
+        s = STW_COND.wait(s).unwrap();
+    }
+    s.stopped -= 1;
+}
+
+/// True if a collection is in progress (queried from the C safepoint hook).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_stw_active() -> bool {
+    GC_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Park the calling domain at a safepoint (called from caml_handle_gc_interrupt).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_stw_park() {
+    park_until_resumed();
+}
+
+/// A domain is entering a C blocking section: count it as safe-stopped.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_enter_blocking() {
+    let mut s = STW.lock().unwrap();
+    s.stopped += 1;
+    STW_COND.notify_all();
+}
+
+/// A domain is leaving a blocking section and wants to run OCaml again. If a
+/// collection is active it must wait for it to finish first.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_leave_blocking() {
+    let mut s = STW.lock().unwrap();
+    while GC_ACTIVE.load(Ordering::SeqCst) {
+        s = STW_COND.wait(s).unwrap();
+    }
+    s.stopped -= 1;
+}
 
 impl Collection<OCamlVM> for VMCollection {
-    /// Called on a GC worker thread. Wait until the mutator has parked, then
-    /// visit each registered mutator (triggers root scanning for it).
+    /// GC worker: stop every domain, then visit each so its roots are scanned.
     fn stop_all_mutators<F>(_tls: VMWorkerThread, mut mutator_visitor: F)
     where
         F: FnMut(&'static mut Mutator<OCamlVM>),
     {
-        // Wait for the triggering mutator to reach block_for_gc and park.
-        while !WORLD_STOPPED.load(Ordering::SeqCst) {
-            std::hint::spin_loop();
-        }
         use mmtk::vm::ActivePlan;
+
+        GC_ACTIVE.store(true, Ordering::SeqCst);
+
+        // Poison every domain so running ones trap to a safepoint and park.
+        for domain in crate::active_plan::domain_addrs() {
+            unsafe { caml_mmtk_interrupt(domain) };
+        }
+
+        // Wait until all domains are safe-stopped. Recompute the count each time
+        // (a domain may deregister as it terminates) and re-poison stragglers.
+        loop {
+            let n = crate::active_plan::VMActivePlan::number_of_mutators();
+            let stopped = STW.lock().unwrap().stopped;
+            if stopped >= n {
+                break;
+            }
+            for domain in crate::active_plan::domain_addrs() {
+                unsafe { caml_mmtk_interrupt(domain) };
+            }
+            let guard = STW.lock().unwrap();
+            let _ = STW_COND.wait_timeout(guard, Duration::from_millis(1));
+        }
+
         for mutator in crate::active_plan::VMActivePlan::mutators() {
             mutator_visitor(mutator);
         }
     }
 
-    /// Called on a GC worker thread once collection finishes: wake the mutator.
+    /// GC worker: collection finished — un-poison every domain and wake them.
     fn resume_mutators(_tls: VMWorkerThread) {
-        let mut blocked = STW_LOCK.lock().unwrap();
-        *blocked = false;
-        WORLD_STOPPED.store(false, Ordering::SeqCst);
+        for domain in crate::active_plan::domain_addrs() {
+            unsafe { caml_mmtk_uninterrupt(domain) };
+        }
+        let mut s = STW.lock().unwrap();
+        GC_ACTIVE.store(false, Ordering::SeqCst);
+        s.epoch = s.epoch.wrapping_add(1);
         STW_COND.notify_all();
     }
 
-    /// Called on the mutator thread when an allocation triggers GC. Park until a
-    /// GC worker calls `resume_mutators`.
+    /// The domain whose allocation triggered GC parks here until collection
+    /// ends. It holds its domain lock (it was running OCaml), so it must park
+    /// cooperatively (backup thread covers it for any concurrent OCaml STW) —
+    /// hence the C helper rather than park_until_resumed directly.
     fn block_for_gc(_tls: VMMutatorThread) {
-        let mut blocked = STW_LOCK.lock().unwrap();
-        *blocked = true;
-        WORLD_STOPPED.store(true, Ordering::SeqCst);
-        while *blocked {
-            blocked = STW_COND.wait(blocked).unwrap();
-        }
+        unsafe { caml_mmtk_park() };
     }
 
-    /// Spawn a Rust thread running the MMTk GC worker loop.
     fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<OCamlVM>) {
         match ctx {
             GCThreadContext::Worker(worker) => {
                 std::thread::spawn(move || {
-                    // TODO(M3): use a real thread id rather than the sentinel 1.
-                    // Safe for non-moving plans: is_mutator() is a registry
-                    // lookup, and no domain is bound at address 1.
                     let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(unsafe {
                         mmtk::util::Address::from_usize(1)
                     })));

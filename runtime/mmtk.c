@@ -20,6 +20,7 @@
 
 #include "caml/mlvalues.h"
 #include "caml/domain_state.h"
+#include "caml/domain.h"
 #include "caml/misc.h"
 #include "caml/mmtk.h"
 
@@ -117,6 +118,74 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   (void)reserved;
   return (value)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
                                  caml_mmtk_semantics(wosize));
+}
+
+/* ── Stop-the-world ──────────────────────────────────────────────────── */
+
+/* Park this domain for an MMTk collection, cooperating with OCaml's own
+   stop-the-world.
+
+   OCaml has its OWN multi-domain STW (caml_try_run_on_all_domains), used at
+   domain spawn/terminate. If a domain froze in MMTk's park while OCaml tried to
+   run a STW, the two barriers would deadlock: OCaml waits for this domain to
+   join its barrier while MMTk waits for every domain to park. We avoid that by
+   handing this domain's OCaml-STW participation to its backup thread for the
+   duration of the park — exactly what a C blocking section does
+   (caml_enter/leave_blocking_section_default). The backup thread answers
+   caml_try_run_on_all_domains on our behalf while we wait. */
+void caml_mmtk_park(void)
+{
+  caml_bt_exit_ocaml();
+  caml_release_domain_lock();
+  mmtk_ocaml_stw_park();        /* stopped++, wait for the resume epoch, stopped-- */
+  caml_bt_enter_ocaml();
+  caml_acquire_domain_lock();
+}
+
+/* Called from caml_handle_gc_interrupt at every safepoint. If MMTk has a
+   collection in progress, park this domain (roots are already published by the
+   safepoint, e.g. Setup_for_event) until the collection finishes. */
+void caml_mmtk_stw_poll(void)
+{
+  if (caml_mmtk_enabled && mmtk_ocaml_stw_active()) {
+    caml_mmtk_park();
+  }
+}
+
+/* Poison a domain's young_limit so its next safepoint check
+   (Caml_check_gc_interrupt) traps into caml_handle_gc_interrupt. */
+void caml_mmtk_interrupt(uintnat domain_state_addr)
+{
+  caml_domain_state *d = (caml_domain_state *) domain_state_addr;
+  atomic_store_release(&d->young_limit, (uintnat) CAML_UINTNAT_MAX);
+}
+
+/* Reset a domain's young_limit (un-poison) after the collection. */
+void caml_mmtk_uninterrupt(uintnat domain_state_addr)
+{
+  caml_reset_young_limit((caml_domain_state *) domain_state_addr);
+}
+
+/* A domain is entering / leaving a C blocking section. While blocking it is
+   safe for GC; on leaving it must wait out any in-progress collection. */
+void caml_mmtk_enter_blocking(void)
+{
+  if (caml_mmtk_enabled) mmtk_ocaml_enter_blocking();
+}
+
+void caml_mmtk_leave_blocking(void)
+{
+  if (caml_mmtk_enabled) mmtk_ocaml_leave_blocking();
+}
+
+/* Called when a domain terminates: park if a collection is in progress (so it
+   participates), then deregister so future collections don't wait for it. */
+void caml_mmtk_domain_terminate(caml_domain_state *dom)
+{
+  if (!caml_mmtk_enabled || dom->mmtk_mutator == NULL) return;
+  caml_mmtk_stw_poll();
+  mmtk_ocaml_deregister_domain((uintptr_t) dom);
+  dom->mmtk_mutator = NULL;
 }
 
 #endif /* NATIVE_CODE */

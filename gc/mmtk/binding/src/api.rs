@@ -124,6 +124,13 @@ pub extern "C" fn mmtk_ocaml_alloc(
     obj_ref.to_mut_ptr::<libc::c_void>()
 }
 
+/// Deregister a terminating domain (by its caml_domain_state address) so the
+/// stop-the-world code no longer waits for it.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_deregister_domain(domain_state_addr: usize) {
+    crate::active_plan::deregister_by_addr(domain_state_addr);
+}
+
 // ── GC control ────────────────────────────────────────────────────────────
 
 #[no_mangle]

@@ -43,6 +43,23 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
 extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
                                  reserved_t reserved);
 
+/* Stop-the-world support. caml_mmtk_stw_poll is called from
+ * caml_handle_gc_interrupt: if a collection is in progress it parks this domain
+ * at the safepoint. caml_mmtk_interrupt / _uninterrupt poison / reset a domain's
+ * young_limit; they are called by the GC worker (via the binding). */
+extern void caml_mmtk_stw_poll(void);
+extern void caml_mmtk_park(void);
+extern void caml_mmtk_interrupt(uintnat domain_state_addr);
+extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
+
+/* Blocking-section participation: a domain in a C blocking section is safe for
+ * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking are called
+ * from caml_enter/leave_blocking_section. caml_mmtk_domain_terminate
+ * deregisters a terminating domain. */
+extern void caml_mmtk_enter_blocking(void);
+extern void caml_mmtk_leave_blocking(void);
+extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
+
 #endif /* NATIVE_CODE */
 #endif /* CAML_INTERNALS */
 
