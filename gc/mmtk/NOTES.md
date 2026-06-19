@@ -5,6 +5,31 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Parallel collection — verified (correct, and marking scales ~8x)
+
+*2026-06-19*
+
+MMTk runs collections on multiple GC worker threads (`MMTK_GC_THREADS`, default
+from core count). Verified two things on turing (28-core), forcing ~60 GCs over a
+~4M-object live set with `MMTK_STRESS_FACTOR`, `setarch -R`, measuring MMTk's own
+GC pause time (`mmtk_ocaml_gc_time_ms`):
+
+- **Correctness**: identical results across `MMTK_GC_THREADS` = 1,2,4,8,16 under
+  both MarkSweep and Immix. Parallel workers do not corrupt the heap.
+- **Scaling depends on live-set shape:**
+  - Bushy binary tree (independent subtrees → high marking parallelism):
+    GC time 34.4s → 20.1 → 10.5 → 6.3 → 4.1s for 1→2→4→8→16 threads — **~8.4x**
+    at 16 threads, near-linear to 4 (then memory-bandwidth-bound).
+  - Linked lists (`Array.init 400 (List.init 10000 …)`): flat ~55→65s, no
+    speedup (slight regression from coordination/contention). Tracing a list is
+    a sequential pointer chase and latency-bound — workload-inherent, **not** a
+    binding limitation.
+
+Takeaway: parallel marking engages and scales well for parallel-friendly heaps;
+pointer-chasing-heavy heaps are latency-bound regardless of thread count. Both
+correct. (Concurrent — as opposed to parallel — collection is a separate,
+upstream-dependent matter; see ROADMAP.)
+
 ## Pinning under a moving plan — why OCaml's existing rooting mostly suffices
 
 *2026-06-19*

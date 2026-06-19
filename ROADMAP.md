@@ -38,7 +38,7 @@ movement for testing).
 | M6 | Native-code integration | ⬜ |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
-| — | Verify/tune parallel collection; concurrent collection (upstream-dependent) | ⬜ |
+| — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
 
 What works today: NoGC, MarkSweep, and Immix back all bytecode allocation under
 `MMTK_ENABLED=1`. MarkSweep and Immix collect correctly single- and
@@ -111,10 +111,13 @@ not in new trait code.
   mid-defrag (Immix reserves headroom to avoid it); convert to a graceful path
   if it ever bites.
 
-### B. Parallel collection (works; verify + tune)
-Collections already run on multiple GC worker threads. Explicitly test
-correctness + scaling across `MMTK_GC_THREADS`, confirm determinism with a
-single worker, and document the knob/defaults.
+### B. Parallel collection — ✅ verified
+Collections run on multiple GC worker threads (`MMTK_GC_THREADS`). Verified
+correct across 1..16 threads (both plans) and that marking scales — ~8.4x at 16
+threads on a high-parallelism live set; flat on linked lists (sequential,
+latency-bound). See `gc/mmtk/NOTES.md`. GC pause time/count are now instrumented
+(`mmtk_ocaml_gc_count`/`_gc_time_ms`, reported under `MMTK_VERBOSE`), which also
+feeds workstream H. Remaining: tune default thread count; broader benchmarking.
 
 ### C. Generational plans (GenImmix / StickyImmix)
 Implement the GC **write barrier** on the mutator side and the `MemorySlice`
