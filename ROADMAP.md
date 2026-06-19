@@ -33,12 +33,16 @@ movement for testing).
 | M2+ | **Multi-domain** stop-the-world (`Domain.spawn` programs) | ✅ done |
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
-| M4 | Generational plans (GenImmix / StickyImmix) — needs write barrier | ⬜ |
-| M5 | Runtime features: Lazy, finalisers, weak arrays, ephemerons | ⬜ |
-| M6 | Native-code integration | ⬜ |
+| M4 | **Generational plans (GenImmix / StickyImmix) — needs write barrier** | 🔜 active |
+| M5 | **Native-code integration** | 🔜 active (after M4) |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked (interim crash-fix in place) |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
+
+**Current focus:** generational plans (M4), then native integration (M5).
+Weak/ephemeron + finaliser *proper* processing is parked — the conservative
+interim keeps them alive so nothing crashes; revisit later.
 
 What works today: NoGC, MarkSweep, and Immix back all bytecode allocation under
 `MMTK_ENABLED=1`. MarkSweep and Immix collect correctly single- and
