@@ -2283,11 +2283,6 @@ void caml_domain_terminate(bool last)
   caml_domain_stop_hook();
   call_timing_hook(&caml_domain_terminated_hook);
 
-  /* No OCaml code runs on this domain after this point: deregister it from MMTk
-     so a future stop-the-world doesn't wait for it (parking first if a
-     collection is currently in progress). */
-  caml_mmtk_domain_terminate(domain_state);
-
   while (!finished) {
     caml_finish_sweeping();
 
@@ -2365,6 +2360,13 @@ void caml_domain_terminate(bool last)
     }
     caml_plat_unlock(&all_domains_lock);
   }
+
+  /* Now the minor heap has been fully flushed (survivors promoted into MMTk via
+     a valid mutator) and the domain has left the STW participant set: deregister
+     it from MMTk so future collections don't wait for it. Must come AFTER the
+     flush loop above — the final caml_empty_minor_heaps_once promotes through
+     Caml_state->mmtk_mutator, so it must still be live there. */
+  caml_mmtk_domain_terminate(domain_state);
 
   if (!last) caml_assert_shared_heap_is_empty(domain_state->shared_heap);
 
