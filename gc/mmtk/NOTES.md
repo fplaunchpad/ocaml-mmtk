@@ -72,6 +72,27 @@ trigger a collection.
 **Test:** revert bytecode to stock-minor, run the existing battery; old→young and
 churn must survive; compare against the all-MMTk mode. Then native.
 
+## GC plan support matrix (mmtk-core 0.32)
+
+*2026-06-20*
+
+Swept all 11 plans (bytecode, default all-MMTk mode, torture + retain + infix).
+The plan-agnostic binding works for **9 of 11** with no plan-specific code:
+
+- ✅ **NoGC, MarkSweep, Immix, GenImmix, StickyImmix** — validated earlier.
+- ✅ **SemiSpace, GenCopy** — work, but copying collectors use ~half the heap, so
+  they need ~2× the size or raise a (clean) `Out_of_memory`.
+- ✅ **MarkCompact** (sliding compaction) — works (torture+retain+infix).
+- ✅ **ConcurrentImmix** — *runs* our tests cleanly. Caveat: shows no corruption,
+  but concurrent marking / SATB-barrier correctness is unvalidated (may fall back
+  to STW or not be stressed). Promising for the concurrent-GC goal — note that
+  concurrent IS present in 0.32 (earlier notes said otherwise).
+- ❌ **PageProtect** — panics (`freelistpageresource`): a debug plan that maps one
+  page per object, so it exhausts the page resource at normal heap sizes. Likely
+  needs a much larger reservation; not obviously a binding bug.
+- ❌ **Compressor** — panics in `compressorspace`: a Compressor-specific
+  requirement (mark bitmap / offset vector layout) the binding doesn't satisfy.
+
 ## Native-code integration (M5) — WORKING for single-domain
 
 *2026-06-20*

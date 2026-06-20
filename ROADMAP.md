@@ -38,7 +38,9 @@ movement for testing).
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
-| — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
+| — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
+| — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
+| — | Concurrent GC: `ConcurrentImmix` exists in 0.32 and runs our tests; concurrent-marking correctness unvalidated | 🟡 |
 
 **Current focus:** **native-code integration (M5)** — the proper next milestone.
 
@@ -153,9 +155,14 @@ nursery GCs (checksum matches stock) under GenImmix and StickyImmix; the full
 moving/multidomain/oom battery passes too. Caveat: weak/ephemeron unsafe under
 moving plans (see E).
 
-### D. Concurrent collection
-Upstream-dependent (see tier 4). Scope only once a concurrent plan is available
-in mmtk-core, or decide to track/contribute upstream.
+### D. Concurrent collection — more accessible than first thought
+`ConcurrentImmix` **is** present in mmtk-core 0.32 and **runs** our tests
+(torture/retain/infix) with no corruption. Remaining: verify it actually does
+concurrent marking (vs. STW fallback), and that the SATB / snapshot-at-the-
+beginning write barrier and concurrent-marking races are handled (our barrier
+may be a no-op for it). If it holds up, concurrent GC is far closer than the
+"upstream-dependent" framing in the GC-plan-tiers section above (which predates
+this finding).
 
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
