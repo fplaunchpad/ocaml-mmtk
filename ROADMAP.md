@@ -349,10 +349,12 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    `Infix_tag` (`0xf9`/249) was misread as a real infix header, so a field was
    silently never forwarded. The classify path now validates the infix parent is in
    a committed space (mirrors vanilla `oldify_one` checking "already forwarded"
-   before `Infix_tag`) — see `gc/mmtk/NOTES.md`. StickyImmix now **completes
-   `ocamlc -c parser.ml` at 96 MB–1024 MB** (was crashing at every size). This was
-   almost certainly also the rare ocamldoc `Lexing.engine` crash blocking the
-   always-on merge. **Remaining (bug #2):** at a very tight 64 MB heap StickyImmix
+   before `Infix_tag`) — see `gc/mmtk/NOTES.md`. A from-scratch `make all` under
+   StickyImmix now **builds the whole compiler cleanly — 843 compile steps, 0
+   crashes** — including the ocamldoc `Stdlib.3o` manpage step that was the original
+   intermittent `Lexing.engine` crash. **This unblocks the M9 always-on merge** on
+   the correctness front (StickyImmix relocates far more aggressively than the
+   default Immix, so a clean StickyImmix build is a strong guarantee). **Remaining (bug #2):** at a very tight 64 MB heap StickyImmix
    still SIGSEGVs — a *separate* corrupted-value-stack issue `sanity` does not flag
    (likely a bytecode root-coverage gap), tracked in NOTES. Immix stays the default
    for now; StickyImmix is viable at practical heap sizes and the candidate perf

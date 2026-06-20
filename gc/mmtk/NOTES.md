@@ -44,6 +44,17 @@ is unaffected: its parent is always a committed closure.
 1024 MB: 1 GC). No regression on Immix. The fix is in `common`, so it covers every
 moving plan (Immix defrag, GenImmix, StickyImmix).
 
+**Full-build validation.** A from-scratch `make clean && make all` under
+`MMTK_PLAN=StickyImmix` (2048 MB, `setarch -R`) **completes cleanly — 843 `ocamlc`/
+`ocamlopt` steps, 0 crashes, 0 make errors** — and notably builds
+`api_docgen/.../build/man/Stdlib.3o`, the **exact ocamldoc `Lexing.engine` manpage
+step that was the original intermittent crash** (the documented blocker for merging
+always-on MMTk to `5.5+mmtk`). Since StickyImmix relocates far more aggressively
+than the default Immix, this clean build means **the always-on merge is unblocked**
+on the correctness front. (`make bootstrap` to a fixpoint is still fiddly for
+unrelated build-system/tree-state reasons — an aborted run leaves `ocamlc` missing —
+but the GC no longer crashes anywhere in the compile.)
+
 **How it was cracked.** Enabled mmtk's `sanity` feature (full-heap re-trace after
 each GC) at a deliberately **small heap** — small heaps force frequent + full GCs so
 `sanity` actually runs, and it caught the dangling edge deterministically (`Invalid
