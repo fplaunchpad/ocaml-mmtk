@@ -63,14 +63,29 @@ reference` panic). Then `rr record` + `rr replay` (forward `continue` and
 "target is running" bug**, so avoid them) pinned the offending slot, the forwarding
 word, and the `0xf9`/`Infix_tag` collision.
 
-**STILL OPEN — bug #2 (separate, narrower).** At a *very tight* heap (64 MB; heavy
-copy pressure) StickyImmix still SIGSEGVs — but **`sanity` does *not* flag it** and
-the crash is a corrupted bytecode **value-stack frame** (`RETURN` reads `sp[0]` = the
-int `1` where a saved code pointer belongs, `interp.c:623`), i.e. a likely
-**root-coverage gap** (an interpreter slot the GC root scan misses), not a heap-
-forwarding error. 96 MB+ is unaffected. Default stays **Immix**; StickyImmix is now
-viable at practical heap sizes but not yet at the tightest. Next: reverse-debug the
-64 MB repro (`~/.local/share/rr/strcrash` on the dev box) to the missed root.
+**STILL OPEN — bug #2 (separate, narrower; tight heaps only).** At a *very tight*
+heap (64 MB; heavy copy pressure → frequent + full GCs) StickyImmix still SIGSEGVs
+(deterministically). **`sanity` does *not* flag it** (no `Invalid reference` panic
+across runs, with the fix in place) — so the *heap* is consistent after every GC;
+the bad value is in a **root the GC scan misses**, not a heap field. The crash is
+**corrupted control flow**, not a single dangling data pointer: at the fault the
+bytecode `pc` is a tiny garbage value (`0x1`/`0x5`) and the `RETURN` frame is bogus
+(`sp[0]` = the int `0` where a saved code pointer belongs, `interp.c:623`), while
+`accu`/`env` still look valid (`env` → a live tag-3 block). That signature means an
+*earlier* wrong jump (most likely `pc = Code_val(accu)` in an `APPLY`-family opcode
+on a stale/garbage closure) propagated into a bogus dispatch — i.e. a value live
+across a GC in an interpreter slot the root scan doesn't cover, used after its
+target moved. 96 MB+ is unaffected (the gap is latent unless the missed root's
+target actually relocates, which heavy 64 MB copy pressure makes near-certain — same
+"latent vs. reliably-triggered" relationship as Immix↔StickyImmix for bug #1).
+
+Default stays **Immix**; StickyImmix is now viable at practical heap sizes but not
+yet at the tightest. Root-causing needs reverse execution from the *first* garbage
+`pc` back to the unscanned slot — non-trivial because the corruption manifests far
+downstream, and rr **hardware watchpoints trip the async bug** here (reverse-continue
+to *breakpoints* works; a software-watchpoint reverse or a binary-search on GC count
+is the likely route). Deterministic repro saved: `~/.local/share/rr/strcrash` on the
+dev box (`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=64`, single-threaded).
 
 ---
 
