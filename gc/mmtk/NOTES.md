@@ -76,6 +76,52 @@ trigger a collection.
 **Test:** revert bytecode to stock-minor, run the existing battery; old→young and
 churn must survive; compare against the all-MMTk mode. Then native.
 
+## Native TLAB / nursery-aliasing — feasibility study & blueprint
+
+*2026-06-20*
+
+Goal: all-MMTk for native (MMTk owns the nursery too), so there's no OCaml minor
+GC and the nested-STW hazard can't occur. Studied the mmtk-core 0.32 allocator
+internals; **it is feasible** with this design:
+
+**Design — OCaml's young region IS an MMTk Immix block.**
+- On refill (where native currently does a minor GC), the binding hands OCaml a
+  fresh Immix block: drive the mutator's **Default** `ImmixAllocator` (its
+  `bump_pointer` is `pub`: `cursor`/`limit`/`reset`) and return `[cursor, limit)`.
+  Set `young_end = limit`, `young_ptr = limit`, `young_limit = cursor`. OCaml's
+  inlined fast-path bumps `young_ptr` **down**, filling the block top-down.
+- When `young_ptr` reaches `young_limit` (= block start), the block is full →
+  refill again (advance the allocator's `cursor` to `limit`, get a new block).
+- **No OCaml minor GC, no promotion** — the block's objects are MMTk objects.
+  MMTk traces them from roots (native frame descriptors → our scanner), marks
+  Immix lines, and reclaims unmarked lines. Bump direction is irrelevant to
+  Immix's mark-region GC (it follows pointers, marks lines per live object).
+
+**Feasibility findings (the de-risking):**
+- ✅ No per-object `post_alloc` needed: Immix's `post_alloc` only `set_vo_bit`s
+  *under the `vo_bit` feature* (we don't enable it). So OCaml bump-filling a block
+  without calling post_alloc is fine for non-vo_bit Immix.
+- ✅ Comballoc is fine: multiple objects per young region all live in the one
+  MMTk block, each traced individually from roots (this only breaks the
+  alternative "always-slow-path, alloc a region per comballoc" approach).
+- ✅ MMTk exposes the pieces: `BumpPointer{cursor,limit,reset}` pub;
+  `Plan::get_allocator_mapping()` and `Allocators::get_allocator(_mut)` pub.
+- ⚠️ One plumbing wrinkle: `Mutator::allocators` is `pub(crate)`, so the binding
+  reaches the active allocator via an offset/unsafe accessor (the standard
+  MMTk VM fast-path mechanism, as mmtk-julia/ruby do) — not a blocker, just
+  plumbing.
+- ⚠️ `young_limit` dual role (GC trigger + STW-interrupt poison): set the "real"
+  limit = block `cursor`; the existing interrupt poison/`caml_reset_young_limit`
+  path still works.
+
+**Implementation steps:** (1) binding `mmtk_ocaml_refill_tlab(mutator, min) ->
+{start,end}` that drives the ImmixAllocator (slow-path a block, return bounds,
+sync cursor); (2) C glue to reset `young_*` from it; (3) call it from
+`caml_alloc_small_dispatch` in place of the minor GC; (4) disable the stock minor
+GC for native-all-MMTk; (5) global `native_c_libraries` link. Validate single-
+then multi-domain, then the testsuite. This is research-grade plumbing but no
+longer an unknown.
+
 ## GC plan support matrix (mmtk-core 0.32)
 
 *2026-06-20*
