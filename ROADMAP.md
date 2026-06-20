@@ -334,14 +334,23 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
 **Immix re-traces the whole 192 MB live set every GC**. A *generational* MMTk plan
 (**StickyImmix**) already closes much of the gap, and more heap headroom helps.
 
-**Optimisation levers (ordered by expected payoff):**
-1. **Dynamic heap sizing** — use an MMTk `gc_trigger` heuristic instead of
-   `FixedHeapSize`; fixes the RSS bloat and the tight-heap thrashing.
-2. **Default to a generational plan** (StickyImmix) for the always-on runtime.
-3. **Inline the bytecode allocation fast path** — bytecode all-MMTk currently calls
+**Optimisation levers + first-round results (2026-06-20):**
+1. **Dynamic heap sizing — TRIED, REGRESSED, reverted.** Switched `gc_trigger` to
+   `DynamicHeapSize:32M,cap`. On `gcbench` it *thrashed* — a single run took >190 s
+   (vs 5.9 s fixed) because it starts at 32 MB with a ~192 MB live set and mmtk
+   0.32's grow heuristic ramps too slowly. So a small-min dynamic heap is worse,
+   not better, for large-live-set programs. Reverted to `FixedHeapSize`. Future:
+   either a much larger/auto min, or investigate mmtk's MemBalancer trigger.
+2. **Generational plan (StickyImmix) — the real win.** `gcbench` 5.4 s vs Immix
+   7.0 s (≈1.4× stock vs Immix's 1.8×), and it's TLAB-compatible. Recommended as
+   the always-on default — *pending a bootstrap validation on StickyImmix* (only
+   Immix is bootstrap-validated so far). Not switched yet to avoid an unvalidated
+   default.
+3. **Inline the bytecode allocation fast path** — bytecode all-MMTk calls
    `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
-4. **GC-thread count** — default is `nproc` (28) *per process*; far too many for
-   short-lived processes (a big chunk of the slow self-hosting bootstrap).
+4. **GC-thread count** — default is `nproc` (28) *per process* (a big chunk of the
+   slow self-hosting bootstrap); a smaller default helps short programs but a
+   long GC-heavy run wants parallel marking — needs a balanced default.
 5. Immix defrag/policy tuning; reduce TLAB-refill overhead; revisit LOS threshold.
 
 ### I. M9 — MMTk-only: excise the stock GC

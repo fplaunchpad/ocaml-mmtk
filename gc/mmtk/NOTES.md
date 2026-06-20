@@ -5,6 +5,41 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 1: MMTk always-on (vanilla GC removed as a mode)
+
+*2026-06-20*
+
+MMTk is now this fork's GC by default — `MMTK_ENABLED` is gone; the only escape is a
+transitional `MMTK_DISABLE=1` (kept so the benchmarking phase can still measure the
+stock GC; to be deleted at final excision). Default plan flips to **Immix** (NoGC
+can't sustain an always-on runtime). The `caml_mmtk_vanilla_minor` mode is deleted:
+native is always TLAB nursery-aliasing and a non-Immix-Default plan is now a fatal
+error (Immix/StickyImmix/GenImmix are the native set). `caml_mmtk_enabled` is kept
+purely as the MMTk-init-readiness guard for the brief pre-init startup window, so
+the per-allocation branch remains (removing it needs MMTk-init-before-first-alloc —
+a separate perf step, not part of "remove the vanilla GC"). Work on branch
+`m9-mmtk-only`.
+
+**Validated:** the **whole compiler builds and self-hosts under always-on MMTk** —
+`make bootstrap` reached its fixpoint earlier (under MMTk), and a from-scratch
+always-on `make` builds runtime + stdlib + bytecode and native compilers cleanly.
+
+**Open blocker for merging to `5.5+mmtk`: a rare intermittent SEGV in `ocamldoc`.**
+The always-on `make world.opt` failed once at the **manpage** step
+(`build/man/Stdlib.3o`): `ocamldoc.opt` segfaulted in `Stdlib.Lexing.engine`
+(via odoc's `odoc_ocamlhtml` source-highlighting lexer). It is **intermittent** —
+5/5 direct re-runs pass across stock, Immix 1024/4096, StickyImmix, with/without
+ASLR; it only bit once under the parallel `-j16` build. So it's a rare latent
+moving-GC correctness bug (lexbuf/lex-table corruption under Immix), surfacing under
+parallel load — NOT the ASLR metadata-mmap flake (that's a start-up abort; this is a
+runtime SEGV in OCaml code) and NOT `Gc.*`/weak/tabled. The compiler's *own* lexer
+runs fine under MMTk, so it's data/timing-specific. **Deferred (needs rr to root-
+cause a rare repro); always-on stays on `m9-mmtk-only` until it's understood, since
+it intermittently breaks `make world.opt`.** Everything else (compiler, bootstrap,
+core testsuite) is solid always-on.
+
+---
+
 ## Testsuite (M7) bring-up: global link, and first two bugs surfaced
 
 *2026-06-20*
