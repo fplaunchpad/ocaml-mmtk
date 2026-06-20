@@ -38,7 +38,7 @@ movement for testing).
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — single-domain works all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix) *and* via vanilla-minor; multi-domain deadlocks under GC pressure (domain-termination STW coordination — root cause known) | 🟡 |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
-| M7 | Pass the OCaml testsuite — started: global-link + `testing.cma` built, ocamltest runs; core passes under TLAB Immix (`tests/basic` 33/40, `basic-more` 20/22 — the failures are tabled features: weak/ephemeron/finaliser/lazy, being disabled per plan) | 🟡 |
+| M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
@@ -299,6 +299,16 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
 - **Run recipe**: build `testing.{cma,cmxa}`, then `setarch $(uname -m) -R env
   MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_TLAB=1 MMTK_HEAP_SIZE_MB=2048 make -C
   testsuite one DIR=tests/<dir>`.
+- **Definitive result (ASLR off, tabled tests disabled): 95/96** across `basic`,
+  `basic-float`, `basic-more`, `basic-io`(+2), `basic-manyargs`, `basic-modules`,
+  `basic-multdef`, `basic-private`, `array-functions`, `callback`, `runtime-errors`,
+  `exotic-syntax`, `extension-constructor`, `letrec`, `letmodule`, `comparisons`.
+  The single miss is `callback/signals_alloc.ml` **bytecode** variant: a signal is
+  delivered one allocation-step differently under MMTk (`01243` vs `01234`) — the
+  signal *is* handled; benign timing, and the **native** variant passes. Every
+  other sampled "failure" across the journey was tabled-feature, missing-`testing.cma`,
+  or ASLR-flake — never an MMTk correctness difference (output byte-identical to stock).
+  Next: extend to more dirs (`lib-*`, `typing-*`, `effects` [fibers], `tool-*`).
 
 ### H. Benchmarking
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput

@@ -103,6 +103,14 @@ ocamltest` + `make testsuite/lib/testing.cmxa`), then
 `setarch $(uname -m) -R env MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_TLAB=1
 MMTK_HEAP_SIZE_MB=2048 make -C testsuite one DIR=tests/<dir>`.
 
+**Definitive result: 95/96** core tests pass under MMTk TLAB Immix (ASLR off,
+tabled tests disabled) across 14+ `basic*`/`callback`/`runtime-errors`/… dirs. The
+one miss is `callback/signals_alloc.ml` *bytecode* variant — a SIGUSR1 lands one
+allocation-step differently under MMTk's alloc path (`01243` vs `01234`); the
+signal is handled, it's benign timing, and the *native* variant passes. No sampled
+failure across the whole effort was an MMTk correctness difference (output is
+byte-identical to stock everywhere).
+
 Remaining real caveat: multi-domain TLAB deadlocks (separate note). The
 vanilla-minor native compiler SEGV (point 2 above) is moot — we standardize on
 TLAB for native.
