@@ -106,6 +106,10 @@ void mmtk_ocaml_region_barrier(MMTk_Mutator mutator, uintptr_t start, size_t cou
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
 
+/** Pin a block so a moving collection won't relocate it (interim weak/ephemeron
+ * support). Returns false for non-MMTk addresses / inert under non-moving plans. */
+bool mmtk_ocaml_pin_object(const void* addr);
+
 /** Objects relocated by copying collection so far (Immix defrag, etc.). */
 size_t mmtk_ocaml_objects_copied(void);
 

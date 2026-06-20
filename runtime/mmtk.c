@@ -253,6 +253,11 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
     value *headp = heads[h];
     if (*headp != (value) NULL) f(fdata, *headp, headp);
     for (value e = *headp; e != (value) NULL; e = Ephe_link(e)) {
+      /* Pin the ephemeron block so a moving collection can't relocate it: we
+         report its interior fields as root slots just below, and those slot
+         addresses must stay valid through the collection. (Inert/no-op under
+         non-moving plans.) */
+      mmtk_ocaml_pin_object((const void *) e);
       mlsize_t wo = Wosize_val(e);  /* fields: 0 link, 1 data, 2.. keys */
       for (mlsize_t i = 0; i < wo; i++) {
         volatile value *slot = Op_val(e) + i;

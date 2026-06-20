@@ -259,6 +259,23 @@ pub extern "C" fn mmtk_ocaml_objects_copied() -> usize {
     mmtk_ocaml_common::object_model::OBJECTS_COPIED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Pin an OCaml block so a moving collection will not relocate it. Used for the
+/// interim weak/ephemeron handling: `caml_mmtk_scan_ephe_roots` reports the
+/// *interior field slots* of ephemeron/weak-array blocks as roots, which would go
+/// stale if the block itself were relocated under a moving plan (Immix defrag,
+/// GenImmix, …). Pinning the block keeps those slot addresses valid (its fields
+/// are still updated in place when their targets move). No-op (returns false) for
+/// addresses outside MMTk spaces or under non-moving plans where pinning is inert.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_pin_object(addr: *const libc::c_void) -> bool {
+    let address = Address::from_ptr(addr);
+    let object = unsafe { ObjectReference::from_raw_address_unchecked(address) };
+    if !memory_manager::is_in_mmtk_spaces(object) {
+        return false;
+    }
+    memory_manager::pin_object(object)
+}
+
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> bool {
     let addr = Address::from_ptr(addr);

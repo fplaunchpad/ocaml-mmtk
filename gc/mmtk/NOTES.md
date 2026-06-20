@@ -26,10 +26,12 @@ staticlib's absolute build path + the bootstrap/`.opt` double-link check + a mac
 branch). NB a stale bytecode `mmtk.b.o` (missing `caml_mmtk_scan_ephe_roots`) sent
 me down a wrong path first — rebuild `libcamlrun.a` after glue changes.
 
-**`tests/basic` (40 tests): TLAB Immix 33/40; vanilla-minor 19/40.** Two bugs
-found; the `Gc.*` one fixed (it removed a crash class, but the pass count stays
-~33 because the residual failures are dominated by the weak/ephemeron-under-moving
-limitation hitting the *compiler*, see below):
+**`tests/basic` (40 tests; this dir does NOT need `testing.cma`): TLAB Immix
+33/40; vanilla-minor 19/40.** Two bugs found; the `Gc.*` one fixed. (The residual
+`tests/basic` failures are a mix of tabled-feature tests and a couple of
+expect-test diffs — see the correction below; my first read that they were
+"weak/ephemeron in the compiler" was largely wrong, that was the missing-lib
+artifact in *other* dirs.)
 
 1. **`Gc.major`/`full_major`/`compact`/`major_slice` ran the *stock* major-GC
    machinery** (`caml_finish_major_cycle`) on the bypassed stock heap — harmless
@@ -52,17 +54,34 @@ limitation hitting the *compiler*, see below):
    a promotion/remembered-set correctness issue (not yet root-caused, needs rr).
 
 **To run the native testsuite, use TLAB (`MMTK_TLAB=1`, Immix/StickyImmix)**, not
-vanilla-minor. The residual `tests/basic` failures (pr7657, patmatch_*, …) are
-now dominated by the **weak/ephemeron-under-moving limitation hitting the
-*compiler*** itself: compiling larger inputs triggers an MMTk GC that relocates
-the compiler's weak hashtables, and the interim ephe-rooting reports stale
-interior slots → a Rust/MMTk panic ("failed to initiate panic, error 5"). So
-unblocking the native testsuite broadly now depends on **proper weak-reference
-processing** (workstream E) — that's the next big rock, more than the TLAB itself.
-Other remaining caveats: multi-domain TLAB deadlocks (separate note); a couple of
-expect-test output diffs to triage. (A workaround worth considering: compile tests
-on the stock GC and run only the *programs* under MMTk, sidestepping the
-compiler's weak-table use — needs ocamltest support.)
+vanilla-minor.
+
+**CORRECTION (later same day): the bad `tests/basic-more`-style numbers were a
+missing testsuite support lib, not MMTk.** `make one DIR=…` does **not** build
+`testsuite/lib/testing.{cma,cmxa}` (the `testing` helper), which most dirs beyond
+`tests/basic` `open`. Without it every such test fails to *compile* ("file not
+found in include path: testing.cma") — that, not weak/ephemeron, is what tanked
+the broader sweep. Build it once with `make ocamltest` (+ `make
+testsuite/lib/testing.cmxa`; the full `ocamltest` target errors at the end on the
+`--enable-ocamltest` config flag, but the lib/tools build before that). With it
+built: **`tests/basic-more` 20/22 under TLAB Immix**, and the *only* 2 failures are
+**tabled features** — `pr10338` (lazy) and `simplif_under_lambda` (`Gc.finalise_last`).
+So the core runs correctly under MMTk TLAB; failures concentrate in the
+tabled set (weak refs, ephemerons, finalisers, lazy — per the user, deferred).
+
+**Weak tables made memory-safe under moving (pinning).** `caml_mmtk_scan_ephe_roots`
+now `mmtk_ocaml_pin_object`s each ephemeron/weak-array block during the root scan,
+so the interior-slot-roots it reports stay valid under a moving plan (the block
+won't relocate; its field targets still get forwarded). This is *memory safety*
+only — weak-reference *semantics* (clearing dead keys) remain tabled — but it's
+what lets the compiler's internal weak hashtables survive a compile-time moving GC.
+(`object_pinning` is enabled; Immix honors the pin bit.)
+
+**Plan: disable the tabled-feature tests** (remove their `(* TEST *)` block + a
+`disabled under MMTk` comment) so they don't run, then the rest of the suite
+should pass under TLAB Immix. Remaining real caveat: multi-domain TLAB deadlocks
+(separate note). The vanilla-minor native compiler SEGV (point 2 above) is moot if
+we standardize on TLAB for native.
 
 ---
 

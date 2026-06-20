@@ -38,7 +38,7 @@ movement for testing).
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — single-domain works all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix) *and* via vanilla-minor; multi-domain deadlocks under GC pressure (domain-termination STW coordination — root cause known) | 🟡 |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
-| M7 | Pass the OCaml testsuite — started: global-link done, ocamltest builds, `tests/basic` 33/40 under TLAB Immix (vs 19 vanilla-minor); residual failures = weak/ephemeron-under-moving in the *compiler* (workstream E) | 🟡 |
+| M7 | Pass the OCaml testsuite — started: global-link + `testing.cma` built, ocamltest runs; core passes under TLAB Immix (`tests/basic` 33/40, `basic-more` 20/22 — the failures are tabled features: weak/ephemeron/finaliser/lazy, being disabled per plan) | 🟡 |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
@@ -272,19 +272,23 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   feature-gate/skip the rest. Track which suites are gated on which feature.
 - Consider a dedicated "mmtk" ocamltest variant for repeatability.
 
-**Findings (2026-06-20, `tests/basic`, global-link applied on the build box):**
-- TLAB Immix **33/40**; vanilla-minor MarkSweep **19/40** — TLAB is the mode to
-  run the native suite under (it runs the native compiler; vanilla-minor crashes
-  it, see below).
+**Findings (2026-06-20, global-link applied on the build box):**
+- **Run the native suite under TLAB** (`MMTK_TLAB=1`, Immix/StickyImmix) — it runs
+  the native compiler; vanilla-minor crashes the compiler (Buffer corruption in
+  `asmlink` — a vanilla-minor remembered-set bug, moot if we standardize on TLAB).
+- **`testing.cma` must be built** (`make ocamltest` + `make testsuite/lib/testing.cmxa`);
+  `make one` doesn't, so dirs beyond `tests/basic` that `open Testing` all fail to
+  compile without it. This — not weak/ephemeron — was what tanked the first broad
+  sweep.
+- With the lib built: **core passes under TLAB Immix** — `tests/basic` 33/40,
+  `basic-more` 20/22; the failures are **tabled features** (lazy, finalisers, weak,
+  ephemerons), being disabled (remove their `(* TEST *)` block + a comment).
 - Fixed: `Gc.major/full_major/compact/major_slice` corrupting state under TLAB
-  (now route to MMTk — workstream E).
-- The native compiler **SEGVs under vanilla-minor** MMTk (Buffer corruption in
-  `asmlink`); fine under TLAB Immix. A vanilla-minor remembered-set/promotion bug.
-- The residual TLAB failures are the **weak/ephemeron-under-moving limitation
-  hitting the compiler** (its weak hashtables relocate during a compile-time MMTk
-  GC → Rust panic). So broad native-suite passing now depends on **workstream E
-  (proper weak-reference processing)** more than on TLAB. Alternative: teach
-  ocamltest to compile on the stock GC and only *run* programs under MMTk.
+  (now route to MMTk).
+- **Weak tables made memory-safe under moving**: `caml_mmtk_scan_ephe_roots` pins
+  each ephemeron/weak block (`mmtk_ocaml_pin_object`) so its reported interior-slot
+  roots stay valid; the compiler's internal weak hashtables now survive a
+  compile-time moving GC. (Memory safety only; weak *semantics* stay tabled — E.)
 
 ### H. Benchmarking
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput
