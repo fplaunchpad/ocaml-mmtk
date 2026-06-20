@@ -41,11 +41,15 @@ stock nursery; no compiler changes).
    pointers, which the minor GC scans as roots.
 5. **Disable the stock major GC** (mark/sweep slices); route `Gc.*`.
 
-**Decision (2026-06-20): the hazard below is intentionally NOT fixed standalone.**
-The minor↔MMTk GC coordination will be designed properly as part of native
-integration; a bytecode-only fix would be throwaway. The flag-gated vanilla-minor
-mode stays as a validated proof of concept (correct at reasonable heaps). Recipe
-retained below in case it's ever wanted on its own.
+**Decision (2026-06-20): SUPERSEDED — the coordination fix will NOT be done.**
+The proper integration is all-MMTk (MMTk owns the entire heap, including the
+nursery), which has no OCaml minor GC and therefore no minor↔MMTk nested STW —
+the hazard dissolves by construction. Bytecode all-MMTk already works (default
+mode); for native, all-MMTk means TLAB/nursery-aliasing (the inlined fast-path
+bumps an MMTk buffer). The flag-gated vanilla-minor mode (and native's current
+vanilla-minor) is retained only as a *validated fallback* (plan B if TLAB proves
+intractable); the recipe below is what plan B would implement. Do not spend on it
+unless plan B is chosen.
 
 **THE hazard — nested stop-the-world (CONFIRMED: SEGV at tight heaps).** Minor GC
 runs inside an OCaml STW. If a promotion (`alloc_shared` → MMTk) finds the MMTk
@@ -121,9 +125,12 @@ commit `06f3ae7`), but **intermittently hangs** at larger heaps (≈2/6 at 80 MB
 clean at 48/64 MB). This is the **same nested-STW coordination hazard**: a
 terminating domain's `caml_empty_minor_heaps_once` is itself a multi-domain OCaml
 STW, and a promotion inside it that fills MMTk triggers an MMTk GC → nested STW.
-So the deferred minor↔MMTk coordination fix (free_bytes-driven GC-before-minor +
-minor-heap roots) is exactly what's needed here — it resolves both vanilla-minor
-tight heaps and native multidom. Single-domain native is solid (no STW nesting).
+The multidom hang is **not being fixed**: it's superseded by the all-MMTk
+decision (see the matrix/decision notes). Native's proper path is TLAB/nursery
+aliasing (MMTk owns the nursery ⇒ no OCaml minor GC ⇒ no nested STW), which makes
+this hang moot. Vanilla-minor native (single-domain solid; multidom racy) is kept
+as the validated fallback (plan B). Single-domain native has no STW nesting and
+is solid either way.
 
 ## Native-code integration (M5) — strategy & plan
 
