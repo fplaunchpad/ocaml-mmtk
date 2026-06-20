@@ -36,10 +36,11 @@ MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` to force movement for testing).
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
-| M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
+| M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
+| **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
 | — | Concurrent GC: `ConcurrentImmix` exists in 0.32 and runs our tests; concurrent-marking correctness unvalidated | 🟡 |
@@ -298,8 +299,8 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   suite under `setarch $(uname -m) -R`** (ADDR_NO_RANDOMIZE, inherited) → flakiness
   gone (0/40). A binding-side deterministic-metadata fix is a follow-up.
 - **Run recipe**: build `testing.{cma,cmxa}`, then `setarch $(uname -m) -R env
-  MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_TLAB=1 MMTK_HEAP_SIZE_MB=2048 make -C
-  testsuite one DIR=tests/<dir>`.
+  MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=2048 make -C testsuite one
+  DIR=tests/<dir>` (native nursery mode auto-selected from the plan).
 - **Definitive result (ASLR off, tabled tests disabled): 95/96** across `basic`,
   `basic-float`, `basic-more`, `basic-io`(+2), `basic-manyargs`, `basic-modules`,
   `basic-multdef`, `basic-private`, `array-functions`, `callback`, `runtime-errors`,
@@ -315,7 +316,50 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput
 and pause time — on representative workloads. Stock OCaml's major GC is
 incremental/mostly-concurrent with short pauses; MMTk here is parallel STW, so
-pause latency is the interesting axis.
+pause latency is the interesting axis. (Becomes a *within-MMTk* plan comparison
+once the stock GC is excised — M9.)
+
+### I. M9 — MMTk-only: excise the stock GC
+Goal: remove OCaml's stock garbage collector entirely so `mmtk-ocaml` is a
+single-GC runtime — no `MMTK_ENABLED` opt-in, no dual code paths, no stock
+minor/major GC. This deletes the per-allocation `caml_mmtk_enabled` branch and the
+maintenance tax of keeping two GCs correct side by side.
+
+**Gate (prerequisite): a full self-hosting bootstrap must run on MMTk.** Being
+validated now — a from-scratch `make` under `MMTK_ENABLED=1 MMTK_PLAN=Immix`
+(the compiler compiling itself + the world on MMTk); then `make bootstrap` (the
+strict self-hosting cycle, regenerating `boot/`). Stdlib already rebuilds clean
+under MMTk; the M7 testsuite already runs the compiler under MMTk.
+
+Stages (each independently buildable + testable):
+1. **Always-on.** Drop `MMTK_ENABLED`/`caml_mmtk_wanted`; MMTk inits
+   unconditionally at startup. Default plan becomes a *collecting* one (Immix) —
+   NoGC can't sustain the runtime. Remove the `if (caml_mmtk_enabled …)` gates in
+   `Alloc_small`/`caml_alloc_shr`/write barrier/dispatch/domain-init — they become
+   unconditional MMTk. Stock-GC code is now dead.
+2. **Delete the stock minor GC** (`minor_gc.c`): oldify/promotion,
+   `caml_empty_minor_heap*`, the remembered-set tables (`major_ref`/`ephe_ref`/
+   `custom`), the stock path of `caml_alloc_small_dispatch`. Young region is purely
+   the TLAB; the write barrier keeps only MMTk's generational form.
+3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
+   mark/sweep/slices/mark-stack/pool/LOS. `caml_alloc_shr`/`caml_alloc_small` go
+   straight to MMTk.
+4. **Domain + `Gc` module cleanup**: remove the minor-heap arena
+   (`allocate/free_minor_heap_arena`, the reservation) — the nursery comes from
+   MMTk; reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk
+   stats instead of stock counters.
+5. **Header/metadata reconciliation**: the stock color/mark bits in object headers
+   vs MMTk's side metadata — repurpose/retire the unused header fields.
+
+Risks / notes:
+- `boot/` runs on `runtime/ocamlrun`, so once always-on it bootstraps on MMTk;
+  regenerate `boot/` via `make bootstrap`.
+- macOS native linking is still deferred — always-on there needs the native link
+  sorted (currently Linux-only).
+- Weak/ephemeron/finalisers (M6) stay tabled; ensure their stubs don't depend on
+  stock-GC internals as those are deleted.
+- `Gc.stat` semantics shift to MMTk numbers — expect some testsuite reference
+  churn.
 
 ---
 
