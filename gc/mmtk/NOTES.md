@@ -41,15 +41,27 @@ stock nursery; no compiler changes).
    pointers, which the minor GC scans as roots.
 5. **Disable the stock major GC** (mark/sweep slices); route `Gc.*`.
 
-**THE hazard — nested stop-the-world.** Minor GC runs inside an OCaml STW
-(`caml_empty_minor_heaps` via `caml_try_run_on_all_domains`). If a promotion
-(`alloc_shared` → MMTk) finds the MMTk heap full, `mmtk_ocaml_alloc` would trigger
-an MMTk GC (`block_for_gc`) *inside* the minor-GC STW → nested STW → the same
-MMTk-STW-vs-OCaml-STW deadlock class fixed for multi-domain. Promotion must
-**allocate without triggering a collection**, and any needed MMTk GC must run
-*after* the minor GC (at the next safepoint). Plan: reserve MMTk headroom and/or
-trigger an MMTk GC *before* a minor GC when MMTk is near-full (minor-before-major
-ordering), so promotion never collects. This coordination is the main work.
+**THE hazard — nested stop-the-world (CONFIRMED: SEGV at tight heaps).** Minor GC
+runs inside an OCaml STW. If a promotion (`alloc_shared` → MMTk) finds the MMTk
+heap full, `mmtk_ocaml_alloc` triggers an MMTk GC (`block_for_gc`) *inside* the
+minor-GC STW → nested STW, scanning a half-promoted heap → SEGV (seen at
+`torture@16MB`; the same heap is fine in all-MMTk mode). Promotion must **not**
+trigger a collection.
+
+**Concrete fix recipe (MMTk API confirmed):**
+- Expose `memory_manager::free_bytes` / `handle_user_collection_request` via the
+  ABI.
+- **Before** a minor GC (at the `caml_alloc_small_dispatch` safepoint, *not* mid
+  promotion), if `free_bytes < minor_heap_size + margin`, trigger an MMTk GC
+  there. Then the subsequent promotion is guaranteed to fit without collecting.
+- For that pre-minor MMTk GC to be correct, MMTk must see major objects reachable
+  *only via live young objects* — so add a **minor-heap root scan**: walk
+  `[young_ptr, young_end)` header-by-header (safe at a safepoint — all young
+  objects are fully initialised there) and report each object's fields as roots
+  (FieldSlot::classify filters the non-MMTk young targets). Over-conservative
+  (keeps even dead-young's major targets until the next minor GC) but safe.
+- Delicate part: the minor-heap walk (object boundaries) and getting the ordering
+  exactly right. Validate at the tight heaps that currently SEGV.
 
 **Test:** revert bytecode to stock-minor, run the existing battery; old→young and
 churn must survive; compare against the all-MMTk mode. Then native.
