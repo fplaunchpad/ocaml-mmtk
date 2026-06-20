@@ -17,21 +17,21 @@ switch.
 - Design background and rationale: [`fork-handoff.md`](fork-handoff.md).
 - Design notes & deferred investigations: [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md).
 
-> **Status: bring-up.** MMTk backs both the **bytecode** and **native** runtimes,
-> **opt-in** (off by default, so a normal build and the compiler bootstrap run on
-> OCaml's stock GC). `NoGC`, `MarkSweep`, `Immix`, `GenImmix`, and `StickyImmix`
-> all work — the collecting plans collect single- and multi-domain, the moving
-> plans relocate objects, the generational plans use a write barrier, and
-> collection is parallel. Known limitation: weak arrays / ephemerons are only safe
-> under non-moving `MarkSweep` for now (parked — see `ROADMAP.md`).
+> **Status: MMTk is the GC.** As of M9 it is **on by default** for both the
+> **bytecode** and **native** runtimes — a normal `./configure && make` builds and
+> self-hosts (the compiler bootstrap reaches its fixpoint) entirely on MMTk. The
+> stock GC is being excised; a transitional `MMTK_DISABLE=1` escape remains only so
+> the benchmarking phase can compare against it. `NoGC`, `MarkSweep`, `Immix`,
+> `GenImmix`, `StickyImmix` all work — collecting plans collect single- **and**
+> multi-domain (`Domain.spawn`), moving plans relocate, generational plans use a
+> write barrier, collection is parallel. **Native** uses TLAB nursery aliasing
+> (MMTk owns the nursery; no OCaml minor GC), so the native fast-path is unchanged
+> and there are no code-generator changes (validated on x86-64 Linux; arm64/macOS
+> not yet exercised). The default plan is **Immix**.
 >
-> **Native** code runs on MMTk for **single-domain** programs two ways: the
-> default keeps the stock minor heap and promotes to MMTk (`MMTK_VANILLA_MINOR`);
-> the proper all-MMTk path (`MMTK_TLAB=1`, Immix/StickyImmix) makes **MMTk own the
-> nursery too** — the inlined native fast-path bumps an MMTk Immix block, with no
-> OCaml minor GC and no promotion. Multi-domain native (`Domain.spawn`) deadlocks
-> under GC pressure on domain-termination STW coordination (root cause known, fix
-> deferred); see `ROADMAP.md`.
+> Known limitations (see `ROADMAP.md`): weak arrays / ephemerons / finalisers /
+> lazy are not yet supported (parked; their tests are disabled); performance is
+> ~1.4–1.8× of the stock GC on GC-heavy workloads today (tuning in progress).
 
 ## Why bytecode first?
 
@@ -79,35 +79,35 @@ automatically:
 make            # builds the world; the gc/mmtk staticlib is built via cargo
 ```
 
-This produces a normal OCaml toolchain. By default MMTk is **not** active; the
-runtime uses OCaml's stock GC.
+This produces an OCaml toolchain whose runtime is managed by MMTk (the default).
 
-## Running a program under MMTk
+## Running a program
 
-Set `MMTK_ENABLED=1` to have the bytecode runtime manage its heap with MMTk:
+MMTk is on by default — just build and run as usual:
 
 ```sh
-# compile a bytecode program with the freshly built toolchain
 OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun ./ocamlc myprog.ml -o myprog.byte
-
-# run it on MMTk (NoGC by default)
-MMTK_ENABLED=1 OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
+OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte          # runs on MMTk (Immix)
 ```
+
+> On Linux, run under `setarch "$(uname -m)" -R` (disables ASLR) to avoid an
+> occasional MMTk start-up abort (`failed to mmap meta memory`) — a known
+> fixed-address-metadata interaction, see `ROADMAP.md`.
 
 ### Environment knobs
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MMTK_ENABLED` | unset (off) | Set to `1` to let MMTk manage the heap. |
-| `MMTK_PLAN` | `NoGC` | MMTk plan: `NoGC`, `MarkSweep`, `Immix`, `StickyImmix`, … |
+| `MMTK_PLAN` | `Immix` | MMTk plan: `Immix`, `StickyImmix`, `MarkSweep`, `NoGC`, … (native requires an Immix-family plan). |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
 | `MMTK_VERBOSE` | unset | Print MMTk init + a GC/objects-copied summary at exit. |
+| `MMTK_DISABLE` | unset | **Transitional**: set to `1` to fall back to the stock GC (kept only for benchmarking until the stock collector is excised). |
 
-The **native nursery mode is chosen automatically** from the plan — no knob: an
-Immix-family plan (`Immix`/`StickyImmix`/`GenImmix`) uses all-MMTk nursery aliasing
-(MMTk owns the nursery, no OCaml minor GC); any other plan falls back to the stock
-minor heap + promotion. mmtk-core's own `MMTK_*` options also work
-(`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
+mmtk-core's own `MMTK_*` options also work (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
+`MMTK_IMMIX_ALWAYS_DEFRAG`, …). For **native** code, MMTk owns the nursery via TLAB
+nursery-aliasing (no OCaml minor GC), which requires an Immix-family plan
+(`Immix`/`StickyImmix`/`GenImmix`) — a non-Immix plan is a fatal error for native.
+Bytecode allocates through C entry points and works with any plan.
 
 > MMTk's own options are also read from the environment, e.g.
 > `MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` forces Immix
