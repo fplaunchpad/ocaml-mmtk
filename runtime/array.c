@@ -753,7 +753,7 @@ CAMLprim value caml_uniform_array_fill(
      invariants we need to enforce.*/
   fp = &Field(array, ofs);
 #ifndef NATIVE_CODE
-  if (caml_mmtk_enabled) {
+  if (caml_mmtk_enabled && !caml_mmtk_vanilla_minor) {
     /* MMTk owns the heap: do the fill, then remember the whole filled range for
        generational plans (no-op otherwise). Skips OCaml's bypassed
        remembered-set / SATB logic below. */
@@ -761,6 +761,7 @@ CAMLprim value caml_uniform_array_fill(
     caml_mmtk_region_barrier(fp, len);
     return Val_unit;
   }
+  /* vanilla-minor mode: fall through to the stock fill + minor remembered set. */
 #endif
   if (Is_young(array)) {
     for (; len > 0; len--, fp++) *fp = val;

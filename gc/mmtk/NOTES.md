@@ -9,6 +9,18 @@ Each entry is dated and self-contained. Newest first.
 
 *2026-06-20*
 
+**Status: implemented (flag-gated), works at reasonable heaps.** Opt in with
+`MMTK_VANILLA_MINOR=1` (default off = the all-MMTk bypass, unregressed). The
+stock minor heap + minor GC run; `alloc_shared` (promotion) routes to
+`caml_mmtk_alloc_shr`; `Alloc_small`/`write_barrier`/`caml_initialize`/array-fill
+take the stock path in this mode (so the minor remembered set is maintained).
+Validated: large-heap runs (retain/torture/infix/varied) all correct, and
+`retain@32MB` did **12 MMTk major GCs** cleanly. **The nested-STW hazard is real
+and confirmed:** at a very tight heap (`torture@16MB`) an MMTk GC fires *during*
+minor-GC promotion and SEGVs (default all-MMTk mode at 16MB is fine). So
+promotion must not trigger an MMTk GC — the remaining work (see hazard note
+below). Plan/choke-points unchanged:
+
 Decision: keep OCaml's **stock minor heap + minor GC**, make **MMTk the major
 heap**. Validate on bytecode first, with **MarkSweep** as the major plan (non-moving
 → no minor→major dangling, simplest). This both replaces the bytecode all-MMTk

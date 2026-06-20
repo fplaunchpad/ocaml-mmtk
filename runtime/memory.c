@@ -195,10 +195,14 @@ Caml_inline void write_barrier(
      MMTk's barrier — needed by MMTk generational plans (GenImmix/StickyImmix),
      a no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address
      (for caml_modify, obj is the field pointer and field is 0). */
-  if (caml_mmtk_enabled) {
+  if (caml_mmtk_enabled && !caml_mmtk_vanilla_minor) {
     caml_mmtk_region_barrier(Op_val(obj) + field, 1);
     return;
   }
+  /* In vanilla-minor mode, fall through to the stock write barrier: it maintains
+     the minor remembered set (Ref_table_add) for MMTk(major)->minor pointers,
+     which the stock minor GC scans as roots. caml_darken (stock-major SATB) is
+     a no-op because the stock major GC never starts marking under MMTk. */
 #endif
 
   if (!Is_young(obj)) {
@@ -327,12 +331,13 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
 #endif
   *fp = val;
 #ifndef NATIVE_CODE
-  if (caml_mmtk_enabled) {
+  if (caml_mmtk_enabled && !caml_mmtk_vanilla_minor) {
     /* An initialising write into a possibly-mature block; remember the slot for
        MMTk generational plans (no-op otherwise). */
     caml_mmtk_region_barrier(fp, 1);
     return;
   }
+  /* vanilla-minor mode: fall through to the stock minor remembered-set update. */
 #endif
   if (!Is_young((value)fp) && Is_block_and_young (val))
     Ref_table_add(&Caml_state->minor_tables->major_ref, fp);

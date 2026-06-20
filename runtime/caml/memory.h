@@ -249,6 +249,9 @@ enum caml_alloc_small_flags {
    Until caml_mmtk_enabled is set (early runtime bootstrap), fall back to the
    stock minor-heap bump path. See runtime/mmtk.c. */
 extern int caml_mmtk_enabled;
+/* In "vanilla minor + MMTk major" mode, small allocations use the STOCK minor
+   heap (this macro's else branch); MMTk only backs the major heap (promotion). */
+extern int caml_mmtk_vanilla_minor;
 extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                    reserved_t reserved);
 /* An MMTk allocation may stop-the-world and scan roots at any point. In
@@ -266,7 +269,7 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                                 CAMLassert ((wosize) >= 1); \
                                           CAMLassert ((tag_t) (tag) < 256); \
                                  CAMLassert ((wosize) <= Max_young_wosize); \
-  if (caml_mmtk_enabled) {                                                  \
+  if (caml_mmtk_enabled && !caml_mmtk_vanilla_minor) {                      \
     /* Publish interp roots, allocate into a temp (the allocation may GC),   \
        restore roots, THEN assign result. The temp is essential: when result \
        is `accu`/`env`, Restore_after_gc would otherwise clobber it. */      \

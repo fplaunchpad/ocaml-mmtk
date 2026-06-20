@@ -32,6 +32,12 @@
 
 int caml_mmtk_enabled = 0;
 
+/* Experimental "vanilla minor heap + MMTk major heap" mode (MMTK_VANILLA_MINOR=1):
+   keep OCaml's stock nursery + minor GC, but redirect promotion to MMTk and let
+   MMTk own the major heap. When 0 (default), MMTk backs every allocation and the
+   minor heap is bypassed. Read on the allocation fast path, so a plain int. */
+int caml_mmtk_vanilla_minor = 0;
+
 static int caml_mmtk_initialised = 0;
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
@@ -107,6 +113,10 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 {
   if (!caml_mmtk_wanted()) return;  /* stock GC unless explicitly enabled */
   caml_mmtk_init();
+  {
+    const char *vm = getenv("MMTK_VANILLA_MINOR");
+    caml_mmtk_vanilla_minor = (vm != NULL && vm[0] != '\0' && strcmp(vm, "0") != 0);
+  }
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before
      an allocation can trigger a collection). */

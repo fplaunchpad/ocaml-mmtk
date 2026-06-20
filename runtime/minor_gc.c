@@ -38,6 +38,7 @@
 #include "caml/platform.h"
 #include "caml/roots.h"
 #include "caml/shared_heap.h"
+#include "caml/mmtk.h"
 #include "caml/signals.h"
 #include "caml/startup_aux.h"
 #include "caml/weak.h"
@@ -152,6 +153,17 @@ struct oldify_state {
 static value alloc_shared(caml_domain_state* d,
                           mlsize_t wosize, tag_t tag, reserved_t reserved)
 {
+#ifndef NATIVE_CODE
+  /* "vanilla minor + MMTk major" mode: promote into MMTk's major heap rather
+     than OCaml's stock shared heap. Only reached when caml_mmtk_vanilla_minor is
+     set (otherwise the minor heap is bypassed and the minor GC never runs).
+     NB: this is inside the minor-GC stop-the-world, so it must NOT trigger an
+     MMTk collection — relies on MMTk headroom for now (see NOTES: nested-STW
+     hazard). TODO: reserved bits are dropped (mixed blocks unsupported here). */
+  if (caml_mmtk_enabled) {
+    return caml_mmtk_alloc_shr(wosize, tag, reserved);
+  }
+#endif
   void* mem = caml_shared_try_alloc(d->shared_heap, wosize, tag,
                                     reserved);
   caml_update_major_allocated_words(
