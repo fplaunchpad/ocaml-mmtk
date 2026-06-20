@@ -33,7 +33,7 @@ let bytecode_cppflags = {@QS@|@bytecode_cppflags@|@QS@}
 let native_cflags = {@QS@|@native_cflags@|@QS@}
 let native_cppflags = {@QS@|@native_cppflags@|@QS@}
 
-let bytecomp_c_libraries = {@QS@|@zstd_libs@ @cclibs@|@QS@}
+let bytecomp_c_libraries = {@QS@|@mmtk_c_libraries@ @zstd_libs@ @cclibs@|@QS@}
 (* bytecomp_c_compiler and native_c_compiler have been supported for a
    long time and are retained for backwards compatibility.
    For programs that don't need compatibility with older OCaml releases
@@ -44,7 +44,7 @@ let bytecomp_c_compiler =
   c_compiler ^ " " ^ bytecode_cflags ^ " " ^ bytecode_cppflags
 let native_c_compiler =
   c_compiler ^ " " ^ native_cflags ^ " " ^ native_cppflags
-let native_c_libraries = {@QS@|@cclibs@|@QS@}
+let native_c_libraries = {@QS@|@mmtk_c_libraries@ @cclibs@|@QS@}
 let compression_c_libraries = {@QS@|@zstd_libs@|@QS@}
 let native_ldflags = {@QS@|@native_ldflags@|@QS@}
 let with_nonexecstack_note = @with_nonexecstack_note@
