@@ -262,6 +262,18 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
   }
 }
 
+/* Service an explicit `Gc` collection request (Gc.major / full_major / compact).
+   Under MMTk the stock major-GC machinery (caml_finish_major_cycle) must NOT run
+   — it operates on the bypassed stock shared heap and corrupts state (observed:
+   channel/custom-block corruption → crash under a moving plan). Instead trigger a
+   real MMTk collection on the calling domain and block until it completes. No-op
+   for NoGC (cannot collect) and when MMTk is disabled. */
+void caml_mmtk_collect(void)
+{
+  if (caml_mmtk_enabled && caml_mmtk_collects)
+    mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
+}
+
 /* Generational write barrier. Records that `count` value-sized slots starting
    at `start` may now hold pointers into the nursery, so a young collection
    scans them. Called from caml_modify/write_barrier (count 1, slot-based —

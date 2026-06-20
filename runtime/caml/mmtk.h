@@ -34,6 +34,11 @@ extern int caml_mmtk_tlab;
  * allocation needs. Returns 1 on success, 0 on exhaustion / unsupported plan. */
 extern int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize);
 
+/* Service an explicit Gc.major/full_major/compact request by triggering a real
+ * MMTk collection (rather than the stock major-GC machinery, which is bypassed
+ * under MMTk). No-op for NoGC and when MMTk is disabled. */
+extern void caml_mmtk_collect(void);
+
 /* Initialise MMTk once for the process. Reads the plan from the MMTK_PLAN
  * environment variable (default "NoGC") and the heap size from
  * MMTK_HEAP_SIZE_MB (default 1024 MiB). Idempotent. */

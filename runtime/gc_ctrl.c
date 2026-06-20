@@ -39,6 +39,7 @@
 #include "caml/startup.h"
 #include "caml/fail.h"
 #include "caml/callback.h"
+#include "caml/mmtk.h"
 #include <string.h>
 
 atomic_uintnat caml_max_stack_wsize;
@@ -246,9 +247,15 @@ static caml_result gc_major_res(int force_compaction)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MAJOR);
   caml_gc_log ("Major GC cycle requested");
-  caml_empty_minor_heaps_once();
-  caml_finish_major_cycle(force_compaction);
-  caml_reset_major_pacing(false);
+  if (caml_mmtk_enabled) {
+    /* MMTk owns the heap: run a real MMTk collection, not the stock major cycle
+       (which would corrupt the bypassed stock heap state). */
+    caml_mmtk_collect();
+  } else {
+    caml_empty_minor_heaps_once();
+    caml_finish_major_cycle(force_compaction);
+    caml_reset_major_pacing(false);
+  }
   caml_result result = caml_process_pending_actions_res();
   CAML_EV_END(EV_EXPLICIT_GC_MAJOR);
   return result;
@@ -265,6 +272,12 @@ static caml_result gc_full_major_res(void)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_FULL_MAJOR);
   caml_gc_log ("Full Major GC requested");
+  if (caml_mmtk_enabled) {
+    /* MMTk: trigger a real collection instead of the stock major cycle. */
+    caml_mmtk_collect();
+    caml_result res = caml_process_pending_actions_res();
+    if (caml_result_is_exception(res)) return res;
+  } else {
   /* In general, it can require up to 3 GC cycles for a
      currently-unreachable object to be collected. */
   for (int i = 0; i < 3; i++) {
@@ -272,6 +285,7 @@ static caml_result gc_full_major_res(void)
     caml_reset_major_pacing(i == 2);
     caml_result res = caml_process_pending_actions_res();
     if (caml_result_is_exception(res)) return res;
+  }
   }
   ++ Caml_state->stat_forced_major_collections;
   CAML_EV_END(EV_EXPLICIT_GC_FULL_MAJOR);
@@ -289,7 +303,10 @@ CAMLprim value caml_gc_major_slice (value v)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MAJOR_SLICE);
   CAMLassert (Is_long (v));
-  caml_major_collection_slice(Long_val(v));
+  /* MMTk does whole-heap STW collections, not incremental slices: skip the stock
+     slice (reclamation happens at the next MMTk collection). */
+  if (!caml_mmtk_enabled)
+    caml_major_collection_slice(Long_val(v));
   caml_result result = caml_process_pending_actions_res();
   CAML_EV_END(EV_EXPLICIT_GC_MAJOR_SLICE);
   return caml_get_value_or_raise(result);
@@ -301,6 +318,11 @@ CAMLprim value caml_gc_compaction(value v)
   CAML_EV_BEGIN(EV_EXPLICIT_GC_COMPACT);
   CAMLassert (v == Val_unit);
   caml_result result = Result_unit;
+  if (caml_mmtk_enabled) {
+    /* MMTk: a collection (Immix may defrag) stands in for stock compaction. */
+    caml_mmtk_collect();
+    result = caml_process_pending_actions_res();
+  } else {
   /* We do a full major before this compaction. See [caml_full_major_res] for
      why this needs three iterations. */
   for (int i = 0; i < 3; i++) {
@@ -308,6 +330,7 @@ CAMLprim value caml_gc_compaction(value v)
     caml_reset_major_pacing(i == 2);
     result = caml_process_pending_actions_res();
     if (caml_result_is_exception(result)) break;
+  }
   }
   ++ Caml_state->stat_forced_major_collections;
   CAML_EV_END(EV_EXPLICIT_GC_COMPACT);

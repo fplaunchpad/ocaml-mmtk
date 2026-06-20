@@ -5,6 +5,67 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Testsuite (M7) bring-up: global link, and first two bugs surfaced
+
+*2026-06-20*
+
+Started running OCaml's own testsuite under MMTk. Findings so far:
+
+**Global link (prerequisite, validated).** `ocamltest` is built `-custom`, and
+`-custom`/native test exes link `libcamlrun.a`/`libasmrun.a`, which now contain
+`mmtk.c` and reference `mmtk_ocaml_*`. They only link if the MMTk staticlib is on
+the link line. The fix that works: add the staticlib to **`bytecomp_c_libraries`
+and `native_c_libraries`** (config) — `ocamlc`/`ocamlopt` place these *after* the
+runtime lib, the same ordering that makes the standard `ocamlrun` link resolve
+(plain, no `--whole-archive`; this also obsoletes the `--whole-archive` dance in
+the native test-compile script). Per-target `-cclib` does *not* work (it lands
+before the runtime lib). Validated by editing `utils/config.generated.ml` directly
+on the build box + rebuilding the compilers (incl. `ocamlc.opt`/`ocamlopt.opt`,
+which embed config). **Still to do: make it committable via `configure.ac`** (the
+staticlib's absolute build path + the bootstrap/`.opt` double-link check + a macOS
+branch). NB a stale bytecode `mmtk.b.o` (missing `caml_mmtk_scan_ephe_roots`) sent
+me down a wrong path first — rebuild `libcamlrun.a` after glue changes.
+
+**`tests/basic` (40 tests): TLAB Immix 33/40; vanilla-minor 19/40.** Two bugs
+found; the `Gc.*` one fixed (it removed a crash class, but the pass count stays
+~33 because the residual failures are dominated by the weak/ephemeron-under-moving
+limitation hitting the *compiler*, see below):
+
+1. **`Gc.major`/`full_major`/`compact`/`major_slice` ran the *stock* major-GC
+   machinery** (`caml_finish_major_cycle`) on the bypassed stock heap — harmless
+   under non-moving vanilla-minor, but **corrupts state under TLAB Immix**
+   (observed: stdout channel's mutex pointer overwritten with an MMTk-heap address
+   → SIGSEGV in `caml_channel_lock` on the next `Printf`). Minimal repro:
+   `Array.init 300 …; Gc.full_major ()`. **Fixed:** under `caml_mmtk_enabled` these
+   route to `caml_mmtk_collect` (→ `mmtk_ocaml_handle_user_collection_request`, a
+   real MMTk STW collection); `major_slice` is a no-op (MMTk is whole-heap STW).
+   `Gc.stat` still reads stock counters (meaningless but not a crash — separate
+   audit item).
+
+2. **The native compiler `ocamlopt.opt`/`ocamlc.opt` SEGVs under *vanilla-minor*
+   MMTk** (MarkSweep and GenImmix-fallback) — corrupt `Buffer` field, garbage
+   index in `CamlinternalFormat.strput_acc` during `asmlink.make_startup_file`.
+   Reliably reproducible compiling any Printf-using program (enough link-time
+   symbols). **It does NOT reproduce under TLAB Immix** — i.e. the all-MMTk/TLAB
+   path runs the native compiler correctly where the vanilla-minor intermediate
+   does not. Strong validation of the all-MMTk direction; the vanilla-minor bug is
+   a promotion/remembered-set correctness issue (not yet root-caused, needs rr).
+
+**To run the native testsuite, use TLAB (`MMTK_TLAB=1`, Immix/StickyImmix)**, not
+vanilla-minor. The residual `tests/basic` failures (pr7657, patmatch_*, …) are
+now dominated by the **weak/ephemeron-under-moving limitation hitting the
+*compiler*** itself: compiling larger inputs triggers an MMTk GC that relocates
+the compiler's weak hashtables, and the interim ephe-rooting reports stale
+interior slots → a Rust/MMTk panic ("failed to initiate panic, error 5"). So
+unblocking the native testsuite broadly now depends on **proper weak-reference
+processing** (workstream E) — that's the next big rock, more than the TLAB itself.
+Other remaining caveats: multi-domain TLAB deadlocks (separate note); a couple of
+expect-test output diffs to triage. (A workaround worth considering: compile tests
+on the stock GC and run only the *programs* under MMTk, sidestepping the
+compiler's weak-table use — needs ocamltest support.)
+
+---
+
 ## Vanilla minor heap + MMTk major heap (chosen architecture)
 
 *2026-06-20*

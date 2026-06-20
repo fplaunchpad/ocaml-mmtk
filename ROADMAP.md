@@ -38,7 +38,7 @@ movement for testing).
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — single-domain works all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix) *and* via vanilla-minor; multi-domain deadlocks under GC pressure (domain-termination STW coordination — root cause known) | 🟡 |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
-| M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
+| M7 | Pass the OCaml testsuite — started: global-link done, ocamltest builds, `tests/basic` 33/40 under TLAB Immix (vs 19 vanilla-minor); residual failures = weak/ephemeron-under-moving in the *compiler* (workstream E) | 🟡 |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
@@ -205,9 +205,13 @@ OCaml semantics MMTk must preserve:
   finalisable values alive. Wire MMTk's finalizable processing.
 - **Lazy values** — work today (ordinary mutable blocks; no special GC support
   needed). Verified under MarkSweep + Immix.
-- **`Gc` module** (`full_major`/`minor`/`stat`/`compact`/`allocated_bytes`) —
-  work in isolation but operate on the bypassed stock heap structures; audit for
-  correctness/meaning under MMTk (e.g. `Gc.stat` reports stock counters).
+- **`Gc` module** — ✅ `Gc.major`/`full_major`/`compact`/`major_slice` now route
+  to MMTk (`caml_mmtk_collect` → `handle_user_collection_request`) instead of the
+  stock major-GC machinery. The stock path ran `caml_finish_major_cycle` on the
+  bypassed stock heap and **corrupted state under TLAB Immix** (channel mutex
+  pointer clobbered → SIGSEGV; repro `Array.init 300…; Gc.full_major ()`). Still
+  TODO: `Gc.stat`/`allocated_bytes`/counters report stock numbers (meaningless
+  under MMTk, but not a crash) — map to MMTk stats.
 
 ### F. Native-code integration — 🔜 active
 Native inlines a downward bump-pointer alloc in a dedicated register
@@ -267,6 +271,20 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   finalisers, `Gc.*` semantics, mixed blocks) vs *real bug* — fix the real bugs,
   feature-gate/skip the rest. Track which suites are gated on which feature.
 - Consider a dedicated "mmtk" ocamltest variant for repeatability.
+
+**Findings (2026-06-20, `tests/basic`, global-link applied on the build box):**
+- TLAB Immix **33/40**; vanilla-minor MarkSweep **19/40** — TLAB is the mode to
+  run the native suite under (it runs the native compiler; vanilla-minor crashes
+  it, see below).
+- Fixed: `Gc.major/full_major/compact/major_slice` corrupting state under TLAB
+  (now route to MMTk — workstream E).
+- The native compiler **SEGVs under vanilla-minor** MMTk (Buffer corruption in
+  `asmlink`); fine under TLAB Immix. A vanilla-minor remembered-set/promotion bug.
+- The residual TLAB failures are the **weak/ephemeron-under-moving limitation
+  hitting the compiler** (its weak hashtables relocate during a compile-time MMTk
+  GC → Rust panic). So broad native-suite passing now depends on **workstream E
+  (proper weak-reference processing)** more than on TLAB. Alternative: teach
+  ocamltest to compile on the stock GC and only *run* programs under MMTk.
 
 ### H. Benchmarking
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput
