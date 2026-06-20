@@ -126,12 +126,6 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 {
   if (!caml_mmtk_wanted()) return;  /* stock GC unless explicitly enabled */
   caml_mmtk_init();
-  {
-    const char *vm = getenv("MMTK_VANILLA_MINOR");
-    caml_mmtk_vanilla_minor = (vm != NULL && vm[0] != '\0' && strcmp(vm, "0") != 0);
-    const char *tl = getenv("MMTK_TLAB");
-    caml_mmtk_tlab = (tl != NULL && tl[0] != '\0' && strcmp(tl, "0") != 0);
-  }
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before
      an allocation can trigger a collection). */
@@ -141,22 +135,25 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   }
   caml_mmtk_enabled = 1;
 
-  /* TLAB mode: repoint the domain's young region at a fresh MMTk Immix block now,
-     so the very first allocation lands in MMTk-owned memory rather than the stock
-     minor arena (which then sits unused). If the active plan has no Immix Default
-     allocator (e.g. NoGC/MarkSweep), TLAB is unsupported — fall back to the
-     validated vanilla-minor model. */
-  if (caml_mmtk_tlab) {
-    if (!caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
-      caml_mmtk_tlab = 0;
-      caml_mmtk_vanilla_minor = 1;
-      if (getenv("MMTK_VERBOSE") != NULL)
-        fprintf(stderr, "[mmtk] MMTK_TLAB requested but plan has no Immix TLAB; "
-                        "falling back to vanilla-minor\n");
-    } else if (getenv("MMTK_VERBOSE") != NULL) {
-      fprintf(stderr, "[mmtk] TLAB nursery aliasing active (young = MMTk block)\n");
-    }
+#ifdef NATIVE_CODE
+  /* Native code inlines a bump allocator over the young region, so the nursery
+     mode is chosen automatically by the plan (no env knob): prefer all-MMTk
+     nursery aliasing (TLAB) when the plan exposes an Immix Default allocator
+     (Immix / StickyImmix / GenImmix) — MMTk then owns the nursery, no minor GC.
+     Otherwise (a non-bump Default, e.g. MarkSweep's free-list or NoGC), fall back
+     to the stock minor heap + promotion. Bytecode allocates through C entry points
+     and is always all-MMTk, so neither flag is set there. */
+  if (caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
+    caml_mmtk_tlab = 1;
+    if (getenv("MMTK_VERBOSE") != NULL)
+      fprintf(stderr, "[mmtk] native nursery: TLAB (MMTk-owned Immix block)\n");
+  } else {
+    caml_mmtk_vanilla_minor = 1;
+    if (getenv("MMTK_VERBOSE") != NULL)
+      fprintf(stderr, "[mmtk] native nursery: vanilla-minor "
+                      "(plan has no Immix Default allocator)\n");
   }
+#endif
 }
 
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)

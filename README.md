@@ -98,13 +98,16 @@ MMTK_ENABLED=1 OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MMTK_ENABLED` | unset (off) | Set to `1` to let MMTk manage the bytecode heap. |
-| `MMTK_PLAN` | `NoGC` | MMTk plan: `NoGC`, `MarkSweep`, `Immix`, … |
+| `MMTK_ENABLED` | unset (off) | Set to `1` to let MMTk manage the heap. |
+| `MMTK_PLAN` | `NoGC` | MMTk plan: `NoGC`, `MarkSweep`, `Immix`, `StickyImmix`, … |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
-| `MMTK_GC_THREADS` | core count | Number of parallel GC worker threads. |
-| `MMTK_VANILLA_MINOR` | unset (off) | Keep OCaml's stock minor heap + minor GC; promote survivors into MMTk (MMTk owns only the major heap). The native default. |
-| `MMTK_TLAB` | unset (off) | All-MMTk native nursery aliasing: MMTk owns the nursery too (the young region is an MMTk Immix block; no OCaml minor GC). Single-domain; requires an Immix `Default` plan (`Immix`/`StickyImmix`), else falls back to vanilla-minor. |
 | `MMTK_VERBOSE` | unset | Print MMTk init + a GC/objects-copied summary at exit. |
+
+The **native nursery mode is chosen automatically** from the plan — no knob: an
+Immix-family plan (`Immix`/`StickyImmix`/`GenImmix`) uses all-MMTk nursery aliasing
+(MMTk owns the nursery, no OCaml minor GC); any other plan falls back to the stock
+minor heap + promotion. mmtk-core's own `MMTK_*` options also work
+(`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
 > MMTk's own options are also read from the environment, e.g.
 > `MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` forces Immix

@@ -16,12 +16,12 @@ redirecting a C function); **route all bytecode allocation through MMTk**,
 bypassing the minor heap.
 
 Run knobs: `MMTK_ENABLED` (default off), `MMTK_PLAN` (default `NoGC`),
-`MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_GC_THREADS`, `MMTK_VERBOSE`. Native
-modes: `MMTK_VANILLA_MINOR` (stock minor heap + MMTk major), `MMTK_TLAB`
-(all-MMTk nursery aliasing — MMTk owns the nursery; Immix/StickyImmix,
-single-domain). MMTk's own options are honoured from the environment too (e.g.
-`MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` forces
-movement for testing).
+`MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_VERBOSE`. The native nursery mode is
+**auto-selected from the plan** (no knob): Immix-family plans use all-MMTk TLAB
+nursery aliasing, others fall back to the stock minor heap + promotion. mmtk-core's
+own `MMTK_*` options are honoured from the environment (`MMTK_THREADS`,
+`MMTK_STRESS_FACTOR`, and e.g. `MMTK_IMMIX_ALWAYS_DEFRAG=true
+MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` to force movement for testing).
 
 ---
 

@@ -40,14 +40,9 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         ),
         "failed to set gc_trigger/heap_size"
     );
-    // Optional: pin the number of GC worker threads (MMTK_GC_THREADS) — useful
-    // to make collections deterministic while debugging.
-    if let Ok(n) = std::env::var("MMTK_GC_THREADS") {
-        assert!(
-            memory_manager::process(&mut builder, "threads", &n),
-            "failed to set threads={}", n
-        );
-    }
+    // GC worker thread count is set via mmtk-core's own MMTK_THREADS env var
+    // (read automatically by Options::default → read_env_var_settings), along with
+    // the other pass-through knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …).
 
     let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
     SINGLETON
