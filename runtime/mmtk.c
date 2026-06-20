@@ -33,22 +33,21 @@
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 
+/* MMTk is the garbage collector for this fork. The flag is 0 only during the
+   brief early-startup window before MMTk is initialised and the first domain's
+   mutator is bound (a handful of pre-init allocations take the stock path); it is
+   set to 1 in caml_mmtk_domain_init and stays 1 for the rest of the process. The
+   stock GC is no longer a selectable mode — see the (transitional) MMTK_DISABLE
+   escape hatch below, kept only so the benchmarking phase can compare against the
+   stock GC until the stock collector is excised. */
 int caml_mmtk_enabled = 0;
 
-/* Experimental "vanilla minor heap + MMTk major heap" mode (MMTK_VANILLA_MINOR=1):
-   keep OCaml's stock nursery + minor GC, but redirect promotion to MMTk and let
-   MMTk own the major heap. When 0 (default), MMTk backs every allocation and the
-   minor heap is bypassed. Read on the allocation fast path, so a plain int. */
-int caml_mmtk_vanilla_minor = 0;
-
-/* Native TLAB / nursery-aliasing mode (MMTK_TLAB=1): MMTk owns the nursery too.
-   The inlined native fast-path bumps an MMTk Immix block (handed over by
-   mmtk_ocaml_refill_tlab); when it is exhausted the runtime refills another
-   block instead of running a minor GC. There is no OCaml minor GC and no
-   promotion in this mode — every object is an MMTk object from birth — so the
-   nested-STW hazard of the vanilla-minor model cannot occur. Requires an
-   Immix-family plan (Immix/GenImmix/StickyImmix); falls back to vanilla-minor
-   otherwise. Read on the allocation slow path, so a plain int. */
+/* Native TLAB / nursery-aliasing: MMTk owns the nursery too. The inlined native
+   fast-path bumps an MMTk Immix block (handed over by mmtk_ocaml_refill_tlab);
+   when it is exhausted the runtime refills another block instead of running a
+   minor GC. No OCaml minor GC, no promotion — every object is an MMTk object from
+   birth. Set for native code at domain init; requires an Immix-family plan
+   (Immix/StickyImmix/GenImmix). Read on the allocation slow path, so a plain int. */
 int caml_mmtk_tlab = 0;
 
 static int caml_mmtk_initialised = 0;
@@ -75,8 +74,12 @@ void caml_mmtk_init(void)
 {
   if (caml_mmtk_initialised) return;
 
+  /* Default to a collecting plan now that MMTk is always on (NoGC can't sustain
+     the runtime). Immix is the most-validated plan that supports native TLAB
+     nursery aliasing; StickyImmix (generational) is the likely perf default, to
+     be switched after the benchmarking phase confirms it. */
   const char *plan = getenv("MMTK_PLAN");
-  if (plan == NULL || plan[0] == '\0') plan = "NoGC";
+  if (plan == NULL || plan[0] == '\0') plan = "Immix";
 
   size_t heap_mb = 1024;
   const char *heap_env = getenv("MMTK_HEAP_SIZE_MB");
@@ -110,21 +113,20 @@ static void caml_mmtk_report_copied(void)
           mmtk_ocaml_objects_copied());
 }
 
-/* MMTk is opt-in during bring-up: it manages the heap only when MMTK_ENABLED is
-   set to something other than "0"/empty. Default off, so a normal build and the
-   self-hosting compiler bootstrap run on OCaml's stock GC. NoGC in particular
-   cannot sustain the compiler build (it never reclaims), so always-on would
-   break `make`. Enable explicitly to exercise MMTk:
-     MMTK_ENABLED=1 [MMTK_PLAN=NoGC] [MMTK_HEAP_SIZE_MB=1024] ./runtime/ocamlrun prog.byte */
+/* MMTk is this fork's garbage collector and is ON by default. The only escape is
+   a TRANSITIONAL opt-out, MMTK_DISABLE=1, kept solely so the benchmarking phase
+   can still measure the stock GC; it will be removed when the stock collector is
+   excised. (NoGC can't sustain the runtime, so the default plan is Immix.) */
 static int caml_mmtk_wanted(void)
 {
-  const char *e = getenv("MMTK_ENABLED");
-  return e != NULL && e[0] != '\0' && strcmp(e, "0") != 0;
+  const char *e = getenv("MMTK_DISABLE");
+  int disabled = (e != NULL && e[0] != '\0' && strcmp(e, "0") != 0);
+  return !disabled;
 }
 
 void caml_mmtk_domain_init(caml_domain_state *dom)
 {
-  if (!caml_mmtk_wanted()) return;  /* stock GC unless explicitly enabled */
+  if (!caml_mmtk_wanted()) return;  /* transitional MMTK_DISABLE escape only */
   caml_mmtk_init();
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before
@@ -136,22 +138,19 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   caml_mmtk_enabled = 1;
 
 #ifdef NATIVE_CODE
-  /* Native code inlines a bump allocator over the young region, so the nursery
-     mode is chosen automatically by the plan (no env knob): prefer all-MMTk
-     nursery aliasing (TLAB) when the plan exposes an Immix Default allocator
-     (Immix / StickyImmix / GenImmix) — MMTk then owns the nursery, no minor GC.
-     Otherwise (a non-bump Default, e.g. MarkSweep's free-list or NoGC), fall back
-     to the stock minor heap + promotion. Bytecode allocates through C entry points
-     and is always all-MMTk, so neither flag is set there. */
+  /* Native code inlines a bump allocator over the young region, so MMTk owns the
+     nursery via TLAB nursery-aliasing. This requires the plan to expose an Immix
+     Default allocator (Immix / StickyImmix / GenImmix) — the supported set for
+     native. (Bytecode allocates through C entry points and is all-MMTk directly,
+     so this is native-only.) */
   if (caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
     caml_mmtk_tlab = 1;
     if (getenv("MMTK_VERBOSE") != NULL)
       fprintf(stderr, "[mmtk] native nursery: TLAB (MMTk-owned Immix block)\n");
   } else {
-    caml_mmtk_vanilla_minor = 1;
-    if (getenv("MMTK_VERBOSE") != NULL)
-      fprintf(stderr, "[mmtk] native nursery: vanilla-minor "
-                      "(plan has no Immix Default allocator)\n");
+    caml_fatal_error(
+      "MMTk native code requires an Immix-family plan (Immix/StickyImmix/GenImmix); "
+      "MMTK_PLAN=%s has no Immix Default allocator", getenv("MMTK_PLAN") ? getenv("MMTK_PLAN") : "Immix");
   }
 #endif
 }

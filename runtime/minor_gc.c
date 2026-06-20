@@ -153,12 +153,10 @@ struct oldify_state {
 static value alloc_shared(caml_domain_state* d,
                           mlsize_t wosize, tag_t tag, reserved_t reserved)
 {
-  /* MMTk owns the major heap: promote into MMTk rather than OCaml's stock shared
-     heap. For bytecode this is the "vanilla minor + MMTk major" mode
-     (caml_mmtk_vanilla_minor); for native it is the only mode (the inlined
-     fast-path keeps the stock nursery). NB: inside the minor-GC stop-the-world,
-     so it must NOT trigger an MMTk collection — relies on MMTk headroom for now
-     (see NOTES: nested-STW hazard). TODO: reserved bits dropped (mixed blocks). */
+  /* Promotion path of the stock minor GC. Under MMTk-only this is effectively
+     dead — there is no OCaml minor GC promotion (native TLAB and bytecode
+     all-MMTk both skip it) — but it is kept (routing to MMTk) until the stock GC
+     is excised. TODO: reserved bits dropped (mixed blocks). */
   if (caml_mmtk_enabled) {
     return caml_mmtk_alloc_shr(wosize, tag, reserved);
   }
