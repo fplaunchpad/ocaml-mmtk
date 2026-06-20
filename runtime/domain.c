@@ -1004,12 +1004,10 @@ static void domain_create(uintnat initial_minor_heap_wsize,
   domain_state->trap_barrier_block = -1;
 #endif
 
-#ifndef NATIVE_CODE
   /* MMTk: bind this domain as a mutator now that its state is fully
-     initialised (minor/shared heap, stacks, roots). Enables the MMTk
-     allocation path for the bytecode runtime. */
+     initialised (minor/shared heap, stacks, roots). Enables the MMTk major heap
+     for both the bytecode and native runtimes. */
   caml_mmtk_domain_init(domain_state);
-#endif
 
   activate_parked_domain(d);
   goto domain_init_complete;
@@ -2159,11 +2157,9 @@ void caml_handle_gc_interrupt(void)
 {
   CAMLalloc_point_here;
 
-#ifndef NATIVE_CODE
   /* MMTk multi-domain STW: if a collection is in progress, park this domain at
      the safepoint (roots are published) until it finishes. */
   caml_mmtk_stw_poll();
-#endif
 
   if (caml_incoming_interrupts_queued()) {
     /* interrupt */
@@ -2287,12 +2283,10 @@ void caml_domain_terminate(bool last)
   caml_domain_stop_hook();
   call_timing_hook(&caml_domain_terminated_hook);
 
-#ifndef NATIVE_CODE
   /* No OCaml code runs on this domain after this point: deregister it from MMTk
      so a future stop-the-world doesn't wait for it (parking first if a
      collection is currently in progress). */
   caml_mmtk_domain_terminate(domain_state);
-#endif
 
   while (!finished) {
     caml_finish_sweeping();

@@ -181,18 +181,14 @@ CAMLexport void caml_enter_blocking_section(void)
     if (atomic_load_relaxed(&domain->young_limit) != CAML_UINTNAT_MAX) break;
     caml_leave_blocking_section_hook ();
   }
-#ifndef NATIVE_CODE
   /* Now committed to the blocking section: safe for MMTk STW. */
   caml_mmtk_enter_blocking();
-#endif
 }
 
 CAMLexport void caml_enter_blocking_section_no_pending(void)
 {
   caml_enter_blocking_section_hook ();
-#ifndef NATIVE_CODE
   caml_mmtk_enter_blocking();
-#endif
 }
 
 CAMLexport void caml_leave_blocking_section(void)
@@ -201,11 +197,9 @@ CAMLexport void caml_leave_blocking_section(void)
   /* Save the value of errno (PR#5982). */
   saved_errno = errno;
   caml_leave_blocking_section_hook ();
-#ifndef NATIVE_CODE
   /* Leaving the blocking section: wait out any in-progress MMTk collection
      before running OCaml again, then stop counting as safe-stopped. */
   caml_mmtk_leave_blocking();
-#endif
   Caml_check_caml_state();
 
   /* Some other thread may have switched [Caml_state->action_pending]

@@ -17,7 +17,9 @@
 
 #include "caml/config.h"
 
-#ifndef NATIVE_CODE
+/* The MMTk glue is compiled into both the bytecode and native runtimes. The few
+   bytecode-interpreter-specific bits (caml_mmtk_alloc_small) are harmless when
+   linked into native code (unused). */
 
 #include "caml/mlvalues.h"
 #include "caml/domain_state.h"
@@ -280,5 +282,3 @@ void caml_mmtk_domain_terminate(caml_domain_state *dom)
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
   dom->mmtk_mutator = NULL;
 }
-
-#endif /* NATIVE_CODE */

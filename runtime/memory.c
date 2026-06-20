@@ -448,13 +448,11 @@ Caml_inline value alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved,
                             int noexc)
 {
   Caml_check_caml_state();
-#ifndef NATIVE_CODE
-  /* MMTk bytecode bring-up: route shared (large/old) allocations through MMTk
-     once enabled. See runtime/mmtk.c. */
+  /* MMTk owns the major heap: route shared (large/old) allocations through MMTk
+     once enabled (bytecode and native). See runtime/mmtk.c. */
   if (caml_mmtk_enabled) {
     return caml_mmtk_alloc_shr(wosize, tag, reserved);
   }
-#endif
   caml_domain_state *dom_st = Caml_state;
   value *v = caml_shared_try_alloc(dom_st->shared_heap,
                                    wosize, tag, reserved);

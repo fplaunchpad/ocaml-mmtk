@@ -13,7 +13,6 @@
 #define CAML_MMTK_H
 
 #ifdef CAML_INTERNALS
-#ifndef NATIVE_CODE
 
 #include "config.h"
 #include "mlvalues.h"
@@ -72,7 +71,6 @@ extern void caml_mmtk_enter_blocking(void);
 extern void caml_mmtk_leave_blocking(void);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
 
-#endif /* NATIVE_CODE */
 #endif /* CAML_INTERNALS */
 
 #endif /* CAML_MMTK_H */
