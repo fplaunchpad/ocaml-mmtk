@@ -106,10 +106,13 @@ internals; **it is feasible** with this design:
   alternative "always-slow-path, alloc a region per comballoc" approach).
 - ✅ MMTk exposes the pieces: `BumpPointer{cursor,limit,reset}` pub;
   `Plan::get_allocator_mapping()` and `Allocators::get_allocator(_mut)` pub.
-- ⚠️ One plumbing wrinkle: `Mutator::allocators` is `pub(crate)`, so the binding
-  reaches the active allocator via an offset/unsafe accessor (the standard
-  MMTk VM fast-path mechanism, as mmtk-julia/ruby do) — not a blocker, just
-  plumbing.
+- ✅ The `pub(crate) Mutator::allocators` gate is resolved by **`AllocatorInfo`**
+  (mmtk-core 0.32): `memory_manager::get_allocator_mapping::<VM>(Default)` gives
+  the `AllocatorSelector`, and `AllocatorInfo::new(selector)` gives the
+  allocator's byte offset within the `Mutator`; the binding reads/writes the
+  `ImmixAllocator.bump_pointer` (`cursor`/`limit`) at that offset. This is the
+  exact mechanism mmtk-julia uses for its inlined fast path — so it's a known,
+  supported path, not a hack.
 - ⚠️ `young_limit` dual role (GC trigger + STW-interrupt poison): set the "real"
   limit = block `cursor`; the existing interrupt poison/`caml_reset_young_limit`
   path still works.
