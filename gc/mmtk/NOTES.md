@@ -72,6 +72,31 @@ trigger a collection.
 **Test:** revert bytecode to stock-minor, run the existing battery; old→young and
 churn must survive; compare against the all-MMTk mode. Then native.
 
+## Native-code integration (M5) — WORKING for single-domain
+
+*2026-06-20*
+
+**Native OCaml code runs on MMTk (single-domain).** A program compiled by
+`ocamlopt.opt` allocates in the stock minor heap (inlined fast-path, unchanged),
+**promotes survivors into MMTk**, churns garbage, triggers **MMTk major GCs**
+(verified 1/2/3 GCs at 48/32/24 MB), and produces correct results — proving
+native **root scanning works** (the live set survives via frame-descriptor roots
+→ `caml_do_roots` → our scanner; this was the big unknown). The vanilla-minor +
+MMTk-major model carried over to native with only guard relaxations (commits
+`c559cb2`, `f7347b6`); the inlined native allocation needed no compiler changes.
+
+**Linking.** `libasmrun` references the glue, so native exes must resolve the
+MMTk staticlib. For validation we link it explicitly with `--whole-archive`:
+`ocamlopt.opt … -cclib -Wl,--whole-archive -cclib <libmmtk_ocaml.a> -cclib
+-Wl,--no-whole-archive -cclib "-ldl -lpthread -lm"`. (Plain `-cclib <staticlib>`
+fails: it lands *before* libasmrun in the link line, so the linker doesn't pull
+the referenced objects. The chosen convenience path — adding the staticlib to
+`native_c_libraries` — places it correctly after libasmrun, but perturbs the
+compiler bootstrap, so it's deferred.)
+
+**Remaining:** multi-domain native (`Domain.spawn`) **SEGVs** — native domain
+STW/root coordination differs from bytecode; next step. Single-domain is solid.
+
 ## Native-code integration (M5) — strategy & plan
 
 *2026-06-19*

@@ -34,7 +34,7 @@ movement for testing).
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
-| M5 | **Native-code integration** | 🔜 active |
+| M5 | **Native-code integration** — single-domain ✅; multi-domain TODO | 🟡 |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |

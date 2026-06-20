@@ -23,8 +23,9 @@ switch.
 > collecting plans collect single- and multi-domain, the moving plans relocate
 > objects, the generational plans use a write barrier, and collection is parallel.
 > Known limitation: weak arrays / ephemerons are only safe under non-moving
-> `MarkSweep` for now (parked — see `ROADMAP.md`). Native code is unchanged and
-> uses the stock GC (native integration is future work).
+> `MarkSweep` for now (parked — see `ROADMAP.md`). **Native** code now also runs
+> on MMTk for **single-domain** programs (stock minor heap + MMTk major heap);
+> multi-domain native is still in progress.
 
 ## Why bytecode first?
 
