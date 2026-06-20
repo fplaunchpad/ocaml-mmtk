@@ -64,6 +64,14 @@ cursor; per-object `post_alloc` metadata the inlined code doesn't emit;
 genuine "proper native integration" and removes the coordination problem
 outright.
 
+**Then → run the OCaml testsuite under MMTk (M7), the primary unknown-bug
+surfacer.** It exercises far more object shapes, C primitives, and edge cases
+than our handful of programs. Note: the **bytecode** testsuite needs no native
+(bytecode all-MMTk works today) so it can run *now* and surface bytecode-path
+bugs immediately; the **native** testsuite follows the TLAB work. This is
+prioritized ahead of the remaining feature/plan items (weak/ephemeron,
+Compressor, benchmarking) — fix what the suite finds first.
+
 Weak/ephemeron + finaliser processing is parked. Note the current constraint:
 the conservative interim (rooting `ephe_info`) keeps them alive safely **only
 under non-moving MarkSweep**. Under moving plans (Immix opportunistically,
@@ -212,9 +220,16 @@ the inlined path; `young_limit`'s dual GC-trigger/STW-poison role; and the globa
 `native_c_libraries` link (vs the validation-time `--whole-archive`). Keep
 vanilla-minor native as plan B.
 
-### G. Testsuite
-Run OCaml's own testsuite under each MMTk plan; pass modulo features not yet
-supported (E/F). Track which suites are gated on which feature.
+### G. Testsuite — primary unknown-bug surfacer (high priority, after native)
+Run OCaml's own testsuite under MMTk — the broadest validation we have, and the
+fastest way to flush out bugs our ad-hoc programs miss. Plan:
+- Build `ocamltest` (not currently built); run a slice with `MMTK_ENABLED=1` in
+  the environment so the test programs use MMTk.
+- **Bytecode suite can run now** (independent of native); native suite follows F.
+- Triage failures into *known unsupported feature* (weak/ephemeron clearing,
+  finalisers, `Gc.*` semantics, mixed blocks) vs *real bug* — fix the real bugs,
+  feature-gate/skip the rest. Track which suites are gated on which feature.
+- Consider a dedicated "mmtk" ocamltest variant for repeatability.
 
 ### H. Benchmarking
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput
