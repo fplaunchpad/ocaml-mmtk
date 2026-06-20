@@ -244,9 +244,25 @@ validation-time `--whole-archive`). Vanilla-minor native remains plan B / fallba
 ### G. Testsuite — primary unknown-bug surfacer (high priority, after native)
 Run OCaml's own testsuite under MMTk — the broadest validation we have, and the
 fastest way to flush out bugs our ad-hoc programs miss. Plan:
-- Build `ocamltest` (not currently built); run a slice with `MMTK_ENABLED=1` in
-  the environment so the test programs use MMTk.
-- **Bytecode suite can run now** (independent of native); native suite follows F.
+- **Prerequisite (discovered): the MMTk staticlib must be on the global link
+  line.** `ocamltest` is built `-custom`, and `-custom`/native test exes link
+  `libcamlrun.a`/`libasmrun.a` — which now contain the glue (`mmtk.c`) and so
+  reference `mmtk_ocaml_*`. `make ocamltest` fails to link them today. A per-target
+  `-cclib <staticlib>` does **not** work: `ocamlc -custom` places `-cclib` flags
+  *before* the runtime lib, so a single-pass linker misses it (and `--whole-archive`
+  hits the reverse dependency — the staticlib references `caml_mmtk_scan_ephe_roots`
+  back in the runtime lib). The correct fix is the **global link**: add the
+  staticlib (+ its native libs) to `bytecomp_c_libraries` and `native_c_libraries`
+  via `configure.ac`, which `ocamlc`/`ocamlopt` place *after* the runtime lib — the
+  same ordering that makes the standard `ocamlrun` link resolve. This is the
+  deferred "global `native_c_libraries` link" item; doing it needs a full-world
+  rebuild + a bootstrap/`.opt`-tools check (and a macOS `--whole-archive` ⇒
+  `-all_load` equivalent). Do this first, then:
+- Run a slice with `MMTK_ENABLED=1 MMTK_PLAN=MarkSweep` (NoGC can't sustain the
+  compiler) in the environment so the test programs use MMTk.
+- **Bytecode suite** (`MMTK_PLAN=MarkSweep`/`Immix`) is independent of native; the
+  **native suite** runs single-domain under `MMTK_TLAB=1` (Immix/StickyImmix) but
+  any `Domain.spawn` test hits the multidom deadlock (workstream F) — gate those.
 - Triage failures into *known unsupported feature* (weak/ephemeron clearing,
   finalisers, `Gc.*` semantics, mixed blocks) vs *real bug* — fix the real bugs,
   feature-gate/skip the rest. Track which suites are gated on which feature.
