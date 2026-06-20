@@ -94,8 +94,15 @@ the referenced objects. The chosen convenience path — adding the staticlib to
 `native_c_libraries` — places it correctly after libasmrun, but perturbs the
 compiler bootstrap, so it's deferred.)
 
-**Remaining:** multi-domain native (`Domain.spawn`) **SEGVs** — native domain
-STW/root coordination differs from bytecode; next step. Single-domain is solid.
+**Multi-domain native** (`Domain.spawn`): now *runs correctly* (was a SEGV — fixed
+by deregistering the MMTk mutator only after the terminate-time minor flush,
+commit `06f3ae7`), but **intermittently hangs** at larger heaps (≈2/6 at 80 MB,
+clean at 48/64 MB). This is the **same nested-STW coordination hazard**: a
+terminating domain's `caml_empty_minor_heaps_once` is itself a multi-domain OCaml
+STW, and a promotion inside it that fills MMTk triggers an MMTk GC → nested STW.
+So the deferred minor↔MMTk coordination fix (free_bytes-driven GC-before-minor +
+minor-heap roots) is exactly what's needed here — it resolves both vanilla-minor
+tight heaps and native multidom. Single-domain native is solid (no STW nesting).
 
 ## Native-code integration (M5) — strategy & plan
 
