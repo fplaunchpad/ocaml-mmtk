@@ -38,6 +38,21 @@ cause a rare repro); always-on stays on `m9-mmtk-only` until it's understood, si
 it intermittently breaks `make world.opt`.** Everything else (compiler, bootstrap,
 core testsuite) is solid always-on.
 
+**UPDATE — a *deterministic* repro of this same bug found via StickyImmix.**
+`MMTK_PLAN=StickyImmix make bootstrap` **reliably** SEGVs during `coreboot`
+compiling `parsing/parser.cmo` (`coreboot Error 2`). This is almost certainly the
+*same* latent moving-GC correctness bug as the rare ocamldoc `Lexing.engine` crash
+— StickyImmix's always-relocating nursery just triggers it on every run instead of
+once-in-a-while. That makes StickyImmix the **right vehicle to root-cause it** (no
+rr-on-a-flake needed; it's reproducible). Consequence: StickyImmix is *faster*
+(gcbench 5.4 s vs Immix 7.0 s) but **cannot be the default until this is fixed** —
+it can't even self-host. **Immix stays the default** (bootstraps cleanly; only
+opportunistically moves, so it dodges the bug almost always). Root-causing via the
+StickyImmix `parser.cmo` repro is the single highest-value next task: it unblocks
+*both* the StickyImmix perf win *and* the always-on merge. A clean gdb backtrace
+still needs a from-clean rebuild (the failed bootstrap leaves the tree half-built —
+`ocamlc` missing — and `boot/ocamlc` can't stand in without the full `.cmi` set).
+
 ---
 
 ## Testsuite (M7) bring-up: global link, and first two bugs surfaced

@@ -341,11 +341,15 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    0.32's grow heuristic ramps too slowly. So a small-min dynamic heap is worse,
    not better, for large-live-set programs. Reverted to `FixedHeapSize`. Future:
    either a much larger/auto min, or investigate mmtk's MemBalancer trigger.
-2. **Generational plan (StickyImmix) — the real win.** `gcbench` 5.4 s vs Immix
-   7.0 s (≈1.4× stock vs Immix's 1.8×), and it's TLAB-compatible. Recommended as
-   the always-on default — *pending a bootstrap validation on StickyImmix* (only
-   Immix is bootstrap-validated so far). Not switched yet to avoid an unvalidated
-   default.
+2. **Generational plan (StickyImmix) — faster but NOT yet usable as default.**
+   `gcbench` 5.4 s vs Immix 7.0 s (≈1.4× stock), TLAB-compatible — but its
+   **bootstrap SEGVs** (deterministically, compiling `parsing/parser.cmo` during
+   `coreboot`). So it stays unselected. **Crucially, this is the same latent
+   moving-GC correctness bug that causes the rare ocamldoc crash — and StickyImmix
+   triggers it reliably.** Root-causing it via the StickyImmix `parser.cmo` repro
+   is now the **top next task**: it unblocks *both* the StickyImmix perf win *and*
+   the always-on merge (the ocamldoc crash). Immix (non-generational, only
+   opportunistic moving) stays the default — it bootstraps cleanly.
 3. **Inline the bytecode allocation fast path** — bytecode all-MMTk calls
    `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
 4. **GC-thread count** — default is `nproc` (28) *per process* (a big chunk of the
