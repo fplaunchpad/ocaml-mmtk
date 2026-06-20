@@ -325,9 +325,12 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
 #ifdef DEBUG
   /* Previous value should not be a pointer.
      In the debug runtime, it can be either a TMC placeholder,
-     or an uninitialized value canary (Debug_uninit_{major,minor}). */
+     or an uninitialized value canary (Debug_uninit_{major,minor}).
+     Under MMTk, fresh blocks are zero-initialised rather than canary-filled,
+     so the field may legitimately be 0 here. */
   CAMLassert(Is_long(*fp) || *fp == Debug_uninit_major
-             || *fp == Debug_uninit_minor);
+             || *fp == Debug_uninit_minor
+             || (caml_mmtk_enabled && *fp == 0));
 #endif
   *fp = val;
 #ifndef NATIVE_CODE
