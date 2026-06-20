@@ -289,6 +289,16 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   each ephemeron/weak block (`mmtk_ocaml_pin_object`) so its reported interior-slot
   roots stay valid; the compiler's internal weak hashtables now survive a
   compile-time moving GC. (Memory safety only; weak *semantics* stay tabled — E.)
+- **Testsuite flakiness root-caused (ASLR vs MMTk metadata mmap), not correctness.**
+  ~10% of tests flaked with a *different* set each run; every one sampled has
+  byte-identical stock-vs-MMTk output. The real failure is at startup: MMTk
+  sometimes aborts `failed to mmap meta memory: File exists (os error 17)` because
+  ASLR drops something into the fixed range it maps side-metadata into. **Run the
+  suite under `setarch $(uname -m) -R`** (ADDR_NO_RANDOMIZE, inherited) → flakiness
+  gone (0/40). A binding-side deterministic-metadata fix is a follow-up.
+- **Run recipe**: build `testing.{cma,cmxa}`, then `setarch $(uname -m) -R env
+  MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_TLAB=1 MMTK_HEAP_SIZE_MB=2048 make -C
+  testsuite one DIR=tests/<dir>`.
 
 ### H. Benchmarking
 Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput

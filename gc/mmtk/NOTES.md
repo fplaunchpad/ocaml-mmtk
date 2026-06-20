@@ -79,9 +79,33 @@ what lets the compiler's internal weak hashtables survive a compile-time moving 
 
 **Plan: disable the tabled-feature tests** (remove their `(* TEST *)` block + a
 `disabled under MMTk` comment) so they don't run, then the rest of the suite
-should pass under TLAB Immix. Remaining real caveat: multi-domain TLAB deadlocks
-(separate note). The vanilla-minor native compiler SEGV (point 2 above) is moot if
-we standardize on TLAB for native.
+should pass under TLAB Immix. Done for the dedicated dirs (`weak-ephe-final`,
+`lazy`, `lib-lazy`, `ephe-c-api`) + scattered finaliser/lazy tests
+(`simplif_under_lambda`, …).
+
+**Testsuite flakiness ROOT-CAUSED: ASLR vs MMTk's fixed-address metadata mmap.**
+A clean sweep showed ~10% of tests "failing", but with a *different* set each run
+and **byte-identical stock-vs-MMTk program output** for every one sampled — i.e.
+not correctness. The actual failure is at process **startup**: MMTk occasionally
+aborts with `failed to mmap meta memory: File exists (os error 17)` →
+`fatal runtime error: failed to initiate panic`. MMTk maps its side-metadata at
+addresses derived from the heap layout; under ASLR some library/stack/mmap
+randomly lands in that range → `EEXIST`. At ~2.5%/process × 4 compiler invocations
+× ~100 tests, that's the ~10 spurious fails/sweep (it hits the *compiler* runs —
+the test programs themselves run 40/40 clean). **Fix: run the suite under
+`setarch $(uname -m) -R` (ADDR_NO_RANDOMIZE, inherited by children) → 0/40
+failures.** This is an MMTk-on-Linux init issue, independent of TLAB/GC; a proper
+binding-side fix (reserve metadata deterministically / handle the collision) is a
+follow-up, but `setarch -R` is the reliable run recipe.
+
+**Run recipe for the native testsuite:** build `testing.{cma,cmxa}` (`make
+ocamltest` + `make testsuite/lib/testing.cmxa`), then
+`setarch $(uname -m) -R env MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_TLAB=1
+MMTK_HEAP_SIZE_MB=2048 make -C testsuite one DIR=tests/<dir>`.
+
+Remaining real caveat: multi-domain TLAB deadlocks (separate note). The
+vanilla-minor native compiler SEGV (point 2 above) is moot — we standardize on
+TLAB for native.
 
 ---
 
