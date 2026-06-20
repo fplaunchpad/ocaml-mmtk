@@ -5,6 +5,64 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## ROOT-CAUSED + FIXED: the moving-GC bug — forwarding-pointer / `Infix_tag` collision
+
+*2026-06-20*
+
+The latent moving-GC correctness bug (the deterministic StickyImmix `parser.cmo`
+SEGV from the entry below, and almost certainly the rare ocamldoc `Lexing.engine`
+crash) is **root-caused and fixed**. Fix: `gc/mmtk/common/src/slot.rs`
+(`FieldSlot::classify`).
+
+**Root cause.** `classify()` reads the *pointee's* header word `(addr - 8)` to
+detect an interior (infix) pointer (`Tag == Infix_tag`, 249). During a moving GC the
+pointee may already be **forwarded**, and MMTk stores the forwarding pointer **in the
+header word** (`LOCAL_FORWARDING_POINTER_SPEC = in_header(0)`; status bits live in
+side metadata). So the word read can be a *forwarding pointer*, not an OCaml header —
+and its low byte can equal `Infix_tag` purely by coincidence of the destination
+address (observed: forwarding word `0x…dbcf9`, new copy `0x…dbcf8 | status 1`, low
+byte `0xf9` = 249). `classify` then computed a garbage infix offset (`wosize` of an
+address ≈ 2 billion words), `load()` returned `raw − garbage = ` an unmapped
+"parent", `trace_object` no-oped on it, and `store()` wrote the garbage back —
+**so the field was silently never forwarded**, leaving a dangling pointer to the
+old (now-forwarded) location. Classic order-dependent bug: only bites when the
+pointee is forwarded *before* a referencing slot is processed **and** the forwarding
+address's low byte happens to be `0xf9`.
+
+**Fix.** Mirror vanilla `oldify_one`, which checks "already forwarded" (`hd == 0`)
+*before* testing `Infix_tag` (`runtime/minor_gc.c:268`). In `classify`, when the
+header looks like `Infix_tag`, validate it: a genuine infix offset's parent
+(`addr − offset`) is the enclosing closure, still inside a **committed** MMTk space;
+a forwarding pointer misread as `Infix_tag` yields a huge offset whose "parent"
+lands in reserved-but-uncommitted memory. Guard with `is_in_mmtk_spaces(parent)` —
+if it fails, treat the slot as an ordinary reference (`info = 0`) so the trace
+follows the forwarding pointer normally. Genuine infix (closure forwarded or not)
+is unaffected: its parent is always a committed closure.
+
+**Result.** StickyImmix went from **crashing at every heap size** to **completing
+`ocamlc -c parsing/parser.ml` at 96 MB → 1024 MB** (96 MB: 149 GCs / 2.6 M copied;
+1024 MB: 1 GC). No regression on Immix. The fix is in `common`, so it covers every
+moving plan (Immix defrag, GenImmix, StickyImmix).
+
+**How it was cracked.** Enabled mmtk's `sanity` feature (full-heap re-trace after
+each GC) at a deliberately **small heap** — small heaps force frequent + full GCs so
+`sanity` actually runs, and it caught the dangling edge deterministically (`Invalid
+reference` panic). Then `rr record` + `rr replay` (forward `continue` and
+`reverse-continue` to breakpoints; **hardware watchpoints trip an rr/gdb async
+"target is running" bug**, so avoid them) pinned the offending slot, the forwarding
+word, and the `0xf9`/`Infix_tag` collision.
+
+**STILL OPEN — bug #2 (separate, narrower).** At a *very tight* heap (64 MB; heavy
+copy pressure) StickyImmix still SIGSEGVs — but **`sanity` does *not* flag it** and
+the crash is a corrupted bytecode **value-stack frame** (`RETURN` reads `sp[0]` = the
+int `1` where a saved code pointer belongs, `interp.c:623`), i.e. a likely
+**root-coverage gap** (an interpreter slot the GC root scan misses), not a heap-
+forwarding error. 96 MB+ is unaffected. Default stays **Immix**; StickyImmix is now
+viable at practical heap sizes but not yet at the tightest. Next: reverse-debug the
+64 MB repro (`~/.local/share/rr/strcrash` on the dev box) to the missed root.
+
+---
+
 ## M9 stage 1: MMTk always-on (vanilla GC removed as a mode)
 
 *2026-06-20*

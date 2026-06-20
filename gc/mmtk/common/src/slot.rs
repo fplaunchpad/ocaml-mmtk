@@ -92,7 +92,30 @@ impl FieldSlot {
         // (verified GC paper, Fig. 3): parent = infix - wosize(header) * WORD.
         let header = unsafe { (addr - WORD_SIZE).load::<usize>() };
         if tag_of(header) == TAG_INFIX {
-            wosize_of(header) * WORD_SIZE
+            // CAUTION: during a moving GC `addr` may point to an object that has
+            // already been forwarded. MMTk keeps the forwarding pointer *in the
+            // header word* (LOCAL_FORWARDING_POINTER_SPEC = in_header(0)), so the
+            // word we just read can be a forwarding pointer, not an OCaml header
+            // — and a forwarding pointer's low byte can equal Infix_tag (0xf9) by
+            // coincidence of the destination address. A genuine Infix_tag header
+            // yields a small offset whose parent (addr - offset) is the enclosing
+            // closure, still inside a committed MMTk space; a forwarding pointer
+            // misread as Infix_tag yields a huge offset whose "parent" lands in
+            // unmapped (reserved-but-uncommitted) memory. In that case treat the
+            // slot as an ordinary reference: the trace then follows the forwarding
+            // pointer normally, and `store` rewrites the slot with the new
+            // location. Mirrors vanilla oldify_one, which checks "already
+            // forwarded" (hd == 0) before testing Infix_tag (runtime/minor_gc.c).
+            let offset = wosize_of(header) * WORD_SIZE;
+            if offset < raw {
+                let parent = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(raw - offset))
+                };
+                if memory_manager::is_in_mmtk_spaces(parent) {
+                    return offset;
+                }
+            }
+            0
         } else {
             0
         }

@@ -341,15 +341,22 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    0.32's grow heuristic ramps too slowly. So a small-min dynamic heap is worse,
    not better, for large-live-set programs. Reverted to `FixedHeapSize`. Future:
    either a much larger/auto min, or investigate mmtk's MemBalancer trigger.
-2. **Generational plan (StickyImmix) — faster but NOT yet usable as default.**
-   `gcbench` 5.4 s vs Immix 7.0 s (≈1.4× stock), TLAB-compatible — but its
-   **bootstrap SEGVs** (deterministically, compiling `parsing/parser.cmo` during
-   `coreboot`). So it stays unselected. **Crucially, this is the same latent
-   moving-GC correctness bug that causes the rare ocamldoc crash — and StickyImmix
-   triggers it reliably.** Root-causing it via the StickyImmix `parser.cmo` repro
-   is now the **top next task**: it unblocks *both* the StickyImmix perf win *and*
-   the always-on merge (the ocamldoc crash). Immix (non-generational, only
-   opportunistic moving) stays the default — it bootstraps cleanly.
+2. **Generational plan (StickyImmix) — faster, and the moving-GC bug is FIXED.**
+   `gcbench` 5.4 s vs Immix 7.0 s (≈1.4× stock), TLAB-compatible. The
+   deterministic `parsing/parser.cmo` bootstrap SEGV was **root-caused and fixed**
+   (`gc/mmtk/common/src/slot.rs`, `FieldSlot::classify`): a forwarding pointer
+   stored in the header word (`in_header(0)`) whose low byte coincides with
+   `Infix_tag` (`0xf9`/249) was misread as a real infix header, so a field was
+   silently never forwarded. The classify path now validates the infix parent is in
+   a committed space (mirrors vanilla `oldify_one` checking "already forwarded"
+   before `Infix_tag`) — see `gc/mmtk/NOTES.md`. StickyImmix now **completes
+   `ocamlc -c parser.ml` at 96 MB–1024 MB** (was crashing at every size). This was
+   almost certainly also the rare ocamldoc `Lexing.engine` crash blocking the
+   always-on merge. **Remaining (bug #2):** at a very tight 64 MB heap StickyImmix
+   still SIGSEGVs — a *separate* corrupted-value-stack issue `sanity` does not flag
+   (likely a bytecode root-coverage gap), tracked in NOTES. Immix stays the default
+   for now; StickyImmix is viable at practical heap sizes and the candidate perf
+   default once bug #2 is closed.
 3. **Inline the bytecode allocation fast path** — bytecode all-MMTk calls
    `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
 4. **GC-thread count** — default is `nproc` (28) *per process* (a big chunk of the
