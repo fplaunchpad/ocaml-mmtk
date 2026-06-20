@@ -1,9 +1,4 @@
-(* TEST
- modules = "stubs.c";
- reason = "port the new Ephemeron C-api to multicore : https://github.com/ocaml/ocaml/pull/676";
- skip;
-*)
-
+(* Disabled under MMTk: ephemerons (C API) not yet supported (tabled — see ROADMAP workstream E). *)
 (* C version of ephetest.ml *)
 
 let make_ra () = ref (ref 1) [@@inline never]

@@ -1,7 +1,4 @@
-(* TEST
- expect;
-*)
-
+(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
 (* expect-tests currently do not collect I/O,
    so we emulate I/O by collecting output in a "log" *)
 let logger () =

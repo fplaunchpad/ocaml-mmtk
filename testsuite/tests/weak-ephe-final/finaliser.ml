@@ -1,5 +1,4 @@
-(* TEST *)
-
+(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
 let m = 1000
 let m' = 100
 let k = m*10

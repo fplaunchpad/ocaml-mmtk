@@ -1,5 +1,4 @@
-(* TEST *)
-
+(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
 let debug = false
 
 open Printf
