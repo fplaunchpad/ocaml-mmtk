@@ -255,31 +255,28 @@ Immix `Default`, so `mmtk_ocaml_refill_tlab` returns false and the runtime
 (Extending TLAB to plain BumpPointer plans — NoGC — is easy; GenImmix's nursery is
 GenImmix-managed and would need its own handling.)
 
-**Multi-domain TLAB: deadlocks under GC pressure — deferred (root cause known).**
-`Domain.spawn` programs (`multidom8`) run fine at a loose heap (64 MB: 10/10
-clean — few GCs) but **reliably wedge at a tight heap** (32 MB: 11/12 hang + 1
-abort — frequent GCs/STWs). So it is not "rare/racy"; it scales with GC/STW
-frequency. Single-domain is completely unaffected.
+**Multi-domain TLAB: FIXED.** `Domain.spawn` programs (`multidom8`, 8 domains) now
+run cleanly under TLAB Immix at every heap size tried — 16/24/32/48 MB, 0 hangs,
+correct results (`total=3599880000 OK`), where 32 MB previously hung 11/12.
 
-Diagnosed by backtrace: the main thread waits in `Domain.join`; the terminating
-worker domains **spin in `caml_domain_terminate`'s `while(!finished)` loop**, each
-calling `caml_empty_minor_heaps_once` (→ our `caml_handle_incoming_interrupts`)
-without `finished` ever settling. Root cause is *our own short-circuit*: TLAB mode
-skips the minor-heap STW (`caml_empty_minor_heaps_once` / `caml_poll_gc_work`
-return early), which also stops driving OCaml's **major-GC / interrupt-drain state
-machine** — and the termination loop + multi-domain STW handshake depend on that
-machine to make progress. (Bytecode all-MMTk multidom *works* precisely because it
-does **not** short-circuit: it runs the real minor-heap STW over its empty stock
-nursery, keeping the state machine turning.)
+The original deadlock: terminating worker domains spun in `caml_domain_terminate`'s
+`while(!finished)` loop while the main thread waited in `Domain.join`. Root cause
+was *our own short-circuit* — TLAB skipped `caml_empty_minor_heaps_once`, which
+removed the **all-domains minor-empty STW rendezvous** that synchronizes domain
+spawn/terminate, so termination never converged.
 
-Proper fix (next native step): don't bypass the minor-heap STW machinery in TLAB
-mode — keep running it (so coordination/termination/the major-GC state machine
-stay live) but **neuter only the per-domain promotion**: in
-`caml_empty_minor_heap_promote`, instead of promoting `[young_ptr, young_end)`
-(which would wrongly copy already-MMTk young objects), discard the block and refill
-a fresh one. That preserves all the OCaml STW handshakes while still meaning
-"young objects are MMTk objects." Riskier than the single-domain bypass (the
-termination/major-GC state machine is subtle), hence deferred.
+The fix (exactly the planned shape): **keep the minor-empty STW, neuter only the
+promotion.** `caml_empty_minor_heaps_once` no longer short-circuits in TLAB — it
+runs the real `caml_try_empty_minor_heap_on_all_domains` STW (reusing all its
+battle-tested contention/barrier orchestration). Inside `caml_empty_minor_heap_promote`,
+a TLAB `goto` skips the entire oldify/root-scan promotion (running it would wrongly
+*copy* live MMTk objects) — the skipped region is `EV_BEGIN/END`-balanced — and
+the per-domain work becomes just a young-region reset (`young_ptr = young_start`,
+so the domain refills a fresh block on its next allocation, *deferred outside the
+STW* → no nested MMTk GC). Live objects in the old block stay reachable via roots.
+Gated on `caml_mmtk_tlab`, so non-TLAB modes (vanilla-minor, bytecode all-MMTk) are
+unchanged. Validated: single-domain TLAB (incl. forced defrag) and vanilla-minor
+still pass; run under `setarch -R` for the ASLR/metadata-mmap flake.
 
 **Choke points (all gated on `caml_mmtk_tlab`):** `mmtk_ocaml_refill_tlab`
 (binding) + `caml_mmtk_refill_tlab` (glue, sets `young_*`); initial refill in

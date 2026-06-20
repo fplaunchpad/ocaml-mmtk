@@ -36,7 +36,7 @@ movement for testing).
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
-| M5 | **Native-code integration** — single-domain works all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix) *and* via vanilla-minor; multi-domain deadlocks under GC pressure (domain-termination STW coordination — root cause known) | 🟡 |
+| M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
@@ -67,11 +67,11 @@ direction is irrelevant to Immix's mark-region GC; no `post_alloc` needed (we
 don't enable `vo_bit`); `young_limit`'s dual role still works; a post-GC
 young-region reset handles relocation under moving plans. Validated across
 Immix/StickyImmix, forced defrag (heavy relocation), and clean OOM — see
-`gc/mmtk/NOTES.md`. **Remaining: multi-domain** — deadlocks under GC pressure
-because the TLAB bypass stops driving OCaml's major-GC/interrupt-drain state
-machine that domain-termination + the multi-domain STW handshake depend on; fix =
-keep the minor-heap STW machinery but neuter only promotion (see NOTES). Plus the
-global `native_c_libraries` link (vs `--whole-archive`).
+`gc/mmtk/NOTES.md`. **Multi-domain: DONE** — `Domain.spawn` (`multidom8`, 8
+domains) is clean at 16–48 MB (was 11/12 hang at 32 MB). Fix: keep the all-domains
+minor-empty STW rendezvous, but neuter the per-domain promotion in TLAB mode (skip
+oldify, just reset the young region — refill deferred outside the STW). The global
+link is now committable (`configure.ac`); both items done.
 
 **Then → run the OCaml testsuite under MMTk (M7), the primary unknown-bug
 surfacer.** It exercises far more object shapes, C primitives, and edge cases
@@ -236,14 +236,15 @@ relocation under moving plans). The open problems dissolved: bump direction is
 irrelevant to Immix; no `post_alloc` (no `vo_bit`); `young_limit` dual role
 preserved. Bug found+fixed: a >line-size probe took Immix's `overflow_alloc` →
 inaccessible `large_bump_pointer` → SEGV; fixed by probing one word and sizing the
-region up. Validated Immix/StickyImmix incl. forced defrag; clean OOM. **Open:**
-multi-domain — deadlocks under GC pressure (32 MB: 11/12 hang; 64 MB: clean). By
-backtrace, terminating domains spin in `caml_domain_terminate`'s loop: the TLAB
-bypass of the minor-heap STW also stops driving OCaml's major-GC/interrupt-drain
-state machine that termination + the STW handshake need. Fix = keep the minor-heap
-STW machinery, neuter only promotion (refill instead of promote in
-`caml_empty_minor_heap_promote`). Plus the global `native_c_libraries` link (vs
-validation-time `--whole-archive`). Vanilla-minor native remains plan B / fallback.
+region up. Validated Immix/StickyImmix incl. forced defrag; clean OOM.
+**Multi-domain: DONE** (was 11/12 hang at 32 MB; now 0 hangs across 16–48 MB, 8
+domains). The deadlock was terminating domains spinning in `caml_domain_terminate`
+because the TLAB short-circuit of `caml_empty_minor_heaps_once` removed the
+all-domains minor-empty STW rendezvous. Fix: keep that STW, but in
+`caml_empty_minor_heap_promote` skip the oldify (a `goto`, EV-balanced) and just
+reset the young region (`young_ptr = young_start`; refill deferred outside the STW,
+so no nested GC). The global link is now committable via `configure.ac`.
+Vanilla-minor native remains the fallback when a plan has no Immix Default allocator.
 
 ### G. Testsuite — primary unknown-bug surfacer (high priority, after native)
 Run OCaml's own testsuite under MMTk — the broadest validation we have, and the
@@ -265,8 +266,8 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
 - Run a slice with `MMTK_ENABLED=1 MMTK_PLAN=MarkSweep` (NoGC can't sustain the
   compiler) in the environment so the test programs use MMTk.
 - **Bytecode suite** (`MMTK_PLAN=MarkSweep`/`Immix`) is independent of native; the
-  **native suite** runs single-domain under `MMTK_TLAB=1` (Immix/StickyImmix) but
-  any `Domain.spawn` test hits the multidom deadlock (workstream F) — gate those.
+  **native suite** runs under `MMTK_TLAB=1` (Immix/StickyImmix), now including
+  `Domain.spawn` tests (multi-domain TLAB fixed — workstream F).
 - Triage failures into *known unsupported feature* (weak/ephemeron clearing,
   finalisers, `Gc.*` semantics, mixed blocks) vs *real bug* — fix the real bugs,
   feature-gate/skip the rest. Track which suites are gated on which feature.

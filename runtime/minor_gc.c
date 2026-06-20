@@ -565,6 +565,17 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
 
   CAMLassert(domain == Caml_state);
 
+  /* TLAB mode: MMTk owns the nursery, so there is nothing to promote — every young
+     object is already an MMTk object, reachable from roots. Skip the whole
+     promotion (running oldify here would wrongly *copy* live MMTk objects). We
+     still execute inside the all-domains minor-empty STW (the rendezvous that
+     synchronizes domain spawn/terminate — skipping it livelocks multi-domain
+     termination), and reset the young region at `tlab_reset_young` so the domain
+     refills a fresh block on its next allocation. The skipped region is
+     EV_BEGIN/END-balanced, so the event stack stays consistent. */
+  promote_result result = { .locked_ephemerons = false };
+  if (caml_mmtk_tlab) goto tlab_reset_young;
+
   if( participating[0] == domain ) {
     CAML_EV_BEGIN(EV_MINOR_GLOBAL_ROOTS);
     caml_scan_global_young_roots(oldify_one, &st);
@@ -670,7 +681,7 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
   CAML_EV_END(EV_MINOR_MEMPROF_ROOTS);
 
   CAML_EV_BEGIN(EV_MINOR_REMEMBERED_SET_PROMOTE);
-  promote_result result = oldify_mopup (&st, 1); /* ephemerons promoted here */
+  result = oldify_mopup (&st, 1); /* ephemerons promoted here */
   CAML_EV_END(EV_MINOR_REMEMBERED_SET_PROMOTE);
   CAML_EV_END(EV_MINOR_REMEMBERED_SET);
   caml_gc_log("promoted %d roots, %" CAML_PRIuNAT " bytes",
@@ -702,13 +713,25 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
   CAML_EV_END(EV_MINOR_LOCAL_ROOTS_PROMOTE);
   CAML_EV_END(EV_MINOR_LOCAL_ROOTS);
 
-  domain->young_ptr = domain->young_end;
-  /* Trigger a GC poll when half of the minor heap is filled. At that point, a
-   * major slice is scheduled. */
-  domain->young_trigger = domain->young_start
-    + (domain->young_end - domain->young_start) / 2;
-  caml_memprof_set_trigger(domain);
-  caml_reset_young_limit(domain);
+tlab_reset_young:
+  if (caml_mmtk_tlab) {
+    /* Discard the current MMTk block: setting young_ptr = young_start forces the
+       next allocation to trap and refill a fresh block (deferred outside this STW,
+       so no nested MMTk GC). The old block's live objects stay reachable via roots.
+       No half-heap major-slice trigger and no memprof sampling in this mode. */
+    domain->young_ptr = domain->young_start;
+    domain->young_trigger = domain->young_start;
+    domain->memprof_young_trigger = domain->young_start;
+    caml_reset_young_limit(domain);
+  } else {
+    domain->young_ptr = domain->young_end;
+    /* Trigger a GC poll when half of the minor heap is filled. At that point, a
+     * major slice is scheduled. */
+    domain->young_trigger = domain->young_start
+      + (domain->young_end - domain->young_start) / 2;
+    caml_memprof_set_trigger(domain);
+    caml_reset_young_limit(domain);
+  }
 
   domain->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain->stat_promoted_words += domain->allocated_words - prev_alloc_words;
@@ -1006,16 +1029,11 @@ int caml_try_empty_minor_heap_on_all_domains (void)
    minor heap */
 void caml_empty_minor_heaps_once (void)
 {
-  /* TLAB mode: MMTk owns the nursery — there is no OCaml minor heap to empty and
-     no promotion to perform (every young object is already an MMTk object). Skip
-     the minor-GC STW, but still service incoming interrupts so this domain joins
-     any OCaml STW another domain has initiated (domain spawn/terminate). Without
-     this, the termination loop — which only finishes once no interrupts remain
-     queued — deadlocks against a peer domain's STW. */
-  if (caml_mmtk_tlab) {
-    caml_handle_incoming_interrupts();
-    return;
-  }
+  /* TLAB mode note: MMTk owns the nursery, so there is no promotion to do — but we
+     STILL run the all-domains minor-empty STW below. That STW is the rendezvous
+     that synchronizes domain spawn/terminate; skipping it livelocks multi-domain
+     termination. The per-domain work is neutered in caml_empty_minor_heap_promote
+     (it just resets the young region; no promotion, no GC inside the STW). */
 
   uintnat saved_minor_cycle = atomic_load_relaxed(&caml_minor_cycles_started);
 
