@@ -39,7 +39,7 @@ MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` to force movement for testing).
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
-| M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
+| M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
@@ -312,12 +312,38 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   or ASLR-flake — never an MMTk correctness difference (output byte-identical to stock).
   Next: extend to more dirs (`lib-*`, `typing-*`, `effects` [fibers], `tool-*`).
 
-### H. Benchmarking
-Benchmark MMTk plans (MarkSweep/Immix/…) against the stock OCaml GC — throughput
-and pause time — on representative workloads. Stock OCaml's major GC is
-incremental/mostly-concurrent with short pauses; MMTk here is parallel STW, so
-pause latency is the interesting axis. (Becomes a *within-MMTk* plan comparison
-once the stock GC is excised — M9.)
+### H. Benchmarking **and optimisation** (first-class workstream)
+Benchmark MMTk plans against the stock OCaml GC — throughput, pause time, memory —
+on representative workloads, then *optimise* (this is where MMTk-OCaml currently
+loses to stock, so it must be tracked as real work, not an afterthought).
+
+**First baseline (2026-06-20, `gcbench` native, single-domain, large persistent
+live set ~192 MB + heavy churn — a GC-heavy worst-ish case):**
+
+| Config | wall | RSS |
+|---|---|---|
+| stock GC | **3.85 s** | 440 MB |
+| MMTk Immix 512 MB | 14.1 s | 524 MB |
+| MMTk Immix 1024 MB | 7.0 s | 1.0 GB |
+| MMTk Immix 2048 MB | 5.9 s | 2.1 GB |
+| MMTk StickyImmix 1024 MB | **5.4 s** | 1.25 GB |
+
+So today MMTk is **~1.4–1.8× slower and uses more memory** here. Two structural
+reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SIZE_MB`
+(RSS ≈ heap; tight heaps thrash: 512 MB → 14 s); stock auto-sizes. (2) stock is
+**generational**, so its frequent collections don't re-trace the old set; non-gen
+**Immix re-traces the whole 192 MB live set every GC**. A *generational* MMTk plan
+(**StickyImmix**) already closes much of the gap, and more heap headroom helps.
+
+**Optimisation levers (ordered by expected payoff):**
+1. **Dynamic heap sizing** — use an MMTk `gc_trigger` heuristic instead of
+   `FixedHeapSize`; fixes the RSS bloat and the tight-heap thrashing.
+2. **Default to a generational plan** (StickyImmix) for the always-on runtime.
+3. **Inline the bytecode allocation fast path** — bytecode all-MMTk currently calls
+   `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
+4. **GC-thread count** — default is `nproc` (28) *per process*; far too many for
+   short-lived processes (a big chunk of the slow self-hosting bootstrap).
+5. Immix defrag/policy tuning; reduce TLAB-refill overhead; revisit LOS threshold.
 
 ### I. M9 — MMTk-only: excise the stock GC
 Goal: remove OCaml's stock garbage collector entirely so `mmtk-ocaml` is a
