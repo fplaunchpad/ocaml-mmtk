@@ -41,6 +41,16 @@ int caml_mmtk_enabled = 0;
    minor heap is bypassed. Read on the allocation fast path, so a plain int. */
 int caml_mmtk_vanilla_minor = 0;
 
+/* Native TLAB / nursery-aliasing mode (MMTK_TLAB=1): MMTk owns the nursery too.
+   The inlined native fast-path bumps an MMTk Immix block (handed over by
+   mmtk_ocaml_refill_tlab); when it is exhausted the runtime refills another
+   block instead of running a minor GC. There is no OCaml minor GC and no
+   promotion in this mode — every object is an MMTk object from birth — so the
+   nested-STW hazard of the vanilla-minor model cannot occur. Requires an
+   Immix-family plan (Immix/GenImmix/StickyImmix); falls back to vanilla-minor
+   otherwise. Read on the allocation slow path, so a plain int. */
+int caml_mmtk_tlab = 0;
+
 static int caml_mmtk_initialised = 0;
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
@@ -119,6 +129,8 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   {
     const char *vm = getenv("MMTK_VANILLA_MINOR");
     caml_mmtk_vanilla_minor = (vm != NULL && vm[0] != '\0' && strcmp(vm, "0") != 0);
+    const char *tl = getenv("MMTK_TLAB");
+    caml_mmtk_tlab = (tl != NULL && tl[0] != '\0' && strcmp(tl, "0") != 0);
   }
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before
@@ -128,6 +140,23 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
     caml_mmtk_collection_started = 1;
   }
   caml_mmtk_enabled = 1;
+
+  /* TLAB mode: repoint the domain's young region at a fresh MMTk Immix block now,
+     so the very first allocation lands in MMTk-owned memory rather than the stock
+     minor arena (which then sits unused). If the active plan has no Immix Default
+     allocator (e.g. NoGC/MarkSweep), TLAB is unsupported — fall back to the
+     validated vanilla-minor model. */
+  if (caml_mmtk_tlab) {
+    if (!caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
+      caml_mmtk_tlab = 0;
+      caml_mmtk_vanilla_minor = 1;
+      if (getenv("MMTK_VERBOSE") != NULL)
+        fprintf(stderr, "[mmtk] MMTK_TLAB requested but plan has no Immix TLAB; "
+                        "falling back to vanilla-minor\n");
+    } else if (getenv("MMTK_VERBOSE") != NULL) {
+      fprintf(stderr, "[mmtk] TLAB nursery aliasing active (young = MMTk block)\n");
+    }
+  }
 }
 
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
@@ -162,6 +191,36 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
                              caml_mmtk_semantics(wosize));
   if (p == NULL) caml_raise_out_of_memory();
   return (value)p;
+}
+
+/* TLAB refill: hand the domain a fresh MMTk Immix block as its young region,
+   in place of a minor GC. `whsize` is the size (in words, header included) the
+   triggering allocation needs; the block returned is at least that large.
+
+   Repoints young_start/young_end/young_ptr at the block and (no half-heap major
+   trigger, no memprof sampling in this mode) sets both triggers to young_start
+   so caml_reset_young_limit makes the fast-path bump the whole block before the
+   next refill. Returns 1 on success, 0 on heap exhaustion or if the plan has no
+   Immix Default allocator (caller decides whether to raise or fall back). The
+   refill may itself trigger an MMTk GC (its block acquisition polls); that is
+   safe here because the old young region is exhausted (nothing to lose) and the
+   roots are published at this safepoint. */
+int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
+{
+  uintptr_t start = 0, end = 0;
+  size_t min_bytes = (size_t)whsize * sizeof(value);
+  if (min_bytes == 0) min_bytes = sizeof(value);
+
+  if (!mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end))
+    return 0;
+
+  dom->young_start          = (value*)start;
+  dom->young_end            = (value*)end;
+  dom->young_ptr            = (value*)end;
+  dom->young_trigger        = (value*)start;
+  dom->memprof_young_trigger = (value*)start;
+  caml_reset_young_limit(dom);
+  return 1;
 }
 
 /* Report every ephemeron / weak-array field in this domain as a strong root.
@@ -255,10 +314,27 @@ void caml_mmtk_interrupt(uintnat domain_state_addr)
   atomic_store_release(&d->young_limit, (uintnat) CAML_UINTNAT_MAX);
 }
 
-/* Reset a domain's young_limit (un-poison) after the collection. */
+/* Reset a domain's young_limit (un-poison) after the collection.
+
+   In TLAB mode, also discard the domain's young region so it refills a fresh
+   MMTk block on its next allocation. This is essential for correctness: a GC may
+   have relocated (moving plans) or reclaimed lines around the objects the domain
+   already placed in its current block, so the unused tail [young_start, young_ptr)
+   and the block pointers themselves can no longer be trusted. The live objects
+   already allocated survived via root tracing (and had their references fixed up
+   if moved); we simply stop bumping into the stale block. Setting
+   young_ptr = young_start makes the next fast-path allocation trap to
+   caml_alloc_small_dispatch, which refills. Safe to do from the GC worker here:
+   all mutators are stopped. */
 void caml_mmtk_uninterrupt(uintnat domain_state_addr)
 {
-  caml_reset_young_limit((caml_domain_state *) domain_state_addr);
+  caml_domain_state *d = (caml_domain_state *) domain_state_addr;
+  if (caml_mmtk_tlab) {
+    d->young_ptr             = d->young_start;
+    d->young_trigger         = d->young_start;
+    d->memprof_young_trigger = d->young_start;
+  }
+  caml_reset_young_limit(d);
 }
 
 /* A domain is entering / leaving a C blocking section. While blocking it is

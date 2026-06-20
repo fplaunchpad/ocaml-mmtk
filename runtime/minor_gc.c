@@ -1006,6 +1006,17 @@ int caml_try_empty_minor_heap_on_all_domains (void)
    minor heap */
 void caml_empty_minor_heaps_once (void)
 {
+  /* TLAB mode: MMTk owns the nursery — there is no OCaml minor heap to empty and
+     no promotion to perform (every young object is already an MMTk object). Skip
+     the minor-GC STW, but still service incoming interrupts so this domain joins
+     any OCaml STW another domain has initiated (domain spawn/terminate). Without
+     this, the termination loop — which only finishes once no interrupts remain
+     queued — deadlocks against a peer domain's STW. */
+  if (caml_mmtk_tlab) {
+    caml_handle_incoming_interrupts();
+    return;
+  }
+
   uintnat saved_minor_cycle = atomic_load_relaxed(&caml_minor_cycles_started);
 
   #ifdef DEBUG
@@ -1054,10 +1065,16 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
     if (dom_st->young_ptr - whsize >= dom_st->young_start)
       break;
 
-    /* If not, then empty the minor heap, and check again for async
-       callbacks. */
+    /* If not, then make room and check again for async callbacks. In TLAB mode
+       (MMTk owns the nursery) we refill a fresh MMTk block instead of running a
+       minor GC; otherwise we empty the minor heap. */
     CAML_EV_COUNTER(EV_C_FORCE_MINOR_ALLOC_SMALL, 1);
-    caml_poll_gc_work();
+    if (caml_mmtk_tlab) {
+      if (!caml_mmtk_refill_tlab(dom_st, whsize))
+        caml_raise_out_of_memory();
+    } else {
+      caml_poll_gc_work();
+    }
   }
 
   /* Re-do the allocation: we now have enough space in the minor heap. */

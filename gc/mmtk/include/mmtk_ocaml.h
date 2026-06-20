@@ -55,6 +55,23 @@ void mmtk_ocaml_destroy_mutator(MMTk_Mutator mutator);
  */
 void* mmtk_ocaml_alloc(MMTk_Mutator mutator, size_t wosize, size_t tag, int semantics);
 
+/**
+ * Native TLAB refill (nursery aliasing). Hands the runtime a contiguous region
+ * [*out_start, *out_end) to bump-fill as its young nursery — the region is an
+ * MMTk Immix block. Call when the inlined native fast-path exhausts the young
+ * region, in place of a minor GC.
+ *
+ * @param mutator    The domain's mutator handle.
+ * @param min_bytes  Minimum region size required (the triggering allocation,
+ *                   header included). The region returned is >= this.
+ * @param out_start  Receives the low bound (block start; OCaml's young_limit).
+ * @param out_end    Receives the high bound (block end; OCaml's young_end).
+ * @return  true on success; false on heap exhaustion (raise Out_of_memory) or
+ *          if the plan's Default allocator is not Immix (caller falls back).
+ */
+bool mmtk_ocaml_refill_tlab(MMTk_Mutator mutator, size_t min_bytes,
+                            uintptr_t* out_start, uintptr_t* out_end);
+
 /* ── GC control ─────────────────────────────────────────────────────── */
 
 void mmtk_ocaml_handle_user_collection_request(uintptr_t domain_state_addr);

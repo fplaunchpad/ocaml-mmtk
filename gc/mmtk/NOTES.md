@@ -76,54 +76,106 @@ trigger a collection.
 **Test:** revert bytecode to stock-minor, run the existing battery; old→young and
 churn must survive; compare against the all-MMTk mode. Then native.
 
-## Native TLAB / nursery-aliasing — feasibility study & blueprint
+## Native TLAB / nursery-aliasing — IMPLEMENTED (single-domain)
 
 *2026-06-20*
 
-Goal: all-MMTk for native (MMTk owns the nursery too), so there's no OCaml minor
-GC and the nested-STW hazard can't occur. Studied the mmtk-core 0.32 allocator
-internals; **it is feasible** with this design:
+**Status: working single-domain for Immix + StickyImmix.** Opt in with
+`MMTK_TLAB=1`. This is all-MMTk for native: MMTk owns the nursery too, so there
+is no OCaml minor GC and no promotion — the nested-STW hazard of the
+vanilla-minor model cannot occur by construction. The inlined native fast-path is
+unchanged; it bumps `young_ptr` down through an MMTk Immix block that the binding
+hands over.
 
 **Design — OCaml's young region IS an MMTk Immix block.**
-- On refill (where native currently does a minor GC), the binding hands OCaml a
-  fresh Immix block: drive the mutator's **Default** `ImmixAllocator` (its
-  `bump_pointer` is `pub`: `cursor`/`limit`/`reset`) and return `[cursor, limit)`.
-  Set `young_end = limit`, `young_ptr = limit`, `young_limit = cursor`. OCaml's
-  inlined fast-path bumps `young_ptr` **down**, filling the block top-down.
-- When `young_ptr` reaches `young_limit` (= block start), the block is full →
-  refill again (advance the allocator's `cursor` to `limit`, get a new block).
-- **No OCaml minor GC, no promotion** — the block's objects are MMTk objects.
-  MMTk traces them from roots (native frame descriptors → our scanner), marks
-  Immix lines, and reclaims unmarked lines. Bump direction is irrelevant to
-  Immix's mark-region GC (it follows pointers, marks lines per live object).
+- On refill (where native used to do a minor GC), `mmtk_ocaml_refill_tlab` drives
+  the mutator's **Default** `ImmixAllocator` to acquire a fresh region and returns
+  `[start, end)`. The C glue sets `young_start = young_limit-region = start`,
+  `young_end = young_ptr = end`, `young_trigger = young_start`. OCaml's fast-path
+  bumps `young_ptr` **down**, filling the block top-down. When it reaches
+  `young_start`, `caml_alloc_small_dispatch` refills again.
+- **No OCaml minor GC, no promotion** — objects in the block are MMTk objects from
+  birth, traced from roots (native frame descriptors → our scanner), with Immix
+  lines marked per live object and unmarked lines reclaimed. Bump direction is
+  irrelevant to Immix's mark-region GC.
 
-**Feasibility findings (the de-risking):**
-- ✅ No per-object `post_alloc` needed: Immix's `post_alloc` only `set_vo_bit`s
-  *under the `vo_bit` feature* (we don't enable it). So OCaml bump-filling a block
-  without calling post_alloc is fine for non-vo_bit Immix.
-- ✅ Comballoc is fine: multiple objects per young region all live in the one
-  MMTk block, each traced individually from roots (this only breaks the
-  alternative "always-slow-path, alloc a region per comballoc" approach).
-- ✅ MMTk exposes the pieces: `BumpPointer{cursor,limit,reset}` pub;
-  `Plan::get_allocator_mapping()` and `Allocators::get_allocator(_mut)` pub.
-- ✅ The `pub(crate) Mutator::allocators` gate is resolved by **`AllocatorInfo`**
-  (mmtk-core 0.32): `memory_manager::get_allocator_mapping::<VM>(Default)` gives
-  the `AllocatorSelector`, and `AllocatorInfo::new(selector)` gives the
-  allocator's byte offset within the `Mutator`; the binding reads/writes the
-  `ImmixAllocator.bump_pointer` (`cursor`/`limit`) at that offset. This is the
-  exact mechanism mmtk-julia uses for its inlined fast path — so it's a known,
-  supported path, not a hack.
-- ⚠️ `young_limit` dual role (GC trigger + STW-interrupt poison): set the "real"
-  limit = block `cursor`; the existing interrupt poison/`caml_reset_young_limit`
-  path still works.
+**How the pieces resolved (vs the blueprint):**
+- ✅ Allocator access: `memory_manager::get_allocator_mapping::<VM>(Default)` →
+  `AllocatorSelector`; if it's `Immix(_)`, `mutator.allocator_impl_mut::<ImmixAllocator<VM>>(selector)`
+  gives a typed `&mut ImmixAllocator` whose `pub bump_pointer.{cursor,limit}` we
+  read/write. (Cleaner than the `AllocatorInfo` offset path — same result, type-safe.)
+- ✅ Eject the block from MMTk's bump view by setting `bump_pointer.cursor = limit`
+  after taking the region. **Essential:** direct MMTk allocations (`caml_alloc_shr`
+  → large arrays, etc.) share this *same* Default allocator, so without ejecting
+  they'd bump into the region OCaml is filling top-down. Post-eject, the next
+  direct alloc slow-paths a fresh block.
+- ✅ No per-object `post_alloc` (we don't enable `vo_bit`); comballoc fine (all
+  objects share the block, traced individually).
+- 🐛 **bump_pointer vs large_bump_pointer (fixed).** Driving the allocator with the
+  *object's* size was wrong: an Immix `alloc` larger than a line (256 B) takes the
+  `overflow_alloc` path, which populates the **inaccessible** `large_bump_pointer`,
+  not the `pub bump_pointer` we read → bogus region → SEGV (hit by `String.make
+  1000` = 127 words; small list cells were fine). Fix: probe with a *one-word*
+  alloc (always the small/`bump_pointer` path), then ensure `[result, limit)` ≥ the
+  requested size, retrying past undersized recyclable-line holes until a clean
+  32 KiB block satisfies it.
+- ✅ **Moving GC across a held young region (the real correctness worry).** A GC
+  can fire while a domain holds a partially-filled young block (e.g. a large
+  `caml_alloc_shr` triggers it). Moving plans would relocate the objects already in
+  the block and free/recycle its tail. Handled by **resetting the young region
+  post-GC**: `caml_mmtk_uninterrupt` (called per domain from `resume_mutators`)
+  sets `young_ptr = young_start` in TLAB mode, forcing a fresh refill on the next
+  allocation. Live objects survived via root tracing (and had their refs fixed up
+  if moved); we just stop bumping into the stale block.
 
-**Implementation steps:** (1) binding `mmtk_ocaml_refill_tlab(mutator, min) ->
-{start,end}` that drives the ImmixAllocator (slow-path a block, return bounds,
-sync cursor); (2) C glue to reset `young_*` from it; (3) call it from
-`caml_alloc_small_dispatch` in place of the minor GC; (4) disable the stock minor
-GC for native-all-MMTk; (5) global `native_c_libraries` link. Validate single-
-then multi-domain, then the testsuite. This is research-grade plumbing but no
-longer an unknown.
+**Validated (single-domain, Immix + StickyImmix):** natgc, torture, retain, infix,
+gcbench, treebench — correct results under plain Immix, forced defrag
+(`MMTK_IMMIX_ALWAYS_DEFRAG`+`DEFRAG_EVERY_BLOCK`, heavy relocation: 74k–300k
+objects copied), StickyImmix, and tight heaps forcing many GCs. Clean
+`Out_of_memory` when the live set exceeds the heap (gcbench@64MB). `String.make`
+(large small-object) works. The inlined fast-path needed **no compiler changes**.
+
+**Plan support:** TLAB requires an Immix `Default` allocator → **Immix,
+StickyImmix**. GenImmix/GenCopy (copying-nursery generational; `Default` is a
+nursery BumpPointer), MarkSweep (free-list), NoGC (contiguous BumpPointer) have no
+Immix `Default`, so `mmtk_ocaml_refill_tlab` returns false and the runtime
+**falls back to the validated vanilla-minor model** (logged under `MMTK_VERBOSE`).
+(Extending TLAB to plain BumpPointer plans — NoGC — is easy; GenImmix's nursery is
+GenImmix-managed and would need its own handling.)
+
+**Multi-domain TLAB: deadlocks under GC pressure — deferred (root cause known).**
+`Domain.spawn` programs (`multidom8`) run fine at a loose heap (64 MB: 10/10
+clean — few GCs) but **reliably wedge at a tight heap** (32 MB: 11/12 hang + 1
+abort — frequent GCs/STWs). So it is not "rare/racy"; it scales with GC/STW
+frequency. Single-domain is completely unaffected.
+
+Diagnosed by backtrace: the main thread waits in `Domain.join`; the terminating
+worker domains **spin in `caml_domain_terminate`'s `while(!finished)` loop**, each
+calling `caml_empty_minor_heaps_once` (→ our `caml_handle_incoming_interrupts`)
+without `finished` ever settling. Root cause is *our own short-circuit*: TLAB mode
+skips the minor-heap STW (`caml_empty_minor_heaps_once` / `caml_poll_gc_work`
+return early), which also stops driving OCaml's **major-GC / interrupt-drain state
+machine** — and the termination loop + multi-domain STW handshake depend on that
+machine to make progress. (Bytecode all-MMTk multidom *works* precisely because it
+does **not** short-circuit: it runs the real minor-heap STW over its empty stock
+nursery, keeping the state machine turning.)
+
+Proper fix (next native step): don't bypass the minor-heap STW machinery in TLAB
+mode — keep running it (so coordination/termination/the major-GC state machine
+stay live) but **neuter only the per-domain promotion**: in
+`caml_empty_minor_heap_promote`, instead of promoting `[young_ptr, young_end)`
+(which would wrongly copy already-MMTk young objects), discard the block and refill
+a fresh one. That preserves all the OCaml STW handshakes while still meaning
+"young objects are MMTk objects." Riskier than the single-domain bypass (the
+termination/major-GC state machine is subtle), hence deferred.
+
+**Choke points (all gated on `caml_mmtk_tlab`):** `mmtk_ocaml_refill_tlab`
+(binding) + `caml_mmtk_refill_tlab` (glue, sets `young_*`); initial refill in
+`caml_mmtk_domain_init`; refill instead of minor GC in `caml_alloc_small_dispatch`;
+`caml_poll_gc_work` consumes pending GC requests and returns (no minor GC / major
+slice); `caml_empty_minor_heaps_once` services interrupts then returns;
+`caml_mmtk_uninterrupt` post-GC young-region reset. Still uses the validation-time
+`--whole-archive` link (global `native_c_libraries` link still deferred).
 
 ## GC plan support matrix (mmtk-core 0.32)
 

@@ -2101,6 +2101,20 @@ void caml_poll_gc_work(void)
 
   caml_domain_state* d = Caml_state;
 
+  /* TLAB mode: MMTk owns the entire heap, so there is no OCaml minor GC and no
+     OCaml major slice. Consume any pending minor-GC / major-slice requests (so
+     caml_reset_young_limit below doesn't immediately re-interrupt the domain),
+     reset the young_limit, and return. The young region is refilled on demand in
+     caml_alloc_small_dispatch, and MMTk collections fire from the refill / STW
+     path. */
+  if (caml_mmtk_tlab) {
+    d->requested_minor_gc = 0;
+    d->requested_major_slice = 0;
+    d->requested_global_major_slice = 0;
+    caml_reset_young_limit(d);
+    return;
+  }
+
   if ((uintnat)d->young_ptr - Bhsize_wosize(Max_young_wosize) <
       (uintnat)d->young_trigger) {
 

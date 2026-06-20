@@ -6,6 +6,7 @@
 use std::ffi::CStr;
 
 use mmtk::memory_manager;
+use mmtk::util::alloc::{Allocator, AllocatorSelector, ImmixAllocator};
 use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread};
 use mmtk::util::{Address, ObjectReference};
 use mmtk::AllocationSemantics;
@@ -131,6 +132,86 @@ pub extern "C" fn mmtk_ocaml_alloc(
     memory_manager::post_alloc::<OCamlVM>(mutator, object, total_bytes, semantics);
 
     obj_ref.to_mut_ptr::<libc::c_void>()
+}
+
+/// Native TLAB refill (nursery aliasing).
+///
+/// Hands the OCaml runtime a contiguous region `[*out_start, *out_end)` to use
+/// as its "young" nursery — the region *is* (part of) an MMTk Immix block.
+/// Called from `caml_alloc_small_dispatch` in place of a minor GC when the
+/// inlined native fast-path exhausts the current young region.
+///
+/// We drive the mutator's **Default** Immix allocator to acquire fresh space of
+/// at least `min_bytes` (its fast/slow path acquires recyclable lines or a clean
+/// block, polling for a GC on exhaustion), then **advance the allocator's cursor
+/// to the block limit** so MMTk treats the whole region as consumed. This is
+/// essential: direct MMTk allocations (`caml_alloc_shr` → `mmtk_ocaml_alloc`)
+/// share this same Default allocator, so ejecting the block prevents them from
+/// bumping into the region OCaml fills top-down.
+///
+/// No per-object `post_alloc` is needed: objects OCaml writes into the region
+/// are ordinary Immix-space objects, traced from roots, with lines marked per
+/// live object at GC time (we don't enable the `vo_bit` feature, so Immix's
+/// `post_alloc` is a no-op anyway). Bump direction is irrelevant to Immix's
+/// mark-region reclamation.
+///
+/// Returns `true` and fills the out-params on success. Returns `false` on heap
+/// exhaustion (caller raises `Out_of_memory`) or if the Default allocator is not
+/// an Immix allocator (TLAB nursery aliasing requires an Immix-family plan).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_refill_tlab(
+    mutator: *mut libc::c_void,
+    min_bytes: usize,
+    out_start: *mut usize,
+    out_end: *mut usize,
+) -> bool {
+    let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
+
+    let selector =
+        memory_manager::get_allocator_mapping::<OCamlVM>(mmtk(), AllocationSemantics::Default);
+    if !matches!(selector, AllocatorSelector::Immix(_)) {
+        // TLAB nursery aliasing is only supported when Default is a bump/Immix
+        // allocator. Other plans (e.g. MarkSweep's free-list) fall back to the
+        // vanilla-minor model on the C side.
+        return false;
+    }
+
+    let allocator = unsafe { mutator.allocator_impl_mut::<ImmixAllocator<OCamlVM>>(selector) };
+
+    // Acquire the nursery region by driving the Immix allocator's *small*
+    // (`bump_pointer`) path. We deliberately request a tiny probe size, never
+    // `min_bytes`: an allocation larger than a line takes Immix's `overflow_alloc`
+    // path, which populates the inaccessible `large_bump_pointer` instead of the
+    // `pub bump_pointer` we read — handing OCaml a bogus region. A probe of one
+    // word always stays on the small path, so `bump_pointer.{cursor,limit}` are
+    // the region we want.
+    //
+    // The small slow path returns either a run of recyclable lines (post-GC) or a
+    // clean block. If the run is smaller than the object that triggered the
+    // refill, consume it and retry; a clean block (32 KiB) always satisfies any
+    // Max_young_wosize object, so the loop terminates (or returns false on OOM).
+    const PROBE: usize = WORD_SIZE;
+    loop {
+        let result = Allocator::alloc(allocator, PROBE, WORD_SIZE, 0);
+        if result.is_zero() {
+            // Heap exhausted after a GC.
+            return false;
+        }
+        let limit = allocator.bump_pointer.limit;
+        // Eject the rest of this block/run from MMTk's bump view either way:
+        // OCaml owns [result, limit) exclusively if we take it, and a too-small
+        // run must be abandoned so the next probe slow-paths to fresh space.
+        allocator.bump_pointer.cursor = limit;
+
+        if limit - result >= min_bytes {
+            unsafe {
+                *out_start = result.as_usize();
+                *out_end = limit.as_usize();
+            }
+            return true;
+        }
+        // Region too small for the triggering object: retry for a larger one.
+    }
 }
 
 /// Generational write barrier (region form). Records that `count` value-sized

@@ -23,6 +23,17 @@
  * it stays 0 during early runtime bootstrap (before MMTk is ready). */
 extern int caml_mmtk_enabled;
 
+/* TLAB / nursery-aliasing mode (MMTK_TLAB=1): MMTk owns the nursery; the native
+ * fast-path bumps an MMTk Immix block and the runtime refills a new block
+ * instead of running a minor GC. No OCaml minor GC, no promotion. Read on the
+ * allocation slow path. */
+extern int caml_mmtk_tlab;
+
+/* Refill the domain's young region with a fresh MMTk block (TLAB mode), in place
+ * of a minor GC. `whsize` is the words (header included) the triggering
+ * allocation needs. Returns 1 on success, 0 on exhaustion / unsupported plan. */
+extern int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize);
+
 /* Initialise MMTk once for the process. Reads the plan from the MMTK_PLAN
  * environment variable (default "NoGC") and the heap size from
  * MMTK_HEAP_SIZE_MB (default 1024 MiB). Idempotent. */

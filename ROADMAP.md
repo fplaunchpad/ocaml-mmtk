@@ -16,8 +16,10 @@ redirecting a C function); **route all bytecode allocation through MMTk**,
 bypassing the minor heap.
 
 Run knobs: `MMTK_ENABLED` (default off), `MMTK_PLAN` (default `NoGC`),
-`MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_GC_THREADS`, `MMTK_VERBOSE`. MMTk's own
-options are honoured from the environment too (e.g.
+`MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_GC_THREADS`, `MMTK_VERBOSE`. Native
+modes: `MMTK_VANILLA_MINOR` (stock minor heap + MMTk major), `MMTK_TLAB`
+(all-MMTk nursery aliasing — MMTk owns the nursery; Immix/StickyImmix,
+single-domain). MMTk's own options are honoured from the environment too (e.g.
 `MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` forces
 movement for testing).
 
@@ -34,7 +36,7 @@ movement for testing).
 | M3 | **Immix** (moving): copy/forward, infix-pointer fixup, updatable roots, clean `Out_of_memory` | ✅ done |
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
-| M5 | **Native-code integration** — single-domain works via vanilla-minor (fallback); proper path = all-MMTk TLAB/nursery-aliasing | 🟡 |
+| M5 | **Native-code integration** — single-domain works all-MMTk via TLAB/nursery-aliasing (`MMTK_TLAB`, Immix/StickyImmix) *and* via vanilla-minor; multi-domain deadlocks under GC pressure (domain-termination STW coordination — root cause known) | 🟡 |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
 | M7 | Pass the OCaml testsuite (modulo unsupported features) | ⬜ |
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
@@ -46,23 +48,30 @@ movement for testing).
 minor↔MMTk coordination fix is SUPERSEDED, not just deferred.**
 
 The proper integration is all-MMTk: no separate OCaml minor GC, so young objects
-live in MMTk's *own* nursery (e.g. GenImmix's) and the only stop-the-world is
-MMTk's. This dissolves the nested-STW hazard by construction — the
-minor↔MMTk coordination fix would be throwaway work on the vanilla-minor
-intermediate, so **we will not do it**. Bytecode all-MMTk already works (the
-default mode); the **vanilla minor + MMTk major** mode (`MMTK_VANILLA_MINOR=1`,
-and what native uses today) is kept as a *validated fallback* — if the native
-TLAB work below proves intractable, the bounded coordination fix + vanilla-minor
-is plan B, doable then (recipe in `gc/mmtk/NOTES.md`).
+live in MMTk's *own* heap and the only stop-the-world is MMTk's. This dissolves
+the nested-STW hazard by construction — the minor↔MMTk coordination fix would be
+throwaway work on the vanilla-minor intermediate, so **we will not do it**.
+Bytecode all-MMTk already works (the default mode); **native all-MMTk now works
+single-domain too** via TLAB/nursery aliasing (`MMTK_TLAB=1` — the inlined
+fast-path bumps an MMTk Immix block; see workstream F + `gc/mmtk/NOTES.md`). The
+**vanilla minor + MMTk major** mode (`MMTK_VANILLA_MINOR=1`, the native default
+and the fallback when TLAB's Immix `Default` allocator isn't available) is kept as
+a *validated fallback*.
 
-**Current focus → native-code integration as all-MMTk = TLAB / nursery
-aliasing.** The hard part: native inlines a downward `young_ptr` bump into the
-stock nursery, so all-MMTk for native means redirecting that bump into an
-MMTk-provided nursery buffer (TLAB). Thorns: OCaml bumps *down* vs MMTk's *up*
-cursor; per-object `post_alloc` metadata the inlined code doesn't emit;
-`young_limit`'s dual role (GC trigger + STW-interrupt poison). This is the
-genuine "proper native integration" and removes the coordination problem
-outright.
+**Native all-MMTk = TLAB / nursery aliasing — DONE single-domain
+(`MMTK_TLAB=1`).** MMTk owns the nursery: the inlined downward `young_ptr` bump
+fills an MMTk Immix block the binding hands over (`mmtk_ocaml_refill_tlab`); on
+exhaustion the runtime refills another block instead of running a minor GC. No
+OCaml minor GC, no promotion ⇒ no nested STW. The thorns resolved cleanly: bump
+direction is irrelevant to Immix's mark-region GC; no `post_alloc` needed (we
+don't enable `vo_bit`); `young_limit`'s dual role still works; a post-GC
+young-region reset handles relocation under moving plans. Validated across
+Immix/StickyImmix, forced defrag (heavy relocation), and clean OOM — see
+`gc/mmtk/NOTES.md`. **Remaining: multi-domain** — deadlocks under GC pressure
+because the TLAB bypass stops driving OCaml's major-GC/interrupt-drain state
+machine that domain-termination + the multi-domain STW handshake depend on; fix =
+keep the minor-heap STW machinery but neuter only promotion (see NOTES). Plus the
+global `native_c_libraries` link (vs `--whole-archive`).
 
 **Then → run the OCaml testsuite under MMTk (M7), the primary unknown-bug
 surfacer.** It exercises far more object shapes, C primitives, and edge cases
@@ -212,13 +221,25 @@ redirect promotion (`alloc_shared`) + `caml_alloc_shr` to MMTk, native roots via
 nested-STW hazard — **not being fixed** (superseded by all-MMTk below). Linked for
 validation with `-cclib -Wl,--whole-archive <libmmtk_ocaml.a> …`.
 
-**Chosen path — all-MMTk = TLAB / nursery aliasing.** Make MMTk own the nursery
-too: point the inlined `young_ptr` bump at an MMTk-provided buffer, refill from
-MMTk on overflow. No OCaml minor GC ⇒ no nested STW. Open problems: bump
-direction (OCaml down vs MMTk up); per-object `post_alloc` metadata not emitted by
-the inlined path; `young_limit`'s dual GC-trigger/STW-poison role; and the global
-`native_c_libraries` link (vs the validation-time `--whole-archive`). Keep
-vanilla-minor native as plan B.
+**Done — all-MMTk = TLAB / nursery aliasing (`MMTK_TLAB=1`, single-domain).**
+MMTk owns the nursery: `mmtk_ocaml_refill_tlab` drives the mutator's Default Immix
+allocator to hand OCaml a block as its young region (read `bump_pointer.{cursor,
+limit}` via `allocator_impl_mut::<ImmixAllocator>`, then set `cursor = limit` to
+eject it so direct `caml_alloc_shr` allocs don't collide). `caml_alloc_small_dispatch`
+refills instead of doing a minor GC; `caml_poll_gc_work`/`caml_empty_minor_heaps_once`
+skip minor work; `caml_mmtk_uninterrupt` resets the young region post-GC (handles
+relocation under moving plans). The open problems dissolved: bump direction is
+irrelevant to Immix; no `post_alloc` (no `vo_bit`); `young_limit` dual role
+preserved. Bug found+fixed: a >line-size probe took Immix's `overflow_alloc` →
+inaccessible `large_bump_pointer` → SEGV; fixed by probing one word and sizing the
+region up. Validated Immix/StickyImmix incl. forced defrag; clean OOM. **Open:**
+multi-domain — deadlocks under GC pressure (32 MB: 11/12 hang; 64 MB: clean). By
+backtrace, terminating domains spin in `caml_domain_terminate`'s loop: the TLAB
+bypass of the minor-heap STW also stops driving OCaml's major-GC/interrupt-drain
+state machine that termination + the STW handshake need. Fix = keep the minor-heap
+STW machinery, neuter only promotion (refill instead of promote in
+`caml_empty_minor_heap_promote`). Plus the global `native_c_libraries` link (vs
+validation-time `--whole-archive`). Vanilla-minor native remains plan B / fallback.
 
 ### G. Testsuite — primary unknown-bug surfacer (high priority, after native)
 Run OCaml's own testsuite under MMTk — the broadest validation we have, and the
@@ -254,10 +275,14 @@ pause latency is the interesting axis.
     (`caml_mmtk_park` hands a parked domain's OCaml-STW participation to its
     backup thread — see `gc/mmtk/NOTES.md`).
 - **Runtime glue** (`runtime/`): `mmtk.c` + `caml/mmtk.h` (init, alloc, STW
-  poll/park, blocking-section + termination hooks), allocation redirection in
-  `caml/memory.h` (`Alloc_small`) and `memory.c` (`alloc_shr`), root publishing
-  in `interp.c`, per-domain mutator in `domain.c`, blocking sections in
-  `signals.c`, unmarshaller routing in `intern.c`. All under `#ifndef NATIVE_CODE`.
+  poll/park, blocking-section + termination hooks, native TLAB refill), allocation
+  redirection in `caml/memory.h` (`Alloc_small`) and `memory.c` (`alloc_shr`),
+  TLAB refill / minor-GC bypass in `minor_gc.c` (`caml_alloc_small_dispatch`,
+  `caml_empty_minor_heaps_once`) and `domain.c` (`caml_poll_gc_work`), root
+  publishing in `interp.c`, per-domain mutator + STW in `domain.c`, blocking
+  sections in `signals.c`, unmarshaller routing in `intern.c`. `mmtk.c` compiles
+  into both runtimes; MMTk paths are gated at runtime (`caml_mmtk_enabled` /
+  `_vanilla_minor` / `_tlab`), not by `#ifndef NATIVE_CODE`.
 - **Build**: GNU make (top-level `Makefile`); `Makefile.mmtk` builds the Rust
   staticlib and links it. `make -j` for parallel builds.
 
