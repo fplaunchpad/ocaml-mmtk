@@ -40,16 +40,18 @@ movement for testing).
 | M8 | Benchmark MMTk plans vs. the stock GC | ⬜ |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads). Concurrent: upstream-dependent | 🟡 |
 
-**Current focus:** **vanilla minor heap + MMTk major heap** — *implemented and
-flag-gated* (`MMTK_VANILLA_MINOR=1`; default off = unregressed all-MMTk). Stock
-minor GC runs; promotion (`alloc_shared`) routes to MMTk; stock write barrier
-maintains the minor remembered set. Works at reasonable heaps (e.g. retain@32MB =
-12 MMTk major GCs clean). **Remaining: the nested-STW hazard** — promotion must
-not trigger an MMTk GC inside the minor-GC STW (confirmed SEGV at very tight
-heaps like torture@16MB). Fix = reserve MMTk headroom / trigger MMTk GC before a
-minor GC when near-full. Once solid, flip the default and native (M5) becomes
-mostly build/link + native-root verification. Choke points + hazard in
-`gc/mmtk/NOTES.md`.
+**Current focus:** **native-code integration (M5)** — the proper next milestone.
+
+The **vanilla minor heap + MMTk major heap** work is a *validated proof of
+concept*, kept flag-gated (`MMTK_VANILLA_MINOR=1`; default off = unregressed
+all-MMTk). It proved the architecture: stock minor GC + promotion into MMTk works
+and is correct at reasonable heaps (e.g. retain@32MB = 12 MMTk major GCs clean),
+confirming the route to native. Its one rough edge — the nested-STW hazard at
+very tight heaps (an MMTk GC firing during minor-GC promotion; SEGV at
+torture@16MB) — is **intentionally left unfixed**: the minor↔MMTk GC coordination
+will be designed properly as part of native integration, so a standalone
+bytecode-only fix would be throwaway. (Decision, 2026-06-20.) Recipe is in
+`gc/mmtk/NOTES.md` if it's ever wanted standalone.
 
 Weak/ephemeron + finaliser processing is parked. Note the current constraint:
 the conservative interim (rooting `ephe_info`) keeps them alive safely **only

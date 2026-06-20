@@ -41,6 +41,12 @@ stock nursery; no compiler changes).
    pointers, which the minor GC scans as roots.
 5. **Disable the stock major GC** (mark/sweep slices); route `Gc.*`.
 
+**Decision (2026-06-20): the hazard below is intentionally NOT fixed standalone.**
+The minor↔MMTk GC coordination will be designed properly as part of native
+integration; a bytecode-only fix would be throwaway. The flag-gated vanilla-minor
+mode stays as a validated proof of concept (correct at reasonable heaps). Recipe
+retained below in case it's ever wanted on its own.
+
 **THE hazard — nested stop-the-world (CONFIRMED: SEGV at tight heaps).** Minor GC
 runs inside an OCaml STW. If a promotion (`alloc_shared` → MMTk) finds the MMTk
 heap full, `mmtk_ocaml_alloc` triggers an MMTk GC (`block_for_gc`) *inside* the
