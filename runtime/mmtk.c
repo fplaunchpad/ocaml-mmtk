@@ -4,9 +4,10 @@
 /*                                                                        */
 /**************************************************************************/
 
-/* Implementation of the bytecode<->MMTk glue. Compiled only into the
- * bytecode runtime (runtime_BYTECODE_ONLY_C_SOURCES). All of it is behind
- * #ifndef NATIVE_CODE so a stray native build is a no-op. */
+/* C glue between the OCaml runtime and the in-tree MMTk binding. Compiled into
+ * both the bytecode and native runtimes (a COMMON source). Currently the body is
+ * behind #ifndef NATIVE_CODE, so the native object is empty; native enablement
+ * is in progress (see ROADMAP M5). */
 
 #define CAML_INTERNALS
 
