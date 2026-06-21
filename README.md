@@ -120,7 +120,8 @@ Bytecode allocates through C entry points and works with any plan.
 > `MarkSweep` and `Immix` collect (single- and multi-domain); `Immix` also
 > relocates objects. Under `NoGC`, memory is never reclaimed — long-running or
 > allocation-heavy programs (including the OCaml compiler) will exhaust the heap;
-> that is expected, so the compiler bootstrap runs on the stock GC.
+> that is expected — build or bootstrap the compiler under a collecting plan (the
+> default `Immix`), not `NoGC`.
 
 ## Repository layout
 
@@ -138,10 +139,11 @@ _references/            external repos kept for study only (git-ignored)
 
 The runtime patches are concentrated in `runtime/` (`memory.h`, `memory.c`,
 `minor_gc.c`, `interp.c`, `domain.c`, `domain_state.tbl`, `signals.c`, `intern.c`).
-`mmtk.c`/`mmtk.h` is the glue, compiled into both runtimes. All MMTk paths are
-gated at runtime by `caml_mmtk_enabled` (and `caml_mmtk_vanilla_minor` /
-`caml_mmtk_tlab` for the native modes), so with MMTk off the stock GC runs
-unchanged and the compiler bootstrap is unaffected.
+`mmtk.c`/`mmtk.h` is the glue, compiled into both runtimes. As of M9 **MMTk is
+always-on**: allocation, the write barrier, and domain init go unconditionally to
+MMTk (the old `caml_mmtk_vanilla_minor` native mode has been removed — native
+always uses TLAB nursery-aliasing). The only remaining escape is the transitional
+`MMTK_DISABLE=1`, kept for benchmarking against the stock GC until it is excised.
 
 ## License
 

@@ -373,18 +373,22 @@ single-GC runtime — no `MMTK_ENABLED` opt-in, no dual code paths, no stock
 minor/major GC. This deletes the per-allocation `caml_mmtk_enabled` branch and the
 maintenance tax of keeping two GCs correct side by side.
 
-**Gate (prerequisite): a full self-hosting bootstrap must run on MMTk.** Being
-validated now — a from-scratch `make` under `MMTK_ENABLED=1 MMTK_PLAN=Immix`
-(the compiler compiling itself + the world on MMTk); then `make bootstrap` (the
-strict self-hosting cycle, regenerating `boot/`). Stdlib already rebuilds clean
-under MMTk; the M7 testsuite already runs the compiler under MMTk.
+**Gate (prerequisite): a full self-hosting build must run on MMTk — MET.** A
+from-scratch `make all` runs clean under MMTk on both the default Immix and (after
+the moving-GC fix — forwarding-pointer/`Infix_tag` collision, see `gc/mmtk/NOTES.md`)
+StickyImmix — 843 compile steps, 0 crashes, including the ocamldoc `Stdlib.3o`
+manpage step that used to crash intermittently. Stdlib rebuilds clean; the M7
+testsuite runs the compiler under MMTk. (`make bootstrap` to a strict fixpoint is
+still fiddly for build-system / tree-state reasons — an aborted run leaves `ocamlc`
+missing — not GC correctness.)
 
 Stages (each independently buildable + testable):
-1. **Always-on.** Drop `MMTK_ENABLED`/`caml_mmtk_wanted`; MMTk inits
-   unconditionally at startup. Default plan becomes a *collecting* one (Immix) —
-   NoGC can't sustain the runtime. Remove the `if (caml_mmtk_enabled …)` gates in
-   `Alloc_small`/`caml_alloc_shr`/write barrier/dispatch/domain-init — they become
-   unconditional MMTk. Stock-GC code is now dead.
+1. **Always-on — ✅ done.** Dropped `MMTK_ENABLED`/`caml_mmtk_wanted`; MMTk inits
+   unconditionally at startup; default plan is Immix (a collecting plan — NoGC can't
+   sustain the runtime); the `caml_mmtk_vanilla_minor` native mode is removed.
+   `caml_mmtk_enabled` is retained only as the pre-init readiness guard for the brief
+   startup window (removing it needs MMTk-init-before-first-alloc, a separate perf
+   step). The stock-GC code paths are now dead — they are deleted in the stages below.
 2. **Delete the stock minor GC** (`minor_gc.c`): oldify/promotion,
    `caml_empty_minor_heap*`, the remembered-set tables (`major_ref`/`ephe_ref`/
    `custom`), the stock path of `caml_alloc_small_dispatch`. Young region is purely
