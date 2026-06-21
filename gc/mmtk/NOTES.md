@@ -103,9 +103,12 @@ deterministic SIGSEGV in `is_forwarded`. MarkSweep was 12/12 crash. Fix: registe
 the spec **only when `plan.constraints().moves_objects`** is true; non-moving plans
 leave it unset, so `is_forwarded` returns `false` — correct there (nothing is ever
 forwarded, so every `Infix_tag` header is genuine). After the fix: MarkSweep
-**8/8 clean**, Immix/StickyImmix unchanged (bug-#1 fix intact). Run via
-`runtime/ocamlrun` (the `boot/ocamlrun` bootstrap binary is stale — rebuild
-relinks `runtime/`, not `boot/`).
+**8/8 clean** on parser.cmo, Immix/StickyImmix unchanged (bug-#1 fix intact). Run
+via `runtime/ocamlrun` (the `boot/ocamlrun` bootstrap binary is stale — rebuild
+relinks `runtime/`, not `boot/`). **Validated broadly: the full bytecode testsuite
+under MarkSweep now passes 1367 (140 skipped, 44 failed — the failures are the
+known-unsupported set: statmemprof/runtime-events/Gc.stat + by-design, same class
+as Immix). Before the fix MarkSweep crashed on essentially every test.**
 
 **The CI/ocamldoc bug is a RELOCATION bug, not a missed root.** With the above fix,
 MarkSweep runs parser.cmo **clean** (8/8) while StickyImmix/Immix still crash. A
