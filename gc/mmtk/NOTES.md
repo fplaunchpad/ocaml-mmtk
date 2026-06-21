@@ -5,6 +5,47 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 3 (inert stock major GC): implemented on a branch, BLOCKED by an effects/GC regression
+
+*2026-06-21*
+
+Attempted the stage-3 removal as an *inert* step first (make the stock major GC
+never run, then delete the dead bodies). On branch `m9-stage3-inert` (NOT merged):
+guard `caml_darken`, `caml_major_collection_slice`/`caml_opportunistic_*`,
+`caml_finish_major_cycle`/`marking`/`sweeping` to no-op under MMTk (the finish_*
+ones still set `marking_done`/`sweeping_done=1` so `caml_domain_terminate`'s
+`marking_and_sweeping_done()` loop still exits). This renders `major_gc.c`'s
+mark/sweep/slice bodies unreachable under MMTk.
+
+**Bug found + fixed during validation (GC-pacing hang).** First cut made
+`caml_major_collection_slice` a bare no-op, which skipped its tail bookkeeping
+`Caml_state->major_slice_epoch = major_slice_epoch`. On the bytecode path
+`caml_poll_gc_work` advances the global `caml_major_slice_epoch`, so
+`caml_reset_young_limit` then saw `domain->major_slice_epoch < caml_major_slice_epoch`
+forever and re-armed the interrupt every safepoint → the mutator spun (bootstrap hung
+at `LINKC ocamlobjinfo`). Fixed by recording the epoch in the inert path. After the
+fix: clean full bootstrap (Immix + StickyImmix) + a 25×4-domain spawn/join battery.
+
+**BLOCKER (open): `callback/nested_fiber` SIGSEGVs.** It passed in the flag-off
+baseline AND the pre-inert M6 run, so the inert step regressed it. The test runs
+Effects (`match_with`) with a C callback (`caml_to_c`) that does `Gc.full_major` +
+allocation inside a nested fiber. It prints `g() check 2047` / `g() returned: 1` /
+`f() check: 15` then **crashes during the outer effect-handler's return path** (before
+`f() returned: 2`). So a `Gc.full_major` taken inside a nested fiber, with the stock
+major GC inert, corrupts something that manifests on fiber return. Not yet
+root-caused — none of the guarded entry points is obviously on the fiber/GC path
+(`Gc.full_major` routes to `caml_mmtk_collect`, not the stock cycle), so suspect a
+subtle interaction (continuation-stack handling, or the exhaustive-GC + inert combo).
+Needs gdb (like the epoch hang). **Do NOT merge `m9-stage3-inert` until this is fixed.**
+
+**Status:** `m9-mmtk-only` stays at the validated M6 milestone (M6 default-on). The
+stock major GC is *not yet* removed — the inert step is correct for bootstrap +
+multidomain but breaks effects+GC; the stock collector retains a subtle load-bearing
+role for the nested-fiber/`Gc.full_major` path that must be understood before it can
+be disabled. This is the precise stage-3 blocker.
+
+---
+
 ## Default-on M6 validated by full bootstrap; bug #5: fuzzer OOM hang
 
 *2026-06-21*

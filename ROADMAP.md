@@ -35,7 +35,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` gated by `MMTK_WEAK_REFS` (default off = memory-safe interim that never clears). Flag-on does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no flag-attributable regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation). pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Unblocks stage 3.** | 🟢 working (gated) |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). | 🟢 done (default-on) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). Default Immix clean. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
@@ -418,20 +418,16 @@ Stages (each independently buildable + testable):
    doesn't call the MMTk barrier (pre-existing gap; fine for default Immix, a TODO for
    native StickyImmix — see `gc/mmtk/NOTES.md`).
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
-   mark/sweep/slices/mark-stack/pool/LOS. `caml_alloc_shr`/`caml_alloc_small` go
-   straight to MMTk. **🔴 Blocked on M6 — audited 2026-06-21 (see `gc/mmtk/NOTES.md`).**
-   The stock major collector is *not* dead under always-on MMTk: `caml_darken` is
-   still called from `weak.c`/`finalise.c`, and the cycle machinery
-   (`caml_finish_major_cycle`/`caml_finish_marking`/`caml_finish_sweeping` +
-   `caml_orphan_ephemerons`/`caml_orphan_finalisers`) is run at **every domain
-   termination** (`caml_domain_terminate`, reached at process exit) — plus the slice
-   is still driven by custom-block `caml_adjust_gc_speed` and the TLAB-half-fill
-   `advance_global_major_slice_epoch` epoch. It runs correctly today only because the
-   stock heap is near-empty (the pre-init handful) and `caml_darken` still marks live
-   stock objects before sweep; making it inert (slice + `caml_darken` no-ops) would
-   sweep those objects (use-after-free) or break termination's mark/orphan logic.
-   Removing it therefore **requires M6 first** — MMTk-native weak/ephemeron/finaliser
-   processing so termination + orphaning no longer route through the stock cycle.
+   mark/sweep/slices/mark-stack/pool/LOS. M6 is done (the prerequisite), so this is
+   now in progress via an *inert-first* approach — guard the stock collector to no-op
+   under MMTk, then delete the dead bodies. **🟡 inert step implemented on branch
+   `m9-stage3-inert`, NOT merged — blocked by one regression (see `gc/mmtk/NOTES.md`).**
+   The guards (caml_darken / slices / caml_finish_*) pass a clean Immix+StickyImmix
+   bootstrap and a multidomain Domain.join battery (one GC-pacing hang found + fixed:
+   the inert slice must still record `major_slice_epoch`). **Open blocker:**
+   `callback/nested_fiber` SIGSEGVs — a `Gc.full_major` inside a nested fiber, with the
+   stock major GC inert, corrupts state that crashes on the effect-handler return.
+   Needs gdb root-cause before merge + before deleting the bodies.
 4. **Domain + `Gc` module cleanup**: remove the minor-heap arena
    (`allocate/free_minor_heap_arena`, the reservation) — the nursery comes from
    MMTk; reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk
