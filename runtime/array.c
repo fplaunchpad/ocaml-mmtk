@@ -750,35 +750,16 @@ CAMLprim value caml_uniform_array_fill(
      implementation of that function for a description of GC
      invariants we need to enforce.*/
   fp = &Field(array, ofs);
+  /* MMTk owns the heap: fill the range, then (bytecode) remember it via the MMTk
+     region barrier for generational plans (no-op otherwise). OCaml's stock
+     remembered-set / SATB fill is bypassed. Native takes no barrier here (see
+     write_barrier — a gap for native StickyImmix, fine for the default Immix). */
+  for (intnat i = 0; i < len; i++) fp[i] = val;
 #ifndef NATIVE_CODE
   if (caml_mmtk_enabled) {
-    /* MMTk owns the heap: do the fill, then remember the whole filled range for
-       generational plans (no-op otherwise). Skips OCaml's bypassed
-       remembered-set / SATB logic below. */
-    for (intnat i = 0; i < len; i++) fp[i] = val;
     caml_mmtk_region_barrier(fp, len);
-    return Val_unit;
   }
-  /* vanilla-minor mode: fall through to the stock fill + minor remembered set. */
 #endif
-  if (Is_young(array)) {
-    for (; len > 0; len--, fp++) *fp = val;
-  } else {
-    int is_val_young_block = Is_block(val) && Is_young(val);
-    for (; len > 0; len--, fp++) {
-      value old = *fp;
-      if (old == val) continue;
-      *fp = val;
-      if (Is_block(old)) {
-        if (Is_young(old)) continue;
-        if (caml_marking_started())
-          caml_darken(Caml_state, old, NULL);
-      }
-      if (is_val_young_block)
-        Ref_table_add(&Caml_state->minor_tables->major_ref, fp);
-    }
-    if (is_val_young_block) caml_check_urgent_gc (Val_unit);
-  }
   return Val_unit;
 }
 
