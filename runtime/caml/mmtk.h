@@ -72,6 +72,11 @@ extern void caml_mmtk_park(void);
 extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
                                       caml_domain_state *domain);
 
+/* DEBUG (moving-GC bug hunt): a domain's current bytecode value-stack live range
+ * [*lo, *hi) (sp .. Stack_high). Used by the binding's post-GC stale-root check. */
+extern void caml_mmtk_debug_stack_range(caml_domain_state *domain,
+                                        value **lo, value **hi);
+
 /* M6 (experimental, MMTK_WEAK_REFS=1): MMTk-native weak/ephemeron processing,
  * driven by the binding's Scanning::process_weak_refs in place of the conservative
  * caml_mmtk_scan_ephe_roots scheme above. caml_mmtk_weak_refs is the gate flag.

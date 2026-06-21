@@ -90,6 +90,27 @@ walk the GCs forward tracking the specific closure reference. Solving the rr
 recording friction (above) to get a fresh, `sanity`+`MMTK_VERBOSE` trace would
 also help.
 
+**Instrumentation result — the value stack is NOT the missed root.** Added a gated
+post-GC stack check (`MMTK_DEBUG_STACK_CHECK=1`): in `process_weak_refs` (after the
+root scan has forwarded everything it found), raw-walk each domain's bytecode value
+stack `[sp, Stack_high)` (via new `caml_mmtk_debug_stack_range`) and flag any slot
+pointing to a **forwarded** object (a root the scan failed to update). Across 24
+StickyImmix/64 MB runs (4 crashes): **zero forwarded-stale slots, on crash runs
+too** — so caml_scan_stack *does* correctly forward every value-stack heap pointer.
+A second variant flagging slots pointing to **unreachable** objects fired heavily
+(36–106/run) **on clean runs as well** — all false positives: their headers end in
+`0xf9` = `Infix_tag` (interior pointers into closures, where `is_reachable` is
+meaningless — the VO bit is at object starts, not infix interiors).
+
+Conclusion: the corrupted RETURN frame's stale `env` is **not** an unforwarded
+value-stack slot. The miss is in a **register (`accu`/`env`) or an `sp`
+misalignment** — state a heap/stack scan can't see. Next: forward-step from event
+1795 watching `accu`/`env` (r13/r15) build the frame, and disambiguate *stale-env*
+(env points to moved/freed memory) vs *sp-misaligned* (do_return reads the wrong
+slots — a code pointer `0x748401261f5c` sits 6 words above the crash sp, so the
+real return frame is nearby). The check + `caml_mmtk_debug_stack_range` are kept
+(gated off) as reusable tooling.
+
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
 *2026-06-21*

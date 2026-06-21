@@ -87,6 +87,9 @@ extern "C" {
         retain: extern "C" fn(*mut c_void, usize) -> usize,
         ctx: *mut c_void,
     );
+    /// DEBUG (moving-GC bug hunt): a domain's bytecode value-stack live range
+    /// [*lo, *hi). Used by the post-GC stale-root check.
+    fn caml_mmtk_debug_stack_range(domain: usize, lo: *mut *mut usize, hi: *mut *mut usize);
 }
 
 #[inline]
@@ -313,6 +316,45 @@ impl Scanning<OCamlVM> for VMScanning {
                     ephe_retain,
                     core::ptr::null_mut(),
                 );
+            }
+        }
+
+        // DEBUG (moving-GC bug hunt): after the root scan has forwarded everything
+        // it found, re-walk each domain's bytecode value stack raw. Any slot still
+        // holding a pointer to a *forwarded* object is a stack root the scan failed
+        // to update — the missed-root bug. Prints the slot so we can map it to the
+        // interpreter frame. Gated on MMTK_DEBUG_STACK_CHECK to stay off by default.
+        if std::env::var_os("MMTK_DEBUG_STACK_CHECK").is_some() {
+            for &d in &domains {
+                let (mut lo, hi): (*mut usize, *mut usize) = unsafe {
+                    let mut lo = core::ptr::null_mut();
+                    let mut hi = core::ptr::null_mut();
+                    caml_mmtk_debug_stack_range(d, &mut lo, &mut hi);
+                    (lo, hi)
+                };
+                while !lo.is_null() && (lo as usize) < (hi as usize) {
+                    let word = unsafe { *lo };
+                    if let Some(obj) = managed_obj(word) {
+                        if let Some(fwd) = obj.get_forwarded_object() {
+                            let new = fwd.to_raw_address().as_usize();
+                            if new != word {
+                                eprintln!(
+                                    "[STALE-ROOT/fwd] stack slot {:p} = {:#x} -> forwarded {:#x}",
+                                    lo, word, new
+                                );
+                            }
+                        } else if !obj.is_reachable() {
+                            // Slot points to an unreachable (collected) object: a
+                            // dangling stack root the scan never traced.
+                            let hdr = unsafe { *((word as *const usize).offset(-1)) };
+                            eprintln!(
+                                "[STALE-ROOT/dead] stack slot {:p} = {:#x} unreachable (hdr {:#x})",
+                                lo, word, hdr
+                            );
+                        }
+                    }
+                    lo = unsafe { lo.add(1) };
+                }
             }
         }
         false

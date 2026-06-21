@@ -25,6 +25,7 @@
 #include "caml/custom.h"
 #include "caml/domain_state.h"
 #include "caml/domain.h"
+#include "caml/fiber.h"
 #include "caml/fail.h"
 #include "caml/misc.h"
 #include "caml/roots.h"
@@ -268,6 +269,18 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
       }
     }
   }
+}
+
+/* DEBUG (moving-GC bug hunt, MMTK_DEBUG_STACK_CHECK): expose a domain's current
+ * bytecode value-stack live range [sp, Stack_high) so the binding can re-walk it
+ * after a GC's root scan and flag any slot still pointing to a forwarded object —
+ * i.e. a stack root the scan failed to update. Returns NULLs if no stack. */
+void caml_mmtk_debug_stack_range(caml_domain_state *domain, value **lo, value **hi)
+{
+  struct stack_info *s = domain->current_stack;
+  if (s == NULL) { *lo = NULL; *hi = NULL; return; }
+  *lo = s->sp;
+  *hi = Stack_high(s);
 }
 
 /* ── M6: MMTk-native weak reference / ephemeron processing (experimental) ──────
