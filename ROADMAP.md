@@ -35,7 +35,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers (interim scheme is memory-safe but never clears; `process_weak_refs` design pinned — unblocks M9 stage 3) | ⏸ parked (design ready) |
 | M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
@@ -191,17 +191,19 @@ this finding).
 
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
-- **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) —
-  interim `caml_mmtk_scan_ephe_roots` roots the `domain->ephe_info` lists so they
-  don't dangle, **but only safe under non-moving MarkSweep**: it reports interior
-  field slots of the ephemeron blocks, which go stale when those blocks are
-  relocated under a moving plan (Immix/GenImmix/StickyImmix) → crash/hang. A
-  non-moving-allocation attempt regressed MarkSweep/NoGC and was reverted. Proper
-  fix = MMTk weak-reference processing (register ephemerons, clear dead keys/data,
-  update under moving). Still TODO; weak refs also never clear yet. See NOTES.
+- **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) — interim
+  `caml_mmtk_scan_ephe_roots` roots the `domain->ephe_info` lists so they don't
+  dangle. It is **memory-safe under moving plans now**: it pins each ephemeron block
+  (`mmtk_ocaml_pin_object`) so the block can't relocate, and reports its interior
+  fields as *updatable* root slots so live keys/data are forwarded. The limitation is
+  *semantic*, not safety: it keeps the entire ephemeron graph alive, so **weak refs
+  never clear** and dead keys are never tombstoned. Proper fix = MMTk-native weak-ref
+  processing via `Scanning::process_weak_refs` — **concrete design pinned in
+  `gc/mmtk/NOTES.md` (M6 design, 2026-06-21)**; this is the unblock for M9 stage 3.
 - **Finalisers** — first-class (`Gc.finalise`) and last-ditch
   (`Gc.finalise_last`). Don't run yet — the root scan passes `do_final=1` to keep
-  finalisable values alive. Wire MMTk's finalizable processing.
+  *all* finalisable values alive (so they leak). Handled by the same
+  `process_weak_refs` pass (retain-one-cycle + enqueue) in the M6 design.
 - **Lazy values** — work today (ordinary mutable blocks; no special GC support
   needed). Verified under MarkSweep + Immix.
 - **`Gc` module** — ✅ `Gc.major`/`full_major`/`compact`/`major_slice` now route

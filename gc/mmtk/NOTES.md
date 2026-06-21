@@ -5,6 +5,79 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M6 design: MMTk-native weak/ephemeron/finaliser via `Scanning::process_weak_refs`
+
+*2026-06-21*
+
+This is the unblock for M9 stage 3 (see the stage-3 audit below). Concrete,
+implementable design pinned against mmtk 0.32 + the OCaml 5 ephemeron layout.
+
+**Mechanism — `process_weak_refs`, not `ReferenceGlue`.** OCaml ephemerons are
+key→value weak structures (data is retained iff *all* keys are reachable); they do
+not map onto MMTk's `ReferenceGlue` (Java Soft/Weak/Phantom) model, so
+`reference_glue.rs` stays a stub. The right hook is
+`Scanning::process_weak_refs(worker, tracer_context) -> bool` (mmtk
+`src/vm/scanning.rs`): called *after* the strong transitive closure, may retain
+objects, and if it returns `true` MMTk reruns it after draining the `VMRefClosure`
+bucket — exactly the fixpoint iteration ephemerons need. mmtk-ruby uses this hook
+for the same reason.
+
+**Tools the hook gives us** (all on `ObjectReference`):
+- `object.is_reachable()` — did strong tracing reach it?
+- `object.get_forwarded_object()` — new address if a moving plan relocated it
+  (Immix defrag / StickyImmix nursery). Use this to *update* surviving weak slots.
+- `tracer_context.with_tracer(worker, |t| { t.trace_object(o) })` — *retain*
+  (resurrect) an unreachable object and get its (possibly forwarded) address. One
+  `with_tracer` per pass, many `trace_object` inside (it batches the closure).
+
+**OCaml ephemeron layout** (`runtime/caml/weak.h`): block fields are
+`link@0, data@1, keys@2..`; `caml_ephe_none` is the cleared/empty marker; a weak
+array is an ephemeron whose `data == caml_ephe_none`. Ephemerons are threaded on
+per-domain lists `domain->ephe_info->{todo, live}` via `Ephe_link`.
+
+**Algorithm** (mirrors stock `major_gc.c` ephemeron marking, run inside
+`process_weak_refs`):
+1. Walk each domain's `todo`+`live` ephe lists. For each ephemeron `e`:
+   - if `!e.is_reachable()` → `e` itself is dead: **unlink it from the list** (so the
+     list never dangles) and skip; it gets reclaimed.
+   - else for each key slot `k = Ephe_key(e,i)`: if the referent `is_reachable()`,
+     update the slot to `get_forwarded_object()`; else the key is dead → set the slot
+     to `caml_ephe_none` and mark `e` "incomplete".
+   - if `e` had no dead key → retain `data`: `trace_object(data)` and store the
+     forwarded ref into `Ephe_data(e)`. If incomplete → set `Ephe_data(e)` to
+     `caml_ephe_none`.
+2. Return `true` if any data was retained this pass (retaining data may make another
+   ephemeron's keys reachable → re-run to fixpoint); else `false`.
+3. **Finalisers** (`finalise.c`): a finalisable value that is now unreachable is
+   `trace_object`-retained for one more cycle and pushed to the domain's
+   `to_do`/`final_fun` run queue (the root scan currently passes `do_final=1` to keep
+   *all* finalisable values alive — that conservative flag goes away here).
+
+**C glue, not Rust-walks-OCaml.** The list/slot walking is far cleaner in C with the
+`Ephe_*` macros, so add `caml_mmtk_process_ephemerons(is_reachable_cb, retain_cb,
+forward_cb, domain)` in `runtime/mmtk.c`; `process_weak_refs` provides the three
+callbacks (closing over the tracer) and invokes it per registered domain.
+`is_reachable_cb(v) -> int`, `forward_cb(v) -> value` (new addr; identity if not
+moved), `retain_cb(v) -> value` (trace + new addr).
+
+**Removal cascade once this lands** (the actual M9-stage-3 payoff):
+- Delete `caml_mmtk_scan_ephe_roots` + the `mmtk_ocaml_pin_object` interim pinning in
+  `scanning.rs`/`api.rs`/`mmtk.c` (the conservative "keep the whole ephemeron graph
+  as strong roots" scheme this replaces).
+- Drop the `do_final=1` keep-alive in `scan_roots_in_mutator_thread`.
+- `caml_domain_terminate`'s `caml_orphan_ephemerons/finalisers` + the stock
+  `caml_finish_*` cycle can then go; the stock major slice drivers can be guarded
+  under MMTk; `major_gc.c`/`shared_heap.c` mark/sweep/slice/pool/LOS become dead.
+
+**Landing safely.** Implement behind `MMTK_WEAK_REFS=1` (default = today's
+conservative scheme, which is memory-safe but never clears weak refs and leaks
+finalisable values). Validate the new path opt-in against the testsuite's
+weak/ephemeron/finaliser/lazy tests (the ones tabled in M7) on StickyImmix at a small
+heap with `sanity` on — those tests *are* the acceptance spec — then flip the default
+and remove the interim scheme. See the stage-3 audit below and [[mmtk-ocaml-bringup-plan]].
+
+---
+
 ## M9 stage 3 audit: the stock *major* GC is still load-bearing under MMTk — gated on M6
 
 *2026-06-21*
