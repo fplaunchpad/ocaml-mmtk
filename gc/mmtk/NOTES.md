@@ -5,6 +5,72 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 3: delete the dead stock major-GC machinery (branch `m9-stage3-delete`)
+
+*2026-06-21*
+
+Follow-up to the inert step (below). With the stock major collector inert under
+always-on MMTk, its mark/sweep/slice/cycle bodies were unreachable. Removed them,
+compiler-guided (the build uses `-Wall` without `-Werror`, so unused `static`
+functions are warnings — delete → rebuild → read warnings → repeat; `Caml_inline`
+helpers don't warn, so those were traced by hand for zero call sites).
+
+**`major_gc.c` 2540→1002 lines.** The seven entry points are now thin stubs that
+preserve the inert behaviour:
+- `caml_darken` / `caml_darken_cont`: pure no-op.
+- `caml_major_collection_slice`: record `major_slice_epoch` then return
+  (load-bearing — without it the bytecode mutator spins in `caml_poll_gc_work`).
+- `caml_opportunistic_major_collection_slice` / `caml_finish_major_cycle`: no-op.
+- `caml_finish_marking` / `caml_finish_sweeping`: set `marking_done` /
+  `sweeping_done` (satisfies `caml_domain_terminate`).
+- `caml_mark_roots_stw`: no-op — still *called* from `minor_gc.c`, but only when
+  `caml_gc_mark_phase_requested` is set, which never happens under MMTk (its only
+  setter, `request_mark_phase`, lived in the now-deleted slice path).
+
+Deleted internal machinery: the marking core (`mark`, `do_some_marking`,
+`mark_slice_darken`), all mark-stack helpers (push/range/prune/realloc/shrink,
+the prefetch buffer, `add_addr`, `ptr_to_chunk*`), the cycle/phase STW machinery
+(`cycle_major_heap_from_stw_single`, `stw_cycle_all_domains`,
+`stw_finish_major_cycle`, `stw_try_complete_gc_phase`, `is_complete_phase_*`),
+`request_mark_phase`, and the ephemeron/orphan helpers reachable only from the
+slice (`adopt_orphaned_work`, `ephe_next_cycle`, `prepare_for_ephe_marking`,
+`record_ephe_marking_done`, `no_orphaned_work`).
+
+**`shared_heap.c` 1677→1476 lines.** Deleted `caml_sweep` and its now-orphaned
+callees `large_alloc_sweep` / `verify_swept` (+ the `verify_pool`/`verify_large`/
+`mem_stats` heap-accounting block they used), `caml_redarken_pool` (zero callers),
+and `caml_cycle_heap` / `caml_cycle_heap_from_stw_single` (callers were in the
+deleted `stw_cycle_all_domains`); removed their decls from `caml/shared_heap.h`.
+
+**Kept (still referenced — "when in doubt, keep"):**
+- The pool **allocator** (`caml_shared_try_alloc`, `pool_sweep`, `pool_find`,
+  `pool_global_adopt`, `large_allocate`, …). Note `pool_sweep` is *not* dead — the
+  allocator calls it from `pool_find`/`pool_global_adopt` to reclaim space; only
+  `caml_sweep` (the whole-heap sweep driver) was dead.
+- `caml_orphan_ephemerons` / `caml_orphan_finalisers` (called from `domain.c`) and
+  the ephemeron machinery they still use: `ephe_mark`, `ephe_sweep`,
+  `ephe_todo_list_emptied`, `prepare_for_ephe_sweeping`, `ephe_list_tail`,
+  `ephe_cycle_info`, `ephe_lock`.
+- `caml_init_major_gc` / `caml_teardown_major_gc` (allocate/free the per-domain
+  `struct mark_stack`, which is now never populated but still managed), the pacing
+  functions, and the `Gc`-stat/phase helpers (`caml_gc_phase`, `caml_gc_phase_char`,
+  `update_major_slice_work`, …).
+- `caml_finalise_heap` / `pool_finalise` / `large_alloc_finalise` (shutdown), and
+  `caml_verify_heap_from_stw` / `caml_compact_heap` (verification/compaction —
+  exported, now callerless but out of the sweep scope; left in place).
+
+**Validated:** `world` + `world.opt` build clean (no unused-function warnings for
+the removed set); 25×4 `Domain.join` GC battery passes (bytecode + native, Immix +
+StickyImmix); testsuite spot-check `gc-roots` 4/0, `effects` 24/0, `basic` 40/0,
+`callback` (incl. `nested_fiber` ✓) — the only non-pass across the spot-check are
+the documented baseline flakes (`callback/signals_alloc` bytecode signal-ordering;
+`parallel` `domain_dls` `register_mutator … called twice` binding panic /
+`domain_parallel_spawn_burn_gc_set` SIGSEGV = bug #3), none of which touch the
+deleted code (the three commits only touched `major_gc.c`/`shared_heap.c`/
+`shared_heap.h`).
+
+---
+
 ## M9 stage 3: stock major GC now INERT on m9-mmtk-only; the "blocker" was a separate bug
 
 *2026-06-21*

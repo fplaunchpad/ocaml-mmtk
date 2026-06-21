@@ -426,8 +426,14 @@ Stages (each independently buildable + testable):
    Immix+StickyImmix bootstrap, 25×4 `Domain.join` battery, effects 23/0. The earlier
    `nested_fiber` "blocker" was a *separate* pre-existing bug (the binding never scanned
    continuation fiber stacks — fixed, see `gc/mmtk/NOTES.md`), not the inert step. The
-   stock major GC no longer runs. **Remaining: delete the now-dead mark/sweep/slice
-   bodies** in `major_gc.c` + the `shared_heap.c` sweep (literal code removal).
+   stock major GC no longer runs. **🟡 deletion step on branch `m9-stage3-delete`**:
+   the seven inert entry points are now thin stubs and the dead mark/sweep/slice/cycle
+   bodies are removed — `major_gc.c` 2540→1002 lines, `shared_heap.c` 1677→1476 lines
+   (dead `caml_sweep`/`large_alloc_sweep`/`verify_swept`/`caml_redarken_pool`/
+   `caml_cycle_heap*`; the pool allocator is kept). Builds `world`+`world.opt` clean;
+   validated 25×4 `Domain.join` battery + spot-check (gc-roots/effects/basic, callback
+   `nested_fiber` passes). Kept: pacing, `caml_orphan_ephemerons`/`_finalisers` and the
+   ephemeron machinery they use, `Gc`-stat/phase helpers.
 4. **Domain + `Gc` module cleanup**: remove the minor-heap arena
    (`allocate/free_minor_heap_arena`, the reservation) — the nursery comes from
    MMTk; reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk
