@@ -64,6 +64,19 @@ clean → the trigger is *partial* in-place moving). It surfaces far downstream 
 `sp`-accounting drift / control-flow corruption (the drift propagates through
 calls, so its origin is upstream of the crashing frame).
 
+**Refinement — it's a `pc`/`sp` desync, and the stack is well-formed.** On the fresh
+trace the value stack around the crash is *intact*: valid return frames at `sp[2]`
+(`[code 0x772b75f2cbb8, closure (hdr 0x10f7, Closure_tag wo4), Val_long 0]`) and at
+`sp[14]` (`[code 0x772b75f2dab0, closure, Val_long]`). So `sp[5]=0x3` is a
+*legitimate* value in the caller's locals — nothing is corrupted in the heap or
+stack. The fault is that the **running code does not match the frame `sp` points
+at**: the function whose frame is at `sp[2]` has only 2 locals, yet the executing
+opcode is ACC5+GETFIELD3 (needs ≥6). I.e. `pc` and `sp` are out of sync — a control
+transfer (RETURN/APPLY) used a wrong `sp` (or `pc`), so afterwards the interpreter
+runs one function's bytecode against another's stack frame. This is the downstream
+face of the same upstream event; the heap/roots being clean is expected for a
+desync (no value is wrong — the *pairing* of pc and sp is).
+
 **Handoff for the focused next session.** Record a fresh trace with
 `rr record --num-cores=1` (StickyImmix, 64 MB) and drive it *interactively*: from
 the crash, reverse to the function's entry (the APPLY that pushed the return frame
