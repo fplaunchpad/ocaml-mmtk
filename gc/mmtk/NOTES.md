@@ -60,10 +60,35 @@ MMTk's fixed metadata mmap. The Jun-20 `strcrash` trace still replays fine (use
 it). Fresh traces against the current tree need this solved (try
 `--disable-avx-512` / `--num-cores=1`, or shrink the metadata footprint).
 
-**Next step.** On the strcrash replay: find the GC that moved the saved-env
-closure (`MMTK_VERBOSE` GC count / binary-search on GC count), then determine why
-its value-stack slot was not forwarded — reverse-continue to *breakpoints* (NOT
-hardware watchpoints — rr async bug) or a software-watchpoint reverse on the slot.
+**Reverse-execution findings (strcrash replay).** Confirmed via `caml_do_roots`
+breakpoints (the binding's root scan: `f=mmtk_ocaml::scanning::collect_root_slot`)
++ software watchpoints:
+- The crashing `do_return` reads its frame at `sp=0x619797ff1038`:
+  `pc=sp[0]=0x1`, `env=sp[1]=0x2010349e6b8`, `extra_args=sp[2]=0xffff…ec41`.
+- **No GC between the frame's construction and the crash** — the last `caml_do_roots`
+  before the fault is rr event 1795, with `current_stack->sp=0x619797ff1010`; the bad
+  slot `0x619797ff1040` is 6 words *above* that sp (i.e. inside the scanned range),
+  but at that GC it still held a *different, valid* value (`0x201034981e8`). So the
+  bad frame is built **after** the last GC.
+- At event 1795, address `0x2010349e6b8` was **free** (header = a free-list link,
+  `0x2010349e6c0`), and that address churns through many objects over time
+  (`0xe1` header earlier, etc.). So `0x2010349e6b8` is a **stale pointer reused as a
+  tag-3/wosize-320 block** — the closure that lived there moved/died in an *earlier*
+  GC and a slot kept pointing at it; the staleness was then carried forward (through
+  `accu`/the stack via `PUSHACC1` @421 and `APPLY1` @494) into this frame.
+- The frame the dying callee returns through does **not** line up with a clean
+  APPLY1 frame (`[arg1, pc, env, extra_args]`) at the expected offset — hinting at
+  either an `sp` imbalance (~2 slots) or an unforwarded slot; **unconfirmed**.
+
+**Methodology caveat.** Batch (`-batch` over ssh) software-watchpoint *reverse*
+gave self-contradictory Old/New readings here (a slot's "last writer" reported a
+value that disagrees with the crash-time contents) — SW-watchpoint reverse is
+unreliable in this mode. The final pin needs **interactive** rr: from event 1795,
+single-step *forward* to the crash watching the stack build the bad frame (forward
+HW watchpoints are fine; only *reverse* + long runs trip the rr async bug), or
+walk the GCs forward tracking the specific closure reference. Solving the rr
+recording friction (above) to get a fresh, `sanity`+`MMTK_VERBOSE` trace would
+also help.
 
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
