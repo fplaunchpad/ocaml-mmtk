@@ -9,11 +9,11 @@ and deferred investigations).
 **Project shape.** This repo *is* the OCaml fork (base `5.5.0-rc1`, branch
 `5.5+mmtk`), distributed as `mmtk-ocaml`. The MMTk binding is in-tree at
 [`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 from crates.io (not
-vendored). MMTk is **opt-in** (`MMTK_ENABLED=1`); a normal build and the
-compiler bootstrap still run on the stock GC. Approach: **bytecode first**
-(native code inlines its allocation sequence, so it can't be swapped by
-redirecting a C function); **route all bytecode allocation through MMTk**,
-bypassing the minor heap.
+vendored). MMTk is **always-on and the only collector** (no opt-out; the stock
+minor *and* major GC have been excised — M9). `MMTK_PLAN` selects the plan. The
+bring-up approach (historical) was **bytecode first** (native code inlines its
+allocation sequence, so it can't be swapped by redirecting a C function), routing
+all allocation through MMTk; native now uses TLAB/nursery-aliasing.
 
 Run knobs (as of M9, MMTk is **always-on** and the only collector — no opt-out):
 `MMTK_PLAN` (default `Immix`), `MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_VERBOSE`.
@@ -38,7 +38,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). | 🟢 done (default-on) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). Default Immix clean. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
-| **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
+| **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `mmtk-ocaml` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix | 🟡 |
 | — | Concurrent GC: `ConcurrentImmix` exists in 0.32 and runs our tests; concurrent-marking correctness unvalidated | 🟡 |
@@ -80,22 +80,20 @@ bugs immediately; the **native** testsuite follows the TLAB work. This is
 prioritized ahead of the remaining feature/plan items (weak/ephemeron,
 Compressor, benchmarking) — fix what the suite finds first.
 
-Weak/ephemeron + finaliser processing is parked. Note the current constraint:
-the conservative interim (rooting `ephe_info`) keeps them alive safely **only
-under non-moving MarkSweep**. Under moving plans (Immix opportunistically,
-GenImmix/StickyImmix always) the interior field slots it reports go stale when
-the ephemeron block is relocated → weak/ephemeron programs can crash/hang there.
-Proper fix (MMTk weak-reference processing) is the unpark task. See
-`gc/mmtk/NOTES.md`.
+Weak/ephemeron + finaliser processing is **done** (M6, on by default): MMTk-native
+`Scanning::process_weak_refs` clears weak refs, releases ephemeron data on dead keys,
+and runs `Gc.finalise`/`finalise_last` + custom-block finalizers (the old conservative
+`ephe_info`-rooting scheme is the `MMTK_WEAK_REFS=0` fallback). The dedicated
+weak/ephemeron/finaliser/lazy testsuite dirs (tabled during bring-up) are being
+re-enabled now that the features work. See `gc/mmtk/NOTES.md`.
 
-What works today: NoGC, MarkSweep, and Immix back all bytecode allocation under
-`MMTK_ENABLED=1`. MarkSweep and Immix collect correctly single- and
-multi-domain; Immix relocates objects (validated: ordinary blocks, closures,
-**infix/interior pointers**, and the multi-domain + moving combination all
-produce correct results after forced defrag — a 150-iteration soak under
-`MMTK_IMMIX_ALWAYS_DEFRAG`+`DEFRAG_EVERY_BLOCK` was clean). Heap exhaustion
-raises a catchable OCaml `Out_of_memory` (not an abort). Collections are
-**parallel** (multiple GC worker threads) and **stop-the-world**.
+What works today (MMTk is **always-on**, default plan Immix): every allocation —
+bytecode and native — goes through MMTk; the stock minor and major GC are gone.
+Immix/StickyImmix/GenImmix collect correctly single- and multi-domain and relocate
+objects (validated: ordinary blocks, closures, **infix/interior pointers**, weak
+arrays/ephemerons, **continuation/fiber stacks**, multi-domain + moving after forced
+defrag). Heap exhaustion raises a catchable `Out_of_memory`. Collections are
+**parallel** and **stop-the-world**. The full bytecode compiler bootstraps on MMTk.
 
 ---
 

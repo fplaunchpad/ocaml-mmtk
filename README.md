@@ -20,8 +20,9 @@ switch.
 > **Status: MMTk is the GC.** As of M9 it is **on by default** for both the
 > **bytecode** and **native** runtimes — a normal `./configure && make` builds and
 > self-hosts (the compiler bootstrap reaches its fixpoint) entirely on MMTk. The
-> stock GC is being excised — MMTk is the only collector, there is no opt-out
-> (benchmark against stock via a separate vanilla OCaml 5.5 opam switch). `NoGC`,
+> stock GC has been excised — both the minor GC and the major GC (mark/sweep/slice)
+> are deleted; MMTk is the only collector, no opt-out (benchmark against stock via a
+> separate vanilla OCaml 5.5 opam switch). `NoGC`,
 > `MarkSweep`, `Immix`,
 > `GenImmix`, `StickyImmix` all work — collecting plans collect single- **and**
 > multi-domain (`Domain.spawn`), moving plans relocate, generational plans use a
@@ -57,7 +58,7 @@ integration comes later.
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass**; failures are unsupported features (weak/finaliser — fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) + 1 multidomain-StickyImmix SIGSEGV (bug #3). Default Immix clean | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
-| M9 | **MMTk-only: excise the stock GC** — MMTk always-on (done), then delete the stock minor/major GC + shared heap | 🟡 in progress |
+| M9 | **MMTk-only: excise the stock GC** — always-on ✅, stock **minor** GC deleted ✅, stock **major** GC (mark/sweep/slice, ~1750 lines) deleted ✅, `Gc.stat` on MMTk stats (partial) 🟡. Single-GC runtime. Remaining: minor-heap-arena + header/metadata cleanup | 🟢 mostly done |
 | — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | ✅ |
 
 GC-plan bring-up ladder: `NoGC` → `MarkSweep` → `Immix`. Collections are parallel
@@ -143,8 +144,8 @@ The runtime patches are concentrated in `runtime/` (`memory.h`, `memory.c`,
 always-on**: allocation, the write barrier, and domain init go unconditionally to
 MMTk (the old `caml_mmtk_vanilla_minor` native mode has been removed — native
 always uses TLAB nursery-aliasing). MMTk is the only collector — there is no
-opt-out; the stock GC code is being deleted (M9). Benchmark against stock via a
-separate vanilla OCaml 5.5 opam switch.
+opt-out; the stock minor and major GC code has been deleted (M9). Benchmark against
+stock via a separate vanilla OCaml 5.5 opam switch.
 
 ## License
 
