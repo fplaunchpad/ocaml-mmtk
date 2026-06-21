@@ -563,16 +563,18 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
 
   CAMLassert(domain == Caml_state);
 
-  /* TLAB mode: MMTk owns the nursery, so there is nothing to promote — every young
-     object is already an MMTk object, reachable from roots. Skip the whole
-     promotion (running oldify here would wrongly *copy* live MMTk objects). We
-     still execute inside the all-domains minor-empty STW (the rendezvous that
-     synchronizes domain spawn/terminate — skipping it livelocks multi-domain
-     termination), and reset the young region at `tlab_reset_young` so the domain
-     refills a fresh block on its next allocation. The skipped region is
-     EV_BEGIN/END-balanced, so the event stack stays consistent. */
+  /* MMTk (always-on) owns the heap, so there is nothing to promote — every live
+     object is already an MMTk object, reachable from roots (native: the TLAB
+     nursery; bytecode: allocated straight into MMTk, leaving the stock minor heap
+     permanently empty). Skip the whole promotion: running oldify here would wrongly
+     *copy* live MMTk objects (native), or merely scan roots and promote nothing
+     (bytecode, empty minor heap). We still execute inside the all-domains
+     minor-empty STW (the rendezvous that synchronizes domain spawn/terminate —
+     skipping it livelocks multi-domain termination) and reset the young region at
+     `tlab_reset_young`. The skipped region is EV_BEGIN/END-balanced, so the event
+     stack stays consistent. */
   promote_result result = { .locked_ephemerons = false };
-  if (caml_mmtk_tlab) goto tlab_reset_young;
+  if (caml_mmtk_enabled) goto tlab_reset_young;
 
   if( participating[0] == domain ) {
     CAML_EV_BEGIN(EV_MINOR_GLOBAL_ROOTS);
