@@ -31,8 +31,10 @@ switch.
 > and there are no code-generator changes (validated on x86-64 Linux; arm64/macOS
 > not yet exercised). The default plan is **Immix**.
 >
-> Known limitations (see `ROADMAP.md`): weak arrays / ephemerons / finalisers /
-> lazy are not yet supported (parked; their tests are disabled); performance is
+> Known limitations (see `ROADMAP.md`): weak arrays / ephemerons / finalisers
+> (incl. cross-domain handover) / lazy now work (M6, default-on) and their
+> testsuite dirs pass on Immix — except two minor-heap-specific tests re-tabled
+> as incompatible-by-design (no stock minor heap under MMTk). Performance is
 > ~1.4–1.8× of the stock GC on GC-heavy workloads today (tuning in progress).
 
 ## Why bytecode first?
@@ -55,7 +57,7 @@ integration comes later.
 | M3 | **Immix** (moving): infix-pointer fixup, clean `Out_of_memory` | ✅ done |
 | M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans), single- **and** multi-domain; staticlib auto-linked | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **custom-block finalizers**, and **cross-domain finaliser handover** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` + the re-enabled weak/ephemeron/finaliser/lazy dirs pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass**; failures are unsupported features (weak/finaliser — fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) + 1 multidomain-StickyImmix SIGSEGV (bug #3). Default Immix clean | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
 | M9 | **MMTk-only: excise the stock GC** — always-on ✅, stock **minor** GC deleted ✅, stock **major** GC (mark/sweep/slice, ~1750 lines) deleted ✅, `Gc.stat` on MMTk stats (partial) 🟡. Single-GC runtime. Remaining: minor-heap-arena + header/metadata cleanup | 🟢 mostly done |

@@ -5,6 +5,47 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
+
+*2026-06-21*
+
+Found while re-enabling the tabled weak/ephemeron/finaliser/lazy testsuite dirs.
+`weak-ephe-final/finaliser_handover` failed: finalisers registered on a spawned
+domain that then terminates never ran (0/N). Root cause: at domain termination
+`caml_orphan_finalisers` hands the domain's `caml_final_info` to the global
+`orph_structs.final_info`; the stock collector drained that back into a live
+domain inside the major cycle via `adopt_orphaned_work`, which the M9 stage-3
+deletion removed (it was reachable only from the slice). Nothing else adopted
+them, and `Scanning::process_weak_refs` only iterates *live* `domain_addrs()`, so
+the orphaned tables were never processed — their values became unreachable with
+no table holding them.
+
+**Fix.** New `caml_mmtk_adopt_orphaned_finalisers(domain, retain, ctx)`
+(`major_gc.c`): under `orphaned_lock`, drains `orph_structs.final_info` into a
+live domain's `final_info` — `caml_final_merge_finalisable` for the first/last
+tables (mark each orphaned value "old" first, since there is no minor/major split
+under MMTk), and splices the already-queued run-queue, `retain`-ing each entry's
+`fun`/`val` (they are not roots of this GC). The binding calls it once at the top
+of the `process_weak_refs` `with_tracer` closure, into `domain_addrs()[0]`, before
+the ephemeron/finaliser passes; draining the list to NULL makes the fixpoint's
+later rounds (and GCs with no orphans) no-ops. The merged entries are then handled
+by the normal `caml_mmtk_final_update_first` / `_cleanup` path.
+
+Not done: **orphaned ephemerons** (`orph_structs.ephe_list_live`) have the same
+gap, but no enabled test exercises it and `caml_orphan_ephemerons` leans on the
+now-inert stock phase/mark machinery, so adopting them needs more care — tracked
+TODO, not attempted here.
+
+**Re-enabled testsuite triage** (Immix default, `setarch -R`): `weak-ephe-final`
+14/0, `lazy` 10/0, `lib-lazy` 2/0 all pass; `ephe-c-api` is `skip;` upstream
+(C-API never ported to multicore — not an MMTk issue). Two tests re-tabled as
+MMTk-incompatible-by-design (no stock minor heap): `weak-ephe-final/finaliser2`
+(its `test1` asserts a `finalise_last` fires synchronously at a `Gc.minor()`
+boundary; `test2`/`test3` are fine and handover is covered by
+`finaliser_handover`) and `lazy/minor_major_force` (asserts minor-vs-major
+residency / remembered-set state). Each carries an in-file comment explaining the
+reason and when to re-enable.
+
 ## M9 stage 3: delete the dead stock major-GC machinery (branch `m9-stage3-delete`)
 
 *2026-06-21*

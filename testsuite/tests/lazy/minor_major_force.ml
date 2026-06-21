@@ -1,6 +1,12 @@
-(* TEST
- ocamlopt_flags += " -O3 ";
-*)
+(* Disabled under MMTk (no stock minor heap).
+
+   This test forces a lazy value across a minor collection and asserts on its
+   minor-vs-major residency (the remembered-set / [caml_obj_is_shared] path).
+   Under MMTk there is no minor heap — every block reads as "shared" and there is
+   no minor collection or remembered set — so the residency invariants this
+   checks do not apply. Lazy forcing itself is correct under MMTk (the other
+   lazy/* and lib-lazy/* tests pass). Re-enable if minor/major residency is ever
+   emulated. *)
 
 (*
   - create a record with a mutable field that has a lazy value in it

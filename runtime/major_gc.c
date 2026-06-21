@@ -503,6 +503,77 @@ void caml_orphan_finalisers (caml_domain_state* domain_state)
   }
 }
 
+/* ── M6: adopt orphaned finalisers into a live domain (MMTK_WEAK_REFS) ─────────
+   A terminating domain hands its [final_info] to [orph_structs] (above). The
+   stock GC drained that inside the major cycle (the deleted [adopt_orphaned_work]);
+   under MMTk nothing did, so finalisers registered on a domain that then
+   terminates never ran — their values become unreachable but no live domain's
+   table holds them. Re-attach the orphaned structures to [domain_addr] (a live
+   domain), so the binding's process_weak_refs then processes them through the
+   normal MMTk finaliser pass (caml_mmtk_final_update_first / _cleanup).
+
+   Called from process_weak_refs, once per GC, on the GC worker with mutators
+   stopped; the lock only guards against concurrent orphaning (impossible during
+   STW, but cheap). [retain] traces an object (keeping it live) and returns its
+   forwarded address — used for the already-queued run-queue entries, which are
+   not roots of this GC. Draining [orph_structs.final_info] to NULL makes repeated
+   calls within one GC's mark fixpoint no-ops. */
+void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
+                                         caml_mmtk_ephe_retain_fn retain,
+                                         void *ctx)
+{
+  caml_domain_state *domain_state = (caml_domain_state *) domain_addr;
+  struct caml_final_info *target = domain_state->final_info;
+  if (target == NULL) return;
+
+  caml_plat_lock_blocking(&orphaned_lock);
+  struct caml_final_info *f = orph_structs.final_info;
+  orph_structs.final_info = NULL;
+  caml_plat_unlock(&orphaned_lock);
+
+  while (f != NULL) {
+    struct caml_final_info *next = f->next;
+
+    /* No minor/major split under MMTk: mark every orphaned value "old" so the
+       merge prepends it into the target's finalisable (old) region. The merged
+       entries are re-examined by caml_mmtk_final_update_first / _cleanup. */
+    if (f->first.young > 0) {
+      f->first.old = f->first.young;
+      caml_final_merge_finalisable(&f->first, &target->first);
+    }
+    if (f->last.young > 0) {
+      f->last.old = f->last.young;
+      caml_final_merge_finalisable(&f->last, &target->last);
+    }
+
+    /* Splice the orphaned run-queue (finalisers already deemed runnable) onto
+       the target's. Their fun/val were live when queued but are not roots of
+       this GC, so retain them to keep them alive and pick up forwarding. */
+    for (struct final_todo *td = f->todo_head; td != NULL; td = td->next) {
+      for (int i = 0; i < td->size; i++) {
+        td->item[i].fun = retain(ctx, td->item[i].fun);
+        if (Is_block(td->item[i].val))
+          td->item[i].val = retain(ctx, td->item[i].val);
+      }
+    }
+    if (f->todo_head != NULL) {
+      if (target->todo_tail == NULL)
+        target->todo_head = f->todo_head;
+      else
+        target->todo_tail->next = f->todo_head;
+      target->todo_tail = f->todo_tail;
+    }
+
+    /* [first.table]/[last.table] were copied by the merge; free them and the
+       now-empty orphaned struct. The run-queue blocks were spliced (not copied)
+       and are owned by the target now. */
+    if (f->first.table != NULL) caml_stat_free(f->first.table);
+    if (f->last.table != NULL) caml_stat_free(f->last.table);
+    caml_stat_free(f);
+    f = next;
+  }
+}
+
 /*******************************************************************************
  * Pacing
  ******************************************************************************/

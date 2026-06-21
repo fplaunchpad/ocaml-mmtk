@@ -79,6 +79,14 @@ extern "C" {
         retain: extern "C" fn(*mut c_void, usize) -> usize,
         ctx: *mut c_void,
     );
+    /// Adopt finalisers orphaned by terminated domains into the given live domain,
+    /// so the passes above then process them (runtime/major_gc.c). Drains the
+    /// orphan list — a no-op after the first call in a GC's mark fixpoint.
+    fn caml_mmtk_adopt_orphaned_finalisers(
+        domain: usize,
+        retain: extern "C" fn(*mut c_void, usize) -> usize,
+        ctx: *mut c_void,
+    );
 }
 
 #[inline]
@@ -259,6 +267,14 @@ impl Scanning<OCamlVM> for VMScanning {
             };
             let mut retain_dyn: &mut dyn FnMut(usize) -> usize = &mut retain;
             let ctx = (&mut retain_dyn as *mut &mut dyn FnMut(usize) -> usize).cast::<c_void>();
+
+            // Adopt finalisers orphaned by terminated domains into the first live
+            // domain before the finaliser pass runs, so they are processed (and
+            // their dead values queued) like any other. Drains the orphan list, so
+            // later fixpoint rounds — and GCs with no orphans — are no-ops.
+            if let Some(&d0) = domains.first() {
+                unsafe { caml_mmtk_adopt_orphaned_finalisers(d0, ephe_retain, ctx) };
+            }
 
             let mut ephe = false;
             for &d in &domains {

@@ -105,6 +105,15 @@ extern void caml_mmtk_final_cleanup(uintptr_t domain_addr,
                                     caml_mmtk_ephe_forward_fn forward,
                                     caml_mmtk_ephe_retain_fn retain, void *ctx);
 
+/* Adopt finalisers orphaned by terminated domains (orph_structs, in major_gc.c)
+ * into the live domain [domain_addr], so the passes above then process them.
+ * Drains the orphan list, so it is a no-op after the first call within one GC's
+ * mark fixpoint. [retain] forwards the already-queued run-queue entries (not
+ * roots of this GC). Defined in runtime/major_gc.c. */
+extern void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
+                                                caml_mmtk_ephe_retain_fn retain,
+                                                void *ctx);
+
 /* Custom-block finalizers (Custom_operations.finalize), same MMTK_WEAK_REFS gate.
  * register: enqueue a finalizable custom block on MMTk's finalizer queue (called
  * from caml_alloc_custom). run_custom_finalizers: drain the ready queue + run each

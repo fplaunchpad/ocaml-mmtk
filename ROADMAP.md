@@ -35,7 +35,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). | 🟢 done (default-on) |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Cross-domain finaliser handover fixed**: orphaned finalisers from a terminated domain are now adopted into a live domain (`caml_mmtk_adopt_orphaned_finalisers`) at the start of `process_weak_refs` — the stock `adopt_orphaned_work` was deleted in M9 stage 3. (Orphaned *ephemerons* have the same gap — tracked TODO.) | 🟢 done (default-on) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). Default Immix clean. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `mmtk-ocaml` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
@@ -84,8 +84,12 @@ Weak/ephemeron + finaliser processing is **done** (M6, on by default): MMTk-nati
 `Scanning::process_weak_refs` clears weak refs, releases ephemeron data on dead keys,
 and runs `Gc.finalise`/`finalise_last` + custom-block finalizers (the old conservative
 `ephe_info`-rooting scheme is the `MMTK_WEAK_REFS=0` fallback). The dedicated
-weak/ephemeron/finaliser/lazy testsuite dirs (tabled during bring-up) are being
-re-enabled now that the features work. See `gc/mmtk/NOTES.md`.
+weak/ephemeron/finaliser/lazy testsuite dirs (tabled during bring-up) have been
+re-enabled: under default Immix, `weak-ephe-final` 14/0, `lazy` 10/0, `lib-lazy`
+2/0 all pass (`ephe-c-api` is `skip;` upstream). Fixing them surfaced and closed
+the cross-domain finaliser-handover bug (orphaned-finaliser adoption, above); two
+minor-heap-specific tests (`finaliser2`, `minor_major_force`) are re-tabled as
+incompatible-by-design with an in-file reason. See `gc/mmtk/NOTES.md`.
 
 What works today (MMTk is **always-on**, default plan Immix): every allocation —
 bytecode and native — goes through MMTk; the stock minor and major GC are gone.
