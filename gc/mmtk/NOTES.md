@@ -144,10 +144,33 @@ suspect: `Setup_for_c_call` (interp.c:105) publishes `env` + `pc+1` but NOT `acc
 `sp[0]=env=heap`, `sp[1]=0x748401102704=pc+1`). If a bytecode C primitive can leave
 a live closure in `accu` across its allocation-triggered GC, `accu` goes stale.
 (Stock OCaml's C primitives root their own args, so this may be an interpreter-side
-gap specific to how MMTk collects mid-primitive.) Next: confirm whether `accu` at
-the APPLY2 should have been a different (live) closure — trace `accu`'s last load
-before the APPLY2 and check whether its source moved across a C-call GC; then audit
-`accu` liveness across `Setup_for_c_call`/`Enter_gc` on the C_CALL opcodes.
+gap specific to how MMTk collects mid-primitive.)
+
+**`accu` was loaded from `caml_global_data` (GETGLOBALFIELD), which is NOT stale.**
+Reverse-stepping from the APPLY2: `accu` was set by GETGLOBALFIELD (interp.c:752-754),
+`accu = Field(Field(caml_global_data, idx1), idx2)` = the arity-0 closure. But
+`caml_global_data` is a **generational global root** (`caml_register_generational_global_root`,
+interp.c:328) and `caml_scan_global_roots` — which the binding calls every GC via
+`scan_vm_specific_roots` — iterates **all three** lists (`caml_global_roots` +
+`_young` + `_old`, globroots.c:256-258), so `&caml_global_data` is visited and
+updated on every collection. With `sanity` clean (heap + global-data fields
+consistent), the closure read from the global is the *current* value. So the
+APPLY2 is applying the value the bytecode told it to — meaning the divergence is
+**upstream**: a `pc`/control-flow error led to this GETGLOBALFIELD+APPLY2 (wrong
+global index / wrong opcode), i.e. the crash is a *far-downstream* manifestation
+(as long suspected). The chain pc→GETGLOBALFIELD→accu→APPLY2→sp-misalign→do_return
+is fully mapped; the remaining unknown is the *first* `pc` divergence.
+
+**Status / next.** Root-causing now needs walking the `pc` stream backwards to the
+first divergence (the opcode that first set `pc` wrong) — best with **interactive**
+rr (forward-step earlier than event 1795, or a `pc`-range conditional breakpoint),
+not batch-over-ssh. Two concrete leads to check first, both cheap: (1) audit the
+**generational global-root young/old classification under MMTk** — `caml_modify_
+generational_global_root` uses `Is_young`, which is meaningless under MMTk; if a
+root is ever filed somewhere `caml_scan_global_roots` misses, that is the bug;
+(2) audit **`accu` liveness across `Setup_for_c_call`** (it publishes `env`+`pc`,
+not `accu`) on C_CALL opcodes that allocate. The gated `MMTK_DEBUG_STACK_CHECK`
+tool + `caml_mmtk_debug_stack_range` remain for reuse.
 
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
