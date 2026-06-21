@@ -1,4 +1,5 @@
-(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 (** This test weak table by application to the memoization of collatz
     (also known as syracuse) algorithm suite computation *)
 

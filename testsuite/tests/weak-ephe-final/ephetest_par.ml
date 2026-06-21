@@ -1,4 +1,5 @@
-(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 (* Due to GCs running at non-deterministic places, the output from these tests
  * are unreliable except the bad value checks and as a check for catastrophic
  * failures i.e) segfaults. *)

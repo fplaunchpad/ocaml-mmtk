@@ -1,4 +1,5 @@
-(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 (***
    This test evaluate boolean formula composed by conjunction and
      disjunction using ephemeron:

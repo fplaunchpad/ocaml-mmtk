@@ -1,4 +1,6 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST
+ ocamlopt_flags += " -O3 ";
+*)
 let rec safe_force l =
   try Lazy.force l with
   | Lazy.Undefined ->

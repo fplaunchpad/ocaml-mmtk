@@ -1,4 +1,7 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST
+ ocamlopt_flags += " -O3 ";
+*)
+
 (* In this test we force a lazy from two concurrent domains without
    synchronization. This leads to unspecified behavior but still
    should not crash. Currently, the implementation raises Undefined,

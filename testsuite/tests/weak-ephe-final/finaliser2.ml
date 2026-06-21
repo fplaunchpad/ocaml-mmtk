@@ -1,4 +1,5 @@
-(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 let () = Out_channel.set_buffered stdout false
 
 (* If minor heap values are finalised on a domain, then the callbacks are run

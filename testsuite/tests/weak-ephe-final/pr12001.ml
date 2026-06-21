@@ -1,4 +1,5 @@
-(* Disabled under MMTk: weak references / ephemerons / finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 let [@inline never] foo () =
   let s = "Hello" ^ " world!" in
   Gc.finalise_last (fun () -> print_endline "finalised") s;

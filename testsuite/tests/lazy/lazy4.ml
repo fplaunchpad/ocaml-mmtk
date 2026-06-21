@@ -1,4 +1,6 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST
+ ocamlopt_flags += " -O3 ";
+*)
 let r = ref None
 
 let f () =

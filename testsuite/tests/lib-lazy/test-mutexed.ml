@@ -1,4 +1,11 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST
+ shared-libraries;
+ hassysthreads;
+ flags = "-I ${ocamlsrcdir}/otherlibs/unix -I ${ocamlsrcdir}/otherlibs/systhreads";
+ include systhreads;
+ expect;
+*)
+
 #load "unix.cma";;
 #load "threads.cma";;
 [%%expect{|

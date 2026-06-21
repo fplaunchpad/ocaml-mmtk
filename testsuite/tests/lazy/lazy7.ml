@@ -1,4 +1,7 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST
+ ocamlopt_flags += " -O3 ";
+*)
+
 let num_domains = 4
 
 let rec safe_force l =

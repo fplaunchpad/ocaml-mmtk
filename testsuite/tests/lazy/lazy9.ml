@@ -1,4 +1,5 @@
-(* Disabled under MMTk: lazy values not yet supported (tabled — see ROADMAP workstream E). *)
+(* TEST *)
+
 (* In some situations, these code snippets would cause the
    let-rec size computation to raise a fatal error. *)
 
