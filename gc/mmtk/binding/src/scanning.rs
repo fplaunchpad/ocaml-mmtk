@@ -15,6 +15,7 @@ use mmtk::memory_manager;
 use mmtk::scheduler::GCWorker;
 use mmtk::util::opaque_pointer::VMWorkerThread;
 use mmtk::util::{Address, ObjectReference};
+use mmtk::vm::slot::Slot;
 use mmtk::vm::SlotVisitor;
 use mmtk::vm::{ObjectTracer, ObjectTracerContext, RootsWorkFactory, Scanning};
 use mmtk::Mutator;
@@ -135,6 +136,28 @@ extern "C" fn ephe_retain(ctx: *mut c_void, v: usize) -> usize {
 extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) {
     let buf = unsafe { &mut *(data as *mut Vec<FieldSlot>) };
     buf.push(FieldSlot::from_address(Address::from_mut_ptr(slot)));
+}
+
+/// DEBUG (MMTK_DEBUG_STACK_CHECK): handed to caml_do_roots / caml_scan_global_roots
+/// in process_weak_refs (after the strong closure forwarded everything, before
+/// release). Flags any enumerated root slot whose referent is *forwarded but not
+/// updated* — the signature of the partial-move relocation bug, wherever the slot
+/// lives (value stack, local roots, finalisable, globals). Uses FieldSlot so infix
+/// roots resolve to their (possibly forwarded) parent.
+extern "C" fn check_root_slot(_data: *mut c_void, _v: usize, slot: *mut usize) {
+    let fs = FieldSlot::from_address(Address::from_mut_ptr(slot));
+    if let Some(obj) = fs.load() {
+        if let Some(fwd) = obj.get_forwarded_object() {
+            if fwd.to_raw_address() != obj.to_raw_address() {
+                eprintln!(
+                    "[STALE-ROOT] slot {:p} -> {:#x} forwarded to {:#x}",
+                    slot,
+                    obj.to_raw_address().as_usize(),
+                    fwd.to_raw_address().as_usize()
+                );
+            }
+        }
+    }
 }
 
 /// Callback handed to `caml_scan_stack` while tracing a continuation block: feed
@@ -356,6 +379,22 @@ impl Scanning<OCamlVM> for VMScanning {
                     lo = unsafe { lo.add(1) };
                 }
             }
+            // Generalised: check ALL enumerated roots (value stack, local roots,
+            // finalisable, globals) for a slot still pointing at a forwarded object
+            // — catches the partial-move relocation bug wherever the missed slot is,
+            // not just on the raw value stack above.
+            for &d in &domains {
+                unsafe {
+                    caml_do_roots(
+                        check_root_slot,
+                        0,
+                        core::ptr::null_mut(),
+                        d as *mut c_void,
+                        0,
+                    );
+                }
+            }
+            unsafe { caml_scan_global_roots(check_root_slot, core::ptr::null_mut()) };
         }
         false
     }
