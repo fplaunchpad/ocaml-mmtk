@@ -5,6 +5,46 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: fresh StickyImmix rr trace + it's an `sp` (stack-pointer) misalignment
+
+*2026-06-21*
+
+**Recording breakthrough: `rr record --num-cores=1` records StickyImmix.** Plain
+`rr record` of StickyImmix aborts in MMTk init (`mmap meta memory: File exists`);
+the collision is with rr's multi-core simulation. `--num-cores=1` avoids it and
+records cleanly — and caught the crash (exit 139). So we now have a **fresh,
+deterministic, current-tree** StickyImmix trace (`/tmp/rr-sticky`; re-record with
+`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=64 rr record --num-cores=1 -o <dir>
+./runtime/ocamlrun ./boot/ocamlc <boot flags> -c parsing/parser.ml`). MarkSweep,
+Immix and GenImmix already recorded fine (no `--num-cores=1` needed).
+
+**Generalised stale-root check came back CLEAN.** `MMTK_DEBUG_STACK_CHECK=1` now
+re-walks every enumerated root (value stack raw, plus `caml_do_roots` and
+`caml_scan_global_roots`) after the closure, flagging any slot whose referent is
+forwarded-but-not-updated. Across 16 StickyImmix runs (incl. crashes): **no
+forwarded-stale root** (the only hits were the dropped is_reachable/Infix false
+positives). So no enumerated root is mis-relocated.
+
+**The crash is an `sp` (value-stack pointer) misalignment.** On the fresh trace the
+SIGSEGV is at `interp.c:856` GETFIELD3 `accu = Field(accu, 3)` with `accu = 0x3`
+(an *immediate*, `Val_int 1`, not a block). `accu` was just loaded by ACC5
+(`interp.c:412` `accu = sp[5]`) from `sp[5] = 0x3`. But the stack at `sp` shows a
+**return frame only 2 slots up**: `sp[2]` = a code pointer (in `[prog,prog+size)`),
+`sp[3]` = an env block, `sp[4]` = `Val_long(0)` = `[retpc, env, extra_args]`. So
+ACC5 reads *past* the current frame's return record into caller data — `sp` is
+~3 slots too high. Same pattern as the old `strcrash` trace (do_return read an
+argument as the return PC). So the bug is **stack-accounting drift** (some opcode's
+push/pop count is off by ~3 under StickyImmix's partial in-place defrag), not a
+stale heap reference — consistent with: roots clean, copy/classify/store correct,
+GenImmix/MarkSweep clean.
+
+Suspects for the ~3-slot drift: a `Setup_for_gc`/`Restore_after_gc` (±3) mismatch
+around an allocation-triggered GC, or a `GRAB`/`RESTART` `num_args =
+Wosize_val(env) - 3` miscount if `env`'s closure is briefly wrong. Next: on the
+fresh trace, reverse/forward-track `sp` (r14) across the opcodes preceding the ACC5
+to find where it diverges by ~3 from the frame structure (find the unmatched
+push/pop or the GC Setup/Restore around which sp drifts).
+
 ## Fix: `is_forwarded` broke non-moving plans; and the CI bug is RELOCATION, not a missed root
 
 *2026-06-21*

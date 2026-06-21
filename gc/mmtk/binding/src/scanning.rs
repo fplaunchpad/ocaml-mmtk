@@ -366,15 +366,11 @@ impl Scanning<OCamlVM> for VMScanning {
                                     lo, word, new
                                 );
                             }
-                        } else if !obj.is_reachable() {
-                            // Slot points to an unreachable (collected) object: a
-                            // dangling stack root the scan never traced.
-                            let hdr = unsafe { *((word as *const usize).offset(-1)) };
-                            eprintln!(
-                                "[STALE-ROOT/dead] stack slot {:p} = {:#x} unreachable (hdr {:#x})",
-                                lo, word, hdr
-                            );
                         }
+                        // NB: an is_reachable()==false check here is useless — interior
+                        // (Infix_tag) pointers, common on the value stack, have no VO bit
+                        // so they always read "unreachable" (false positive). The
+                        // forwarded-object check above is the meaningful one.
                     }
                     lo = unsafe { lo.add(1) };
                 }
