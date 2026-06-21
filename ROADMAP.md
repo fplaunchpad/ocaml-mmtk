@@ -388,18 +388,22 @@ Stages (each independently buildable + testable):
    `caml_mmtk_enabled` is retained only as the pre-init readiness guard for the brief
    startup window (removing it needs MMTk-init-before-first-alloc, a separate perf
    step). The stock-GC code paths are now dead — they are deleted in the stages below.
-2. **Delete the stock minor GC** (`minor_gc.c`) — 🟡 in progress. Done: removed the
-   `MMTK_DISABLE` escape (MMTk is the only collector); neutered promotion for
-   bytecode too; **deleted the oldify/promotion machinery** (`oldify_one`,
-   `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`, `try_update_object_header`,
-   the promote oldify body) and **`ephe_clean_minor`** — ~510 lines gone, build
-   warning-clean, verified under StickyImmix + Immix. Remaining: `custom_finalize_minor`,
-   `caml_empty_minor_heap_domain_clear`, the remembered-set tables
-   (`major_ref`/`ephe_ref`/`custom`) + the stock write-barrier fallback, and the
-   stock path of `caml_alloc_small_dispatch`. **Kept:** the all-domains minor-empty
-   STW skeleton (`caml_empty_minor_heaps_once` etc.) — the domain spawn/terminate
-   rendezvous, not promotion. (Several remaining bits are interwoven with finalizers
-   + the write barrier; see `gc/mmtk/NOTES.md`.)
+2. **Delete the stock minor GC** (`minor_gc.c`) — 🟡 mostly done. Removed: the
+   `MMTK_DISABLE` escape (MMTk is the only collector); the oldify/promotion machinery
+   (`oldify_one`, `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`,
+   `try_update_object_header`, the promote oldify body); `ephe_clean_minor` and
+   `custom_finalize_minor`; and **all stock minor remembered-set population** — the
+   dead `Ref_table_add`/`caml_darken` fallbacks in `write_barrier`, `caml_initialize`,
+   and `caml_array_fill` (so `major_ref`/`ephe_ref` are now never written). ~560 lines
+   gone; verified across bytecode + native, StickyImmix + Immix, multi-domain,
+   custom blocks, and full `make all`/`world.opt`. Remaining (vacuous, lower-value):
+   the now-empty `major_ref`/`ephe_ref` table *structs* + `domain_clear`'s clearing of
+   them, the `caml_minor_collection` entry, and `caml_alloc_small_dispatch`'s stock
+   path — a coordinated struct change, deferred. **Kept:** the all-domains
+   minor-empty STW skeleton (domain spawn/terminate rendezvous) and the `custom`
+   table (still used by the parked finalizer tracking). **Note:** native `caml_modify`
+   doesn't call the MMTk barrier (pre-existing gap; fine for default Immix, a TODO for
+   native StickyImmix — see `gc/mmtk/NOTES.md`).
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
    mark/sweep/slices/mark-stack/pool/LOS. `caml_alloc_shr`/`caml_alloc_small` go
    straight to MMTk.
