@@ -74,6 +74,22 @@ checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
       etc.) — the domain spawn/terminate rendezvous.
     Build + boot (`ocamlc`) + multi-domain after each step. (Full `make all` under
     StickyImmix re-validated after the oldify deletion: 0 crashes, 0 errors.)
+
+    **Investigation for the remaining cluster (2026-06-21):**
+    - The stock remembered set (`major_ref`/`ephe_ref`) is **dead under MMTk** —
+      grep shows MMTk's root scan (`mmtk.c`/`roots.c`/binding) never reads it. It is
+      populated by the write-barrier fallback, cleared by `domain_clear`, and never
+      consumed. So it (and the fallback that fills it) is safe to delete — but as a
+      coordinated change, since the write barrier is hot.
+    - **Native `caml_modify` does NOT call the MMTk barrier**: the
+      `caml_mmtk_region_barrier` call in `write_barrier` is under `#ifndef
+      NATIVE_CODE` (bytecode only); native emits a `caml_modify` Cextcall that falls
+      through to the (now-vacuous) stock fallback. This is a *separate* pre-existing
+      gap: native StickyImmix has no working generational write barrier via
+      `caml_modify` (the default Immix is non-generational, so it doesn't need one).
+      Wiring native `caml_modify` → `caml_mmtk_region_barrier` is a prerequisite if
+      native StickyImmix is ever to be generationally correct — and should be done
+      *before* deleting the stock fallback, or jointly.
   - **Stage 3 caveat (shared heap):** pre-init *large* allocations may still land in
     the stock shared heap via `caml_alloc_shr` (not yet measured). Measure that before
     deleting the major GC + `shared_heap.c`; those pre-init majors (if any) need a
