@@ -235,12 +235,10 @@ CAMLprim value caml_uniform_array_make(value len, value init)
   }
   else if (size > Max_wosize) caml_invalid_argument("Array.make");
   else {
-    if (Is_block(init) && Is_young(init)) {
-      /* We don't want to create so many major-to-minor references,
-         so [init] is moved to the major heap by doing a minor GC. */
-      CAML_EV_COUNTER (EV_C_FORCE_MINOR_MAKE_VECT, 1);
-      caml_minor_collection ();
-    }
+    /* Under always-on MMTk the stock minor heap is unused, so [init] is never a
+       stock-young block — no minor collection is needed to move it to the major
+       heap before storing it into a shared-heap array. (Stock OCaml ran a minor GC
+       here to avoid many major->minor refs.) */
     CAMLassert(!(Is_block(init) && Is_young(init)));
     res = caml_alloc_shr(size, 0);
     /* We now know that [init] is not in the minor heap, so there is
