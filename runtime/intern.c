@@ -811,6 +811,14 @@ static void intern_rec(struct caml_intern_state* s,
         }
         Unsafe_store_tag_val(v, Custom_tag);
         intern_record_obj(s, v);
+        if (ops->finalize != NULL) {
+          /* MMTk: register the deserialised custom block on MMTk's finalizer queue
+             so its finalize op runs when it dies — caml_alloc_custom is bypassed on
+             this unmarshal path, so the registration there does not cover it.
+             Self-gated on MMTK_WEAK_REFS; the minor-table entry below is for the
+             stock path. */
+          caml_mmtk_register_finalizable(v);
+        }
         if (ops->finalize != NULL && Is_young(v)) {
           /* Remember that the block has a finalizer. */
           add_to_custom_table (&d->minor_tables->custom, v, 0, 1);
