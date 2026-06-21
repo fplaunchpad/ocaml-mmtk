@@ -13,9 +13,10 @@ Each entry is dated and self-contained. Newest first.
 `rr record` of StickyImmix aborts in MMTk init (`mmap meta memory: File exists`);
 the collision is with rr's multi-core simulation. `--num-cores=1` avoids it and
 records cleanly — and caught the crash (exit 139). So we now have a **fresh,
-deterministic, current-tree** StickyImmix trace (`/tmp/rr-sticky`; re-record with
+deterministic, current-tree** StickyImmix trace, **preserved on turing at
+`~/rr-sticky-fresh`** (`rr replay ~/rr-sticky-fresh`). Re-record with
 `MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=64 rr record --num-cores=1 -o <dir>
-./runtime/ocamlrun ./boot/ocamlc <boot flags> -c parsing/parser.ml`). MarkSweep,
+./runtime/ocamlrun ./boot/ocamlc <boot flags> -c parsing/parser.ml`. MarkSweep,
 Immix and GenImmix already recorded fine (no `--num-cores=1` needed).
 
 **Generalised stale-root check came back CLEAN.** `MMTK_DEBUG_STACK_CHECK=1` now
