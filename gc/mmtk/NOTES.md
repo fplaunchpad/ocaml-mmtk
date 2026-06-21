@@ -35,12 +35,23 @@ only the clean pass (after resurrection) unlinks the still-dead ones.
 
 **STILL OPEN — `regression/pr5233`.** A weak array resurrected by its finaliser:
 after the referent dies, the weak slot should read "no value", but we print
-"value found / testing... ok" — i.e. the 1 MB string is **over-retained** (kept
-alive + intact), not dangling (so not the original safety bug, but still wrong).
-Root cause not yet found; the string is ≥16 KB so it lands in MMTk's **large-object
-space** — suspect a LOS + weak-clear or `is_reachable`-on-LOS interaction, or a
-retention path through the finaliser machinery. Needs a focused repro. Full-suite
-re-measurement with the flag is in progress to quantify the new score.
+"value found / testing... ok" — the referent is **over-retained** (kept alive +
+intact), not dangling (so not the original safety bug, but still wrong).
+- **LOS ruled out** (2026-06-21): a minimal weak-clear test with a 1 MB (LOS) value
+  *and* a small value both clear correctly under StickyImmix + Immix. So it is not a
+  large-object-space weak-clear bug.
+- **Narrowed to the finaliser-resurrection-under-moving-GC path.** When `process_weak_refs`
+  resurrects the dead weak array via `trace_object` (finalise-first), a moving plan
+  may **copy** it; the finaliser queue / `smuggle` get the new copy, but the
+  `ephe_info` list still holds the *pre-copy* address. Whether the next clean pass
+  re-forwards that link or unlinks it (orphaning the live copy so its slot never
+  clears) hinges on `is_reachable(old_addr)` for a forwarded-from reference. Suspect
+  the callbacks should treat `get_forwarded_object().is_some()` as reachable — BUT
+  the "retained while live" smoke test (a live, likely-copied referent) passes, which
+  argues `is_reachable` already follows forwarding. **Unresolved — needs instrumented
+  callbacks on a distilled resurrection repro (turing).** Deferred until the full-suite
+  re-measurement triages whether pr5233 is the only remaining M6 gap or one of several
+  (finaliser-timing: signals_alloc, lib-threads/tls, lib-sys/opaque).
 
 ---
 
