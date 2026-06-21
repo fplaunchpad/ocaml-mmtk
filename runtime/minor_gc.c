@@ -315,28 +315,6 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
   return result;
 }
 
-/* Finalize dead custom blocks and do the accounting for the live
-   ones. This must be done right after leaving the barrier. At this
-   point, all domains have finished minor GC, but this domain hasn't
-   resumed running OCaml code. Other domains may have resumed OCaml
-   code, but they cannot have any pointers into our minor heap. */
-static void custom_finalize_minor (caml_domain_state * domain)
-{
-  for (struct caml_custom_elt *elt = domain->minor_tables->custom.base;
-       elt < domain->minor_tables->custom.ptr;
-       elt++) {
-    value *v = &elt->block;
-    if (Is_block(*v) && Is_young(*v)) {
-      if (get_header_val(*v) == 0) { /* value copied to major heap */
-        caml_adjust_gc_speed(elt->mem, elt->max);
-      } else {
-        void (*final_fun)(value) = Custom_ops_val(*v)->finalize;
-        if (final_fun != NULL) final_fun(*v);
-      }
-    }
-  }
-}
-
 /* Increment the counter non-atomically, when it is already known that this
    thread is alone in trying to increment it. */
 static void nonatomic_increment_counter(atomic_uintnat* counter) {
@@ -440,10 +418,9 @@ caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
   if (mark_requested)
     caml_mark_roots_stw(participating_count, participating);
 
-  CAML_EV_BEGIN(EV_MINOR_FINALIZED);
-  caml_gc_log("finalizing dead minor custom blocks");
-  custom_finalize_minor(domain);
-  CAML_EV_END(EV_MINOR_FINALIZED);
+  /* Stock minor custom-block finalization is gone: under always-on MMTk the stock
+     minor heap is empty, so it only ever skipped MMTk objects (Is_young false).
+     Custom finalization is MMTk's responsibility (currently parked). */
 
   CAML_EV_BEGIN(EV_MINOR_FINALIZERS_ADMIN);
   caml_gc_log("running finalizer data structure book-keeping");
