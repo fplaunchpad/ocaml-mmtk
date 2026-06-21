@@ -112,6 +112,11 @@ extern void caml_mmtk_final_cleanup(uintptr_t domain_addr,
 extern void caml_mmtk_register_finalizable(value v);
 extern void caml_mmtk_run_custom_finalizers(void);
 
+/* Fill Gc.stat heap-size fields (in words) from MMTk's page accounting; the stock
+ * shared-heap counters are ~0 under MMTk. See runtime/mmtk.c. */
+extern void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
+                               uintnat *free_words, uintnat *collections);
+
 /* Generational write barrier: record that `count` value-sized slots at `start`
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */

@@ -326,3 +326,25 @@ pub extern "C" fn mmtk_ocaml_poll_finalizable() -> usize {
         None => 0,
     }
 }
+
+// ── Heap statistics (for Gc.stat / Gc.quick_stat) ──────────────────────────
+// MMTk accounts memory in pages, so these are page-granular.
+
+/// Total heap size in bytes (the configured/grown heap — Gc.stat `heap_words`).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_total_bytes() -> usize {
+    memory_manager::total_bytes(mmtk())
+}
+
+/// Bytes currently in use (live + retained pages — a proxy for `live_words`;
+/// exact live bytes would need the count-live-bytes GC option).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_used_bytes() -> usize {
+    memory_manager::used_bytes(mmtk())
+}
+
+/// Free bytes in the heap (Gc.stat `free_words`).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_free_bytes() -> usize {
+    memory_manager::free_bytes(mmtk())
+}
