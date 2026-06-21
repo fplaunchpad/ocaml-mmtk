@@ -57,6 +57,14 @@ static int caml_mmtk_collects = 0;
 static int caml_mmtk_generational = 0;
 static int caml_mmtk_collection_started = 0;
 
+/* M6 (experimental, gated by MMTK_WEAK_REFS=1): drive MMTk-native weak-reference
+   / ephemeron processing via the binding's Scanning::process_weak_refs instead of
+   the conservative caml_mmtk_scan_ephe_roots scheme (which keeps the whole
+   ephemeron graph alive — weak refs never clear). Off by default until validated
+   against the weak/ephemeron/finaliser testsuite; see gc/mmtk/NOTES.md (M6 design).
+   Read by the binding (scanning.rs) at the start of weak processing. */
+int caml_mmtk_weak_refs = 0;
+
 /* Objects this size (bytes) or larger are routed to MMTk's large object
  * space. Conservative: smaller than the smallest line/block in collecting
  * plans, so it is also correct for Immix later. */
@@ -93,8 +101,14 @@ void caml_mmtk_init(void)
                            || strcmp(plan, "StickyImmix") == 0
                            || strcmp(plan, "GenCopy") == 0);
 
+  {
+    const char *wr = getenv("MMTK_WEAK_REFS");
+    caml_mmtk_weak_refs = (wr != NULL && wr[0] == '1');
+  }
+
   if (getenv("MMTK_VERBOSE") != NULL) {
-    fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB\n", plan, heap_mb);
+    fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB weak_refs=%d\n",
+            plan, heap_mb, caml_mmtk_weak_refs);
     atexit(caml_mmtk_report_copied);
   }
 }
@@ -250,6 +264,141 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
       }
     }
   }
+}
+
+/* ── M6: MMTk-native weak reference / ephemeron processing (experimental) ──────
+   Driven by the binding's Scanning::process_weak_refs when MMTK_WEAK_REFS=1.
+   Mirrors the stock major GC's two-phase scheme — ephe_mark (major_gc.c) then
+   caml_ephe_clean (weak.c) — but queries MMTk reachability (is_reachable) and
+   relocation (forward) instead of the stock mark bits, and resurrects retained
+   data via the MMTk tracer (retain). All callbacks operate on whole-object
+   `value`s; the caller (Rust) closes them over the GC worker's tracer.
+
+   Object liveness uses the post-strong-closure state: is_reachable(v) is true iff
+   the strong transitive closure reached v; forward(v) returns v's current address
+   (the new one if a moving plan relocated it, else v); retain(v) traces v (keeping
+   it and its closure alive) and returns its current address. Interior (infix)
+   pointers are normalised to their block base before querying, since MMTk reasons
+   about object starts. The callback typedefs live in caml/mmtk.h. */
+
+/* Normalise a possibly-infix pointer to the containing block's base. */
+Caml_inline value caml_mmtk_block_base(value v)
+{
+  if (Is_block(v) && Tag_val(v) == Infix_tag) v -= Infix_offset_val(v);
+  return v;
+}
+
+/* One marking pass over a single ephemeron list (head at *headp). For each
+   reachable ephemeron whose data is non-trivial and not yet retained, retain the
+   data iff every block key is reachable. Does NOT clear keys (that is the clean
+   pass). Rewrites the list links to forwarded addresses and drops unreachable
+   ephemerons from the chain. Returns 1 if any data was newly retained. */
+static int caml_mmtk_ephe_mark_list(value *headp,
+                                    caml_mmtk_ephe_reachable_fn is_reachable,
+                                    caml_mmtk_ephe_forward_fn forward,
+                                    caml_mmtk_ephe_retain_fn retain, void *ctx)
+{
+  int progress = 0;
+  value *linkp = headp;
+  value e = *linkp;
+  while (e != (value) NULL) {
+    int live = is_reachable(e);
+    value cur = live ? forward(e) : e;   /* dead objects don't move */
+    value next = Ephe_link(cur);
+    if (!live) { *linkp = next; e = next; continue; }  /* drop dead ephemeron */
+    *linkp = cur;                                      /* fix forwarded link */
+
+    value data = Ephe_data(cur);
+    if (data != caml_ephe_none && Is_block(data) && !is_reachable(data)) {
+      int all_keys_live = 1;
+      mlsize_t size = Wosize_val(cur);
+      for (mlsize_t i = CAML_EPHE_FIRST_KEY; i < size; i++) {
+        value key = Field(cur, i);
+        if (key != caml_ephe_none && Is_block(key)
+            && !is_reachable(caml_mmtk_block_base(key))) {
+          all_keys_live = 0;
+          break;
+        }
+      }
+      if (all_keys_live) {
+        Ephe_data(cur) = retain(ctx, data);
+        progress = 1;
+      }
+    }
+    linkp = &Ephe_link(cur);
+    e = next;
+  }
+  return progress;
+}
+
+/* One clean pass over a single ephemeron list (after the mark fixpoint). For each
+   reachable ephemeron: forward surviving block keys; clear (to caml_ephe_none) any
+   key whose referent is unreachable, and if any key died, clear the data too;
+   otherwise forward the (already-retained) data. Drops unreachable ephemerons. */
+static void caml_mmtk_ephe_clean_list(value *headp,
+                                      caml_mmtk_ephe_reachable_fn is_reachable,
+                                      caml_mmtk_ephe_forward_fn forward)
+{
+  value *linkp = headp;
+  value e = *linkp;
+  while (e != (value) NULL) {
+    int live = is_reachable(e);
+    value cur = live ? forward(e) : e;
+    value next = Ephe_link(cur);
+    if (!live) { *linkp = next; e = next; continue; }
+    *linkp = cur;
+
+    int released = 0;
+    mlsize_t size = Wosize_val(cur);
+    for (mlsize_t i = CAML_EPHE_FIRST_KEY; i < size; i++) {
+      value key = Field(cur, i);
+      if (key == caml_ephe_none || !Is_block(key)) continue;
+      value base = caml_mmtk_block_base(key);
+      if (is_reachable(base)) {
+        value fwd = forward(base);
+        Field(cur, i) = (fwd == base) ? key : fwd + (key - base); /* keep infix */
+      } else {
+        Field(cur, i) = caml_ephe_none;
+        released = 1;
+      }
+    }
+    value data = Ephe_data(cur);
+    if (data != caml_ephe_none && Is_block(data)) {
+      if (released)
+        atomic_store_relaxed(Ephe_data_addr(cur), caml_ephe_none);
+      else
+        atomic_store_relaxed(Ephe_data_addr(cur), forward(data));
+    }
+    linkp = &Ephe_link(cur);
+    e = next;
+  }
+}
+
+/* Public entry points for the binding. A domain's ephemerons live on two lists
+   (todo + live); process both. */
+int caml_mmtk_ephe_mark_pass(uintptr_t domain_addr,
+                             caml_mmtk_ephe_reachable_fn is_reachable,
+                             caml_mmtk_ephe_forward_fn forward,
+                             caml_mmtk_ephe_retain_fn retain, void *ctx)
+{
+  caml_domain_state *domain = (caml_domain_state *) domain_addr;
+  struct caml_ephe_info *ei = domain->ephe_info;
+  if (ei == NULL) return 0;
+  int p = 0;
+  p |= caml_mmtk_ephe_mark_list(&ei->todo, is_reachable, forward, retain, ctx);
+  p |= caml_mmtk_ephe_mark_list(&ei->live, is_reachable, forward, retain, ctx);
+  return p;
+}
+
+void caml_mmtk_ephe_clean_pass(uintptr_t domain_addr,
+                               caml_mmtk_ephe_reachable_fn is_reachable,
+                               caml_mmtk_ephe_forward_fn forward)
+{
+  caml_domain_state *domain = (caml_domain_state *) domain_addr;
+  struct caml_ephe_info *ei = domain->ephe_info;
+  if (ei == NULL) return;
+  caml_mmtk_ephe_clean_list(&ei->todo, is_reachable, forward);
+  caml_mmtk_ephe_clean_list(&ei->live, is_reachable, forward);
 }
 
 /* Service an explicit `Gc` collection request (Gc.major / full_major / compact).

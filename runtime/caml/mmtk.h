@@ -72,6 +72,27 @@ extern void caml_mmtk_park(void);
 extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
                                       caml_domain_state *domain);
 
+/* M6 (experimental, MMTK_WEAK_REFS=1): MMTk-native weak/ephemeron processing,
+ * driven by the binding's Scanning::process_weak_refs in place of the conservative
+ * caml_mmtk_scan_ephe_roots scheme above. caml_mmtk_weak_refs is the gate flag.
+ * The pass functions walk a domain's ephemeron lists using MMTk reachability:
+ * is_reachable(v) — reached by the strong closure; forward(v) — v's current
+ * address under a moving plan; retain(ctx,v) — trace v (keep alive) + current
+ * address. mark_pass retains data of fully-reachable-key ephemerons (returns 1 if
+ * any newly retained — re-run to a fixpoint); clean_pass then clears dead keys/data
+ * and forwards survivors. See gc/mmtk/NOTES.md (M6 design). */
+extern int caml_mmtk_weak_refs;
+typedef int   (*caml_mmtk_ephe_reachable_fn)(value v);
+typedef value (*caml_mmtk_ephe_forward_fn)(value v);
+typedef value (*caml_mmtk_ephe_retain_fn)(void *ctx, value v);
+extern int  caml_mmtk_ephe_mark_pass(uintptr_t domain_addr,
+                                     caml_mmtk_ephe_reachable_fn is_reachable,
+                                     caml_mmtk_ephe_forward_fn forward,
+                                     caml_mmtk_ephe_retain_fn retain, void *ctx);
+extern void caml_mmtk_ephe_clean_pass(uintptr_t domain_addr,
+                                      caml_mmtk_ephe_reachable_fn is_reachable,
+                                      caml_mmtk_ephe_forward_fn forward);
+
 /* Generational write barrier: record that `count` value-sized slots at `start`
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */
