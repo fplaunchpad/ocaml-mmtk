@@ -161,15 +161,35 @@ global index / wrong opcode), i.e. the crash is a *far-downstream* manifestation
 (as long suspected). The chain pc→GETGLOBALFIELD→accu→APPLY2→sp-misalign→do_return
 is fully mapped; the remaining unknown is the *first* `pc` divergence.
 
-**Status / next.** Root-causing now needs walking the `pc` stream backwards to the
-first divergence (the opcode that first set `pc` wrong) — best with **interactive**
-rr (forward-step earlier than event 1795, or a `pc`-range conditional breakpoint),
-not batch-over-ssh. Two concrete leads to check first, both cheap: (1) audit the
-**generational global-root young/old classification under MMTk** — `caml_modify_
-generational_global_root` uses `Is_young`, which is meaningless under MMTk; if a
-root is ever filed somewhere `caml_scan_global_roots` misses, that is the bug;
-(2) audit **`accu` liveness across `Setup_for_c_call`** (it publishes `env`+`pc`,
-not `accu`) on C_CALL opcodes that allocate. The gated `MMTK_DEBUG_STACK_CHECK`
+**Correction — `accu` is probably a *valid* closure, not "wrong/arity-0".** The
+`closinfo = 0x5` is exactly `Make_closinfo(0, 2)` — what **GRAB** (interp.c:646) and
+a 0-capture **CLOSURE** legitimately produce. Bytecode encodes a function's arity
+via the GRAB/RESTART dance, *not* the closinfo arity byte (that's the native-code
+convention; `Arity_closinfo` `>>56` is meaningless for bytecode closures). So the
+wosize-2 `[code, closinfo]` closure in `accu` is a normal no-capture closure, and
+applying it via APPLY2 is ordinary currying. The earlier "wrong closure" reading
+was a misread of bytecode closure layout — disregard it.
+
+**Lead (1) ruled out.** `caml_global_data` registers as UNTRACKED at first
+(`= Val_unit`), then `caml_modify_generational_global_root` files it in
+`caml_global_roots_old`; `caml_scan_global_roots` scans young+old+non-gen every GC
+(the binding always calls the *full* scan, even for nursery GCs), so it is updated
+every collection. The dead young↔old reclassification under MMTk (no minor GC to
+promote) is harmless because all lists are scanned. Not the miss.
+
+**Honest status.** The full downstream chain is mapped —
+`do_return` reads APPLY2's argument slot as the return PC ← `sp` misaligned ←
+APPLY2 of a (valid) closure from `caml_global_data` — but **no missed/stale root was
+found** on the value stack (instrumented clean) or in the global roots (scanned
+every GC). So the `sp` misalignment's primary cause is *upstream* and GC-triggered
+but not a simple unforwarded root: a control-flow/`pc` or curry-dance state
+corruption whose effect surfaces far downstream. Pinning the *first* divergence
+needs **interactive** rr (forward-step from well before event 1795 / a `pc`-range
+conditional breakpoint), which batch-over-ssh can't do reliably (SW-watchpoint
+reverse is flaky; forward single-step over the whole window is too slow here).
+Remaining cheap lead: audit **`accu` liveness across `Setup_for_c_call`**
+(publishes `env`+`pc`, not `accu`) for C_CALL opcodes that allocate, and the
+GRAB/RESTART `extra_args` accounting across a STW. The gated `MMTK_DEBUG_STACK_CHECK`
 tool + `caml_mmtk_debug_stack_range` remain for reuse.
 
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
