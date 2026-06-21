@@ -57,16 +57,24 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - Regenerate `configure`: `tools/autogen` with **autoconf 2.72** (NOT plain
   autoconf / 2.71).
 - **Testsuite**: run it with **`make -C testsuite parallel`** (fans tests across
-  cores — much faster than a serial `make all` or a per-dir loop, and the serial
-  path hangs on the finaliser tests). Run the whole thing under `setarch x86_64 -R`
-  and a plan, e.g.
-  `setarch x86_64 -R env MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=512 make -C testsuite parallel`.
-  Needs `ocamltest` + `testsuite/lib/testing.cma` built first. For a **bytecode-only**
-  run (this fork has no native compilers in a plain `make all` tree), set
-  `native_compiler = false` / `native_dynlink = false` in
-  `ocamltest/ocamltest_config.ml` and rebuild the driver — otherwise every test's
-  native variant errors and masks the bytecode result. A fresh worktree needs
-  `make world` (not `make all`) first — it has no `boot/ocamlrun`.
+  cores — much faster than a serial `make all` or a per-dir loop). Run under
+  `setarch x86_64 -R` + a plan, with a **per-test timeout via `TIMEOUT=<seconds>`**:
+  `setarch x86_64 -R env MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=512 make -C testsuite parallel TIMEOUT=120`.
+  - **The timeout matters under MMTk.** Several tests *hang* here (statmemprof, some
+    finaliser/`c-api/alloc_async`, the multidomain GC-burn tests). `TIMEOUT` is
+    ocamltest's own `-timeout` (default 600s); on expiry it `SIGKILL`s the test's
+    whole process group (`setpgid` in `ocamltest/run_unix.c`) — verified to reap a
+    hung test cleanly. Set it low (60–120s) for MMTk runs so hangs don't sit for 10 min.
+  - **NEVER wrap the run in an outer `timeout N …`** (e.g. `timeout 120 make one …`).
+    If the outer timeout fires before ocamltest's own, it kills `make`/`ocamltest`
+    but NOT the test's `setpgid`'d group, which is then orphaned and runs **forever**
+    (we leaked ~17 runaway `ocamlrun`/`*.byte` processes on turing this way). Use
+    `TIMEOUT=` instead. If you must bound a run, also `setsid` it and kill the group.
+  - Needs `ocamltest` + `testsuite/lib/testing.cma` built first. For a **bytecode-only**
+    run (no native compilers in a plain tree), set `native_compiler = false` /
+    `native_dynlink = false` in `ocamltest/ocamltest_config.ml` and rebuild the driver
+    — else each test's native variant errors and masks the bytecode result. A fresh
+    worktree needs `make world` (not `make all`) first — it has no `boot/ocamlrun`.
 
 ## GC plan & env knobs
 
