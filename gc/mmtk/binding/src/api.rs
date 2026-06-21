@@ -253,7 +253,15 @@ pub extern "C" fn mmtk_ocaml_handle_user_collection_request(domain_state_addr: u
     let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
         Address::from_usize(domain_state_addr)
     })));
-    memory_manager::handle_user_collection_request::<OCamlVM>(mmtk(), tls);
+    // OCaml's Gc.major/full_major/compact route here. They are FULL-heap collections
+    // by contract, so request force=true (collect even if the trigger says not yet)
+    // and exhaustive=true (full heap). The exhaustive flag matters under generational
+    // plans (StickyImmix/GenImmix): without it a user GC is a nursery collection, so
+    // mature/large-object-space objects are never re-traced — a weakly-reachable
+    // mature object then never gets reclaimed and its weak ref never clears (e.g.
+    // regression/pr5233). Immix is non-generational so every GC is already full; this
+    // makes StickyImmix match.
+    mmtk().handle_user_collection_request(tls, true, true);
 }
 
 // ── Object queries ────────────────────────────────────────────────────────
