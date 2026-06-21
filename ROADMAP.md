@@ -418,16 +418,16 @@ Stages (each independently buildable + testable):
    doesn't call the MMTk barrier (pre-existing gap; fine for default Immix, a TODO for
    native StickyImmix — see `gc/mmtk/NOTES.md`).
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
-   mark/sweep/slices/mark-stack/pool/LOS. M6 is done (the prerequisite), so this is
-   now in progress via an *inert-first* approach — guard the stock collector to no-op
-   under MMTk, then delete the dead bodies. **🟡 inert step implemented on branch
-   `m9-stage3-inert`, NOT merged — blocked by one regression (see `gc/mmtk/NOTES.md`).**
-   The guards (caml_darken / slices / caml_finish_*) pass a clean Immix+StickyImmix
-   bootstrap and a multidomain Domain.join battery (one GC-pacing hang found + fixed:
-   the inert slice must still record `major_slice_epoch`). **Open blocker:**
-   `callback/nested_fiber` SIGSEGVs — a `Gc.full_major` inside a nested fiber, with the
-   stock major GC inert, corrupts state that crashes on the effect-handler return.
-   Needs gdb root-cause before merge + before deleting the bodies.
+   mark/sweep/slices/mark-stack/pool/LOS. M6 is done (the prerequisite). Done via an
+   *inert-first* approach — guard the stock collector to no-op under MMTk, then delete
+   the dead bodies. **🟡 inert step MERGED to `m9-mmtk-only`** (`caml_darken` / slice
+   drivers / `caml_finish_*` no-op under MMTk; finish_* still set
+   `marking_done`/`sweeping_done` so `caml_domain_terminate` exits). Validated: clean
+   Immix+StickyImmix bootstrap, 25×4 `Domain.join` battery, effects 23/0. The earlier
+   `nested_fiber` "blocker" was a *separate* pre-existing bug (the binding never scanned
+   continuation fiber stacks — fixed, see `gc/mmtk/NOTES.md`), not the inert step. The
+   stock major GC no longer runs. **Remaining: delete the now-dead mark/sweep/slice
+   bodies** in `major_gc.c` + the `shared_heap.c` sweep (literal code removal).
 4. **Domain + `Gc` module cleanup**: remove the minor-heap arena
    (`allocate/free_minor_heap_arena`, the reservation) — the nursery comes from
    MMTk; reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk

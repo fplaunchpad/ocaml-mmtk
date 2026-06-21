@@ -5,6 +5,40 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 3: stock major GC now INERT on m9-mmtk-only; the "blocker" was a separate bug
+
+*2026-06-21*
+
+Resolves the stage-3 blocker entry below. The `callback/nested_fiber` SIGSEGV was
+**not** caused by the inert step — gdb (under rr) at the pre-inert commit showed it
+crashes there too, under non-moving MarkSweep, and reverting the guards doesn't fix
+it. **Root cause: a pre-existing missing GC root** — the binding's `scan_ocaml_object`
+treated `Cont_tag` (245) as an ordinary block, so MMTk never scanned the suspended
+fiber `stack_info` a continuation holds in field 0 (`Val_ptr(stack)`, reads as an
+immediate). That stack (+ its `Stack_parent` chain) is reachable only through the
+continuation block, so a GC taken while a C callback / captured continuation had
+detached the parent fiber chain (`alloc_and_clear_stack_parent`) reclaimed live
+stack objects → crash on resume. **Latent** until the pr5233 exhaustive-`full_major`
+fix made `Gc.full_major` actually collect those mature objects (so it was invisible
+in earlier baselines, where `nested_fiber` "passed").
+
+**Fix (commit c5760e7134, on m9-mmtk-only):** add a `Cont_tag` case to the binding's
+`scan_object` — recover the stack via `common::scanning::continuation_stack`
+(`Ptr_val` of field 0) and scan it with `caml_scan_stack`, feeding each fiber-stack
+slot to the slot visitor (the analogue of stock `caml_darken_cont`). Validated:
+`nested_fiber` passes, **effects dir 23/0**, clean bootstrap.
+
+**With that fixed, the inert step merged** (commits 8a32daae47 + 07a9917ee5): the
+stock major GC is now inert under MMTk — `caml_darken`, the slice drivers, and
+`caml_finish_*` are no-ops (finish_* still set `marking_done`/`sweeping_done` so
+`caml_domain_terminate` exits). Validated: clean Immix+StickyImmix bootstrap, 25×4
+Domain.join battery, nested_fiber + effects. (One earlier hang fixed: the inert slice
+must still record `major_slice_epoch` or the bytecode mutator spins in
+`caml_poll_gc_work`.) **The stock major GC's mark/sweep/slice bodies are now dead
+code** — next: delete them from `major_gc.c` + the `shared_heap.c` sweep.
+
+---
+
 ## M9 stage 3 (inert stock major GC): implemented on a branch, BLOCKED by an effects/GC regression
 
 *2026-06-21*
