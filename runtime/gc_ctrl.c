@@ -66,27 +66,38 @@ CAMLprim value caml_gc_quick_stat(value v)
   mincoll = atomic_load(&caml_minor_collections_count);
   compactions = atomic_load(&caml_compactions_count);
 
+  /* Under MMTk the stock shared-heap counters (s.heap_stats.*) are ~0 — MMTk owns
+     the heap. Pull the heap-size fields and the collection count from MMTk so
+     Gc.stat reports the real heap instead of a near-empty one. */
+  uintnat mmtk_heap_words = 0, mmtk_live_words = 0, mmtk_free_words = 0,
+          mmtk_collections = 0;
+  if (caml_mmtk_enabled) {
+    caml_mmtk_gc_stats(&mmtk_heap_words, &mmtk_live_words, &mmtk_free_words,
+                       &mmtk_collections);
+    majcoll = mmtk_collections;
+  }
+
   res = caml_alloc_tuple (18);
   Store_field (res, 0, caml_copy_double ((double)s.alloc_stats.minor_words));
   Store_field (res, 1, caml_copy_double ((double)s.alloc_stats.promoted_words));
   Store_field (res, 2, caml_copy_double ((double)s.alloc_stats.major_words));
   Store_field (res, 3, Val_long (mincoll));
   Store_field (res, 4, Val_long (majcoll));
-  Store_field (res, 5, Val_long (
+  Store_field (res, 5, Val_long (caml_mmtk_enabled ? mmtk_heap_words :
     s.heap_stats.pool_words + s.heap_stats.large_words));
   Store_field (res, 6, Val_long (0));
-  Store_field (res, 7, Val_long (
+  Store_field (res, 7, Val_long (caml_mmtk_enabled ? mmtk_live_words :
     s.heap_stats.pool_live_words + s.heap_stats.large_words));
   Store_field (res, 8, Val_long (
     s.heap_stats.pool_live_blocks + s.heap_stats.large_blocks));
-  Store_field (res, 9, Val_long (
+  Store_field (res, 9, Val_long (caml_mmtk_enabled ? mmtk_free_words :
     s.heap_stats.pool_words - s.heap_stats.pool_live_words
     - s.heap_stats.pool_frag_words));
   Store_field (res, 10, Val_long (0));
   Store_field (res, 11, Val_long (0));
   Store_field (res, 12, Val_long (s.heap_stats.pool_frag_words));
   Store_field (res, 13, Val_long (compactions));
-  Store_field (res, 14, Val_long (
+  Store_field (res, 14, Val_long (caml_mmtk_enabled ? mmtk_heap_words :
     s.heap_stats.pool_max_words + s.heap_stats.large_max_words));
   Store_field (res, 15, Val_long (caml_current_stack_size()));
   Store_field (res, 16, Val_long (s.alloc_stats.forced_major_collections));

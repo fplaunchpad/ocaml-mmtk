@@ -127,6 +127,12 @@ void mmtk_ocaml_add_finalizer(const void* addr);
  *  The returned block is resurrected/valid for its finalize call. */
 uintptr_t mmtk_ocaml_poll_finalizable(void);
 
+/** Heap stats for Gc.stat (page-granular bytes). total = heap size;
+ *  used = live+retained (proxy for live); free = free bytes. */
+size_t mmtk_ocaml_total_bytes(void);
+size_t mmtk_ocaml_used_bytes(void);
+size_t mmtk_ocaml_free_bytes(void);
+
 #ifdef __cplusplus
 }
 #endif

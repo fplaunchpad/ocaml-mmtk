@@ -440,6 +440,20 @@ void caml_mmtk_run_custom_finalizers(void)
   }
 }
 
+/* Fill the heap-size fields of Gc.stat from MMTk's accounting (page-granular).
+   Under MMTk the stock shared-heap counters are ~0 (the stock heap is bypassed),
+   so Gc.stat would otherwise report a near-empty heap. `*live_words` is the
+   in-use pages (a proxy for live data, not exact live bytes); `*collections` is
+   MMTk's GC count. Words = bytes / sizeof(value). */
+void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
+                        uintnat *free_words, uintnat *collections)
+{
+  *heap_words  = mmtk_ocaml_total_bytes() / sizeof(value);
+  *live_words  = mmtk_ocaml_used_bytes()  / sizeof(value);
+  *free_words  = mmtk_ocaml_free_bytes()  / sizeof(value);
+  *collections = mmtk_ocaml_gc_count();
+}
+
 /* Service an explicit `Gc` collection request (Gc.major / full_major / compact).
    Under MMTk the stock major-GC machinery (caml_finish_major_cycle) must NOT run
    — it operates on the bypassed stock shared heap and corrupts state (observed:
