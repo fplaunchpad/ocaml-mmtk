@@ -10,7 +10,15 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   separate binding bolted onto stock OCaml — we hack on and ship this tree.
 - MMTk is **always-on** (milestone M9). Default plan is **Immix**. Both the bytecode
   interpreter and native code allocate through MMTk.
-- Active branch: `m9-mmtk-only`. Remote: `mmtk` → `fplaunchpad/ocaml-mmtk` (public).
+- **Branches.** Remote: `mmtk` → `fplaunchpad/ocaml-mmtk` (public, the only remote).
+  - **`5.5+mmtk`** is the fork's **default branch** — all work should ultimately live
+    here (consolidate onto it).
+  - **`m9-mmtk-only`** is the active integration/dev branch; it fast-forwards into
+    `5.5+mmtk` once validated. Do feature work on topic branches, merge to
+    `m9-mmtk-only`, then fast-forward `5.5+mmtk`.
+  - **`trunk`** is **upstream OCaml's** dev branch (a leftover in the local clone) —
+    NOT ours; never build/push it. (There is no `main` here.) Never push to upstream
+    `ocaml/ocaml` regardless — only `mmtk` is ours.
 
 ## Hard rules (do not violate)
 
