@@ -15,9 +15,8 @@ compiler bootstrap still run on the stock GC. Approach: **bytecode first**
 redirecting a C function); **route all bytecode allocation through MMTk**,
 bypassing the minor heap.
 
-Run knobs (as of M9, MMTk is **always-on**): `MMTK_PLAN` (default `Immix`),
-`MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_VERBOSE`, and a transitional
-`MMTK_DISABLE=1` stock-GC escape (for benchmarking; removed at final excision).
+Run knobs (as of M9, MMTk is **always-on** and the only collector — no opt-out):
+`MMTK_PLAN` (default `Immix`), `MMTK_HEAP_SIZE_MB` (default 1024), `MMTK_VERBOSE`.
 Native uses TLAB nursery aliasing and requires an Immix-family plan. mmtk-core's
 own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 `MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true`).

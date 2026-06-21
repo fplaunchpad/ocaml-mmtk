@@ -33,13 +33,11 @@
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 
-/* MMTk is the garbage collector for this fork. The flag is 0 only during the
-   brief early-startup window before MMTk is initialised and the first domain's
-   mutator is bound (a handful of pre-init allocations take the stock path); it is
-   set to 1 in caml_mmtk_domain_init and stays 1 for the rest of the process. The
-   stock GC is no longer a selectable mode — see the (transitional) MMTK_DISABLE
-   escape hatch below, kept only so the benchmarking phase can compare against the
-   stock GC until the stock collector is excised. */
+/* MMTk is the garbage collector for this fork — the only one. The flag is 0 only
+   during the brief early-startup window before MMTk is initialised and the first
+   domain's mutator is bound (a handful of pre-init allocations take the stock
+   path); it is set to 1 in caml_mmtk_domain_init and stays 1 for the rest of the
+   process. There is no opt-out. */
 int caml_mmtk_enabled = 0;
 
 /* Native TLAB / nursery-aliasing: MMTk owns the nursery too. The inlined native
@@ -113,20 +111,11 @@ static void caml_mmtk_report_copied(void)
           mmtk_ocaml_objects_copied());
 }
 
-/* MMTk is this fork's garbage collector and is ON by default. The only escape is
-   a TRANSITIONAL opt-out, MMTK_DISABLE=1, kept solely so the benchmarking phase
-   can still measure the stock GC; it will be removed when the stock collector is
-   excised. (NoGC can't sustain the runtime, so the default plan is Immix.) */
-static int caml_mmtk_wanted(void)
-{
-  const char *e = getenv("MMTK_DISABLE");
-  int disabled = (e != NULL && e[0] != '\0' && strcmp(e, "0") != 0);
-  return !disabled;
-}
-
+/* MMTk is this fork's only garbage collector; it initialises unconditionally at
+   the first domain's startup. (NoGC can't sustain the runtime, so the default plan
+   is Immix.) */
 void caml_mmtk_domain_init(caml_domain_state *dom)
 {
-  if (!caml_mmtk_wanted()) return;  /* transitional MMTK_DISABLE escape only */
   caml_mmtk_init();
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before

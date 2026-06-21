@@ -20,8 +20,9 @@ switch.
 > **Status: MMTk is the GC.** As of M9 it is **on by default** for both the
 > **bytecode** and **native** runtimes — a normal `./configure && make` builds and
 > self-hosts (the compiler bootstrap reaches its fixpoint) entirely on MMTk. The
-> stock GC is being excised; a transitional `MMTK_DISABLE=1` escape remains only so
-> the benchmarking phase can compare against it. `NoGC`, `MarkSweep`, `Immix`,
+> stock GC is being excised — MMTk is the only collector, there is no opt-out
+> (benchmark against stock via a separate vanilla OCaml 5.5 opam switch). `NoGC`,
+> `MarkSweep`, `Immix`,
 > `GenImmix`, `StickyImmix` all work — collecting plans collect single- **and**
 > multi-domain (`Domain.spawn`), moving plans relocate, generational plans use a
 > write barrier, collection is parallel. **Native** uses TLAB nursery aliasing
@@ -105,7 +106,6 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte          # runs on MMTk (Imm
 | `MMTK_PLAN` | `Immix` | MMTk plan: `Immix`, `StickyImmix`, `MarkSweep`, `NoGC`, … (native requires an Immix-family plan). |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
 | `MMTK_VERBOSE` | unset | Print MMTk init + a GC/objects-copied summary at exit. |
-| `MMTK_DISABLE` | unset | **Transitional**: set to `1` to fall back to the stock GC (kept only for benchmarking until the stock collector is excised). |
 
 mmtk-core's own `MMTK_*` options also work (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …). For **native** code, MMTk owns the nursery via TLAB
@@ -142,8 +142,9 @@ The runtime patches are concentrated in `runtime/` (`memory.h`, `memory.c`,
 `mmtk.c`/`mmtk.h` is the glue, compiled into both runtimes. As of M9 **MMTk is
 always-on**: allocation, the write barrier, and domain init go unconditionally to
 MMTk (the old `caml_mmtk_vanilla_minor` native mode has been removed — native
-always uses TLAB nursery-aliasing). The only remaining escape is the transitional
-`MMTK_DISABLE=1`, kept for benchmarking against the stock GC until it is excised.
+always uses TLAB nursery-aliasing). MMTk is the only collector — there is no
+opt-out; the stock GC code is being deleted (M9). Benchmark against stock via a
+separate vanilla OCaml 5.5 opam switch.
 
 ## License
 

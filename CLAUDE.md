@@ -59,8 +59,8 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - `MMTK_PLAN` = `Immix` (default) | `StickyImmix` | `GenImmix` | `MarkSweep` | `NoGC`.
   Native code requires an **Immix-family** plan (TLAB nursery-aliasing).
 - `MMTK_HEAP_SIZE_MB` (fixed heap), `MMTK_THREADS` (GC worker count),
-  `MMTK_VERBOSE=1` (prints GC stats at exit), `MMTK_DISABLE=1` (transitional escape
-  to the stock GC, for benchmarking; to be removed at final excision).
+  `MMTK_VERBOSE=1` (prints GC stats at exit). MMTk is the only collector — no
+  opt-out; benchmark against stock via a separate vanilla OCaml 5.5 opam switch.
 
 ## Gotchas (hard-won — don't rediscover these)
 

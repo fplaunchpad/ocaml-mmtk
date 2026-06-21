@@ -24,19 +24,27 @@ reachable under always-on:
   barrier in `memory.c` (after the `if (caml_mmtk_enabled) { region_barrier; return; }`
   early-return — dead under always-on, modulo the caveat below).
 
-**Two couplings that gate the surgery:**
-1. **`MMTK_DISABLE` is the stock GC.** `MMTK_DISABLE=1` flips `caml_mmtk_enabled`
-   off and runs the *stock* collector — that is the M8 **benchmark baseline**
-   (MMTk vs stock). Deleting the stock GC means dropping `MMTK_DISABLE` and **losing
-   the ability to measure against stock**. So capture the M8 stock-vs-MMTk numbers
-   *before* excising — it burns that bridge.
+**Couplings noted while scoping:**
+1. **`MMTK_DISABLE` was the stock GC — now removed.** `MMTK_DISABLE=1` used to flip
+   `caml_mmtk_enabled` off and run the *stock* collector, which served as the M8
+   benchmark baseline. Decision (2026-06-21): benchmark MMTk vs stock by installing
+   a **separate vanilla OCaml 5.5 opam switch** instead — no need to carry the stock
+   GC in this tree — so `MMTK_DISABLE` and `caml_mmtk_wanted` are deleted (first step
+   of the excision). The stock GC is now reachable *only* in the pre-init window
+   (caveat below).
 2. **`caml_mmtk_enabled` is also the pre-init readiness guard** (brief startup window
-   before MMTk init). The "dead" stock fallbacks can't be fully removed until
-   MMTk-init-before-first-alloc is done (a separate step); until then the pre-init
-   window can still reach them.
+   before MMTk init — a handful of pre-init allocations take the stock alloc path).
+   The stock fallbacks can't be fully removed until MMTk-init-before-first-alloc is
+   done (a separate step); until then the pre-init window can still reach them.
 
 **Proposed deletion order** (each independently buildable + testable; do it on the
 checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
+  0. **✅ done** — remove the `MMTK_DISABLE` escape + `caml_mmtk_wanted` so MMTk is
+     unconditional; the stock GC is now reachable only in the pre-init window.
+  - **Next enabler: eliminate the pre-init window** (initialise MMTk before the first
+    allocation) so `caml_mmtk_enabled` is true from the start. This is what makes the
+    stock alloc/barrier paths *fully* dead and cleanly deletable — without it, steps
+    b/d must keep a minimal stock path behind the init guard.
   a. Reroute/neuter stock call sites in `domain.c` STW + `array.c` so always-on never
      invokes stock minor collection (MMTk drives collection).
   b. Remove the stock write-barrier fallback + `Ref_table` machinery
