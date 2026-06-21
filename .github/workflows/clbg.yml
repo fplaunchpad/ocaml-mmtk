@@ -1,0 +1,63 @@
+name: CLBG correctness
+
+# Runs the CLBG benchmark suite as a cross-plan GC-correctness check: every
+# program must produce byte-identical output under every MMTk plan. (Performance
+# measurement is a separate manual job — see benchmarks/clbg/README.md.)
+
+on:
+  push:
+    paths:
+      - 'benchmarks/clbg/**'
+      - 'gc/mmtk/**'
+      - 'runtime/**'
+      - '.github/workflows/clbg.yml'
+  pull_request:
+    paths:
+      - 'benchmarks/clbg/**'
+      - 'gc/mmtk/**'
+      - 'runtime/**'
+  workflow_dispatch:
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends build-essential
+
+      - name: Rust toolchain (for the MMTk staticlib)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + mmtk staticlib
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gc/mmtk/target
+          key: ${{ runner.os }}-clbg-cargo-${{ hashFiles('gc/mmtk/Cargo.lock') }}
+
+      - name: Configure
+        run: ./configure
+
+      # Build only the bytecode world, under MarkSweep (non-moving): this needs
+      # no native compiler and never builds the manpages — so it sidesteps the
+      # open moving-GC ocamldoc crash (ROADMAP bug #2) entirely. setarch -R
+      # disables ASLR (the MMTk fixed-address metadata mmap flake).
+      - name: Build bytecode world (MarkSweep)
+        run: |
+          setarch "$(uname -m)" -R env MMTK_PLAN=MarkSweep MMTK_HEAP_SIZE_MB=2048 \
+            make -j"$(nproc)" world
+
+      - name: Build CLBG benchmarks (bytecode)
+        working-directory: benchmarks/clbg
+        run: make bytecode OCAMLC="$GITHUB_WORKSPACE/runtime/ocamlrun $GITHUB_WORKSPACE/ocamlc"
+
+      - name: Validate correctness across all plans
+        working-directory: benchmarks/clbg
+        env:
+          MMTK_HEAP_SIZE_MB: 2048
+          CLBG_TIMEOUT: 180
+        run: ./run.sh validate
