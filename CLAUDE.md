@@ -50,9 +50,23 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   (cd gc/mmtk && cargo build --release)        # -> target/release/libmmtk_ocaml.a
   rm -f runtime/ocamlrun runtime/ocamlrund && make -j runtime
   ```
-- Full bytecode world: `make -j all`. Native: `make -j world.opt`.
+- Full bytecode world: `make -j all`. Native: `make -j world.opt`. **`make -j<N>`
+  (e.g. `-j$(nproc)`) is safe for the whole compiler/world build, not just the
+  runtime** — use it everywhere to go faster. (Multi-process build steps —
+  `make bootstrap`/`world.opt` — still need `setarch x86_64 -R` for the ASLR flake.)
 - Regenerate `configure`: `tools/autogen` with **autoconf 2.72** (NOT plain
   autoconf / 2.71).
+- **Testsuite**: run it with **`make -C testsuite parallel`** (fans tests across
+  cores — much faster than a serial `make all` or a per-dir loop, and the serial
+  path hangs on the finaliser tests). Run the whole thing under `setarch x86_64 -R`
+  and a plan, e.g.
+  `setarch x86_64 -R env MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=512 make -C testsuite parallel`.
+  Needs `ocamltest` + `testsuite/lib/testing.cma` built first. For a **bytecode-only**
+  run (this fork has no native compilers in a plain `make all` tree), set
+  `native_compiler = false` / `native_dynlink = false` in
+  `ocamltest/ocamltest_config.ml` and rebuild the driver — otherwise every test's
+  native variant errors and masks the bytecode result. A fresh worktree needs
+  `make world` (not `make all`) first — it has no `boot/ocamlrun`.
 
 ## GC plan & env knobs
 
