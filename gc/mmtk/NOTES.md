@@ -5,6 +5,51 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M6 full-suite validation: INCOMPLETE — custom-block finalize is the missing mechanism
+
+*2026-06-21*
+
+Correcting the optimistic "M6 implemented + validated" entry below: the smoke tests
+passed, but the **full bytecode suite with `MMTK_WEAK_REFS=1` fixes only 1 of the 8
+targeted weak/finaliser failures** (vs the flag-off baseline). No flag-attributable
+regressions (the lone PASS→FAIL, `parallel/domain_parallel_spawn_burn`, is a
+pre-existing flaky moving-GC crash — reproduced with the flag *off* too; same class
+as bug #3), and the smoke binaries still pass — so what's implemented is *correct for
+simple cases* but *covers far less than expected*. M6 is **partial, not done**, and
+the major-GC removal is **not** unblocked yet.
+
+Gap analysis:
+- **Custom-block finalizers are entirely unimplemented under MMTk — the big one.**
+  These are `Custom_operations.finalize` (Bigarray, `Int64`/`Nativeint`, channels,
+  marshalled custom blocks…), a mechanism *separate* from `Gc.finalise`. Stock OCaml
+  calls them from `shared_heap.c` **sweep** (lines 574/687/716/770/1409); under MMTk
+  the stock sweep never runs, so they never fire. This fails `regression/pr3612`
+  (deserialised custom blocks never freed) and likely `c-api/alloc_async` (hangs
+  waiting on one) and the Gc-stat/bigarray cases. My M6 work only did the OCaml
+  `Gc.finalise` table, not custom blocks. Fixing it needs MMTk-side dead-object
+  notification — register finalizable custom blocks (those with a non-NULL
+  `finalize`) via mmtk's finalizer queue at `caml_alloc_custom`, and run their
+  `finalize` op on the dead ones from a `process_weak_refs`/finalizer pass — *or* a
+  scan that detects dead custom blocks. Non-trivial; this is the gating piece. NB
+  this also means **`shared_heap.c` cannot just be deleted in stage 3** — its sweep
+  is load-bearing for custom finalize until this lands.
+- **Weak + finaliser-resurrection ordering** (`regression/pr5233`): a weak slot must
+  be cleared based on reachability from the *strong + ephemeron* closure, **before**
+  finaliser resurrection — a value resurrected only to run its finaliser must still
+  read as cleared through a weak pointer. My pass lets finalise-first retention keep
+  such a value visible → the weak slot wrongly stays full ("value found" vs expected
+  "no value"). Need to match OCaml's phase order (decide weak/ephemeron clearing
+  before/independently of finaliser resurrection).
+- Probable false failures: `tool-ocaml/t340-weak` + `t350-heapcheck` fail with
+  `Not_found` from the `lib.cmo` toplevel harness — an infra issue, maybe not M6.
+- Confirmed fixed by the flag: `backtrace/callstack`.
+
+**Status:** keep `MMTK_WEAK_REFS` default-OFF; do NOT flip the default or start the
+major-GC removal until custom-block finalize + the pr5233 ordering are done and the
+suite re-validates. See the (now-qualified) M6 entries below.
+
+---
+
 ## Testsuite baseline under StickyImmix (M9 stage-2 tree) + a new multidomain repro
 
 *2026-06-21*
