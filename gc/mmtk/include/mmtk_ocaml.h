@@ -119,6 +119,14 @@ size_t mmtk_ocaml_gc_count(void);
 /** Total stop-the-world GC time so far, in milliseconds. */
 uint64_t mmtk_ocaml_gc_time_ms(void);
 
+/** Register a custom block (with a finalize op) on MMTk's finalizer queue. Kept
+ *  alive + forwarded until unreachable, then returned by mmtk_ocaml_poll_finalizable. */
+void mmtk_ocaml_add_finalizer(const void* addr);
+
+/** Pop one ready-to-finalize object (unreachable since the last GC), or 0 if none.
+ *  The returned block is resurrected/valid for its finalize call. */
+uintptr_t mmtk_ocaml_poll_finalizable(void);
+
 #ifdef __cplusplus
 }
 #endif

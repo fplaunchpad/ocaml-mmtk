@@ -105,6 +105,13 @@ extern void caml_mmtk_final_cleanup(uintptr_t domain_addr,
                                     caml_mmtk_ephe_forward_fn forward,
                                     caml_mmtk_ephe_retain_fn retain, void *ctx);
 
+/* Custom-block finalizers (Custom_operations.finalize), same MMTK_WEAK_REFS gate.
+ * register: enqueue a finalizable custom block on MMTk's finalizer queue (called
+ * from caml_alloc_custom). run_custom_finalizers: drain the ready queue + run each
+ * finalize op (called at a safepoint from caml_final_do_calls). */
+extern void caml_mmtk_register_finalizable(value v);
+extern void caml_mmtk_run_custom_finalizers(void);
+
 /* Generational write barrier: record that `count` value-sized slots at `start`
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */

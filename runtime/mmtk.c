@@ -22,11 +22,13 @@
    linked into native code (unused). */
 
 #include "caml/mlvalues.h"
+#include "caml/custom.h"
 #include "caml/domain_state.h"
 #include "caml/domain.h"
 #include "caml/fail.h"
 #include "caml/misc.h"
 #include "caml/roots.h"
+#include "caml/signals.h"
 #include "caml/weak.h"
 #include "caml/mmtk.h"
 
@@ -401,6 +403,32 @@ void caml_mmtk_ephe_clean_pass(uintptr_t domain_addr,
   caml_mmtk_ephe_clean_list(&ei->live, is_reachable, forward);
 }
 
+/* Custom-block finalizers (Custom_operations.finalize). Stock OCaml runs these on
+   shared-heap sweep; under MMTk we register each finalizable custom block on MMTk's
+   finalizer queue at allocation, and drain the now-dead ones at a safepoint. Gated
+   by MMTK_WEAK_REFS (M6); a no-op otherwise, so the default keeps today's behaviour
+   (custom finalizers don't run under MMTk). See gc/mmtk/NOTES.md. */
+void caml_mmtk_register_finalizable(value v)
+{
+  if (caml_mmtk_weak_refs)
+    mmtk_ocaml_add_finalizer((const void *) v);
+}
+
+/* Drain MMTk's ready-to-finalize queue and run each block's finalize op. Called at
+   a safepoint from caml_final_do_calls (post-GC, via the action-pending flag set in
+   caml_mmtk_uninterrupt). The objects are resurrected/valid for the call; after it
+   they are dropped and reclaimed on a later GC. */
+void caml_mmtk_run_custom_finalizers(void)
+{
+  if (!caml_mmtk_weak_refs) return;
+  uintptr_t p;
+  while ((p = mmtk_ocaml_poll_finalizable()) != 0) {
+    value v = (value) p;
+    void (*final_fun)(value) = Custom_ops_val(v)->finalize;
+    if (final_fun != NULL) final_fun(v);
+  }
+}
+
 /* Service an explicit `Gc` collection request (Gc.major / full_major / compact).
    Under MMTk the stock major-GC machinery (caml_finish_major_cycle) must NOT run
    — it operates on the bypassed stock shared heap and corrupts state (observed:
@@ -485,6 +513,10 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
     d->young_trigger         = d->young_start;
     d->memprof_young_trigger = d->young_start;
   }
+  /* A GC just finished — MMTk's finalizer queue may now hold dead custom blocks.
+     Flag pending actions so this domain drains + runs them (caml_final_do_calls →
+     caml_mmtk_run_custom_finalizers) at its next safepoint. */
+  if (caml_mmtk_weak_refs) caml_set_action_pending(d);
   caml_reset_young_limit(d);
 }
 

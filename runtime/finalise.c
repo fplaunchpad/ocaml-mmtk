@@ -263,6 +263,10 @@ caml_result caml_final_do_calls_res(void)
   struct caml_final_info *fi = Caml_state->final_info;
 
   if (fi->running_finalisation_function) return Result_unit;
+  /* Drain MMTk's custom-block finalizer queue (Custom_operations.finalize) — a
+     no-op unless MMTK_WEAK_REFS is on. Independent of the OCaml finaliser table
+     below. */
+  caml_mmtk_run_custom_finalizers();
   if (fi->todo_head != NULL) {
     call_timing_hook(&caml_finalise_begin_hook);
     CAML_GC_MESSAGE(FINALIZE,

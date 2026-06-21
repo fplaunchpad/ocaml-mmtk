@@ -289,3 +289,32 @@ pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> boo
         ObjectReference::from_raw_address_unchecked(addr)
     })
 }
+
+// ── Finalizers (custom-block Custom_operations.finalize) ───────────────────
+// OCaml custom blocks (Bigarray, Int64, channels, marshalled blocks…) carry a C
+// `finalize` op that the stock GC runs on sweep. Under MMTk we register each such
+// block with MMTk's finalizer queue at allocation (caml_alloc_custom) and, after a
+// GC, drain the now-dead ones and run their finalize op. `FinalizableType` is
+// `ObjectReference` (see reference_glue.rs), which MMTk keeps alive + forwards
+// until retrieved. Gated on MMTK_WEAK_REFS at the C call sites.
+
+/// Register a block with MMTk's finalizer queue. The object is kept alive (and
+/// forwarded under a moving plan) until it is unreachable, then returned by
+/// `mmtk_ocaml_poll_finalizable`.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_add_finalizer(addr: *const libc::c_void) {
+    let object =
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(addr)) };
+    memory_manager::add_finalizer(mmtk(), object);
+}
+
+/// Pop one ready-to-finalize object (unreachable since the last GC), resurrected
+/// and valid for the finalize call. Returns its address, or 0 when the queue is
+/// empty. The caller runs the block's `finalize` op and drops the reference.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_poll_finalizable() -> usize {
+    match memory_manager::get_finalized_object(mmtk()) {
+        Some(object) => object.to_raw_address().as_usize(),
+        None => 0,
+    }
+}

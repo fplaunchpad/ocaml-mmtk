@@ -24,6 +24,7 @@
 #include "caml/gc_ctrl.h"
 #include "caml/memory.h"
 #include "caml/mlvalues.h"
+#include "caml/mmtk.h"
 #include "caml/shared_heap.h"
 #include "caml/signals.h"
 #include "caml/memprof.h"
@@ -90,6 +91,12 @@ static value alloc_custom_gen (const struct custom_operations * ops,
     caml_adjust_gc_speed(mem, max_major);
     result = caml_check_urgent_gc(result);
   }
+  /* Under MMTk (MMTK_WEAK_REFS) register finalizable custom blocks on MMTk's
+     finalizer queue so their finalize op runs when dead — the stock GC does this
+     on shared-heap sweep, which never happens under MMTk. No-op when the flag is
+     off or the block has no finalizer. */
+  if (ops->finalize != NULL)
+    caml_mmtk_register_finalizable(result);
   CAMLreturn(result);
 }
 
