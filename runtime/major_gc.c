@@ -34,6 +34,7 @@
 #include "caml/memory.h"
 #include "caml/memprof.h"
 #include "caml/mlvalues.h"
+#include "caml/mmtk.h"
 #include "caml/platform.h"
 #include "caml/roots.h"
 #include "caml/signals.h"
@@ -1618,6 +1619,11 @@ void caml_darken_cont(value cont)
 
 void caml_darken(void* state, value v, volatile value* ignored) {
   header_t hd;
+  /* Under MMTk the stock mark stack is never drained (MMTk owns tracing) and
+     weak/ephemeron/finaliser liveness is handled by process_weak_refs. Darkening
+     here would push to a stack nobody processes and corrupt the stock GC phase
+     counters (marking_done/num_domains_to_mark). No-op. */
+  if (caml_mmtk_enabled) return;
   if (!Is_markable (v)) return; /* foreign stack, at least */
 
   CAMLassert(caml_marking_started());
@@ -2294,11 +2300,13 @@ mark_again:
 
 void caml_opportunistic_major_collection_slice(intnat howmuch)
 {
+  if (caml_mmtk_enabled) return;  /* MMTk owns collection; the stock slice is inert */
   major_collection_slice(howmuch, 0, 0, Slice_opportunistic, 0);
 }
 
 void caml_major_collection_slice(intnat howmuch)
 {
+  if (caml_mmtk_enabled) return;  /* MMTk owns collection; the stock slice is inert */
   uintnat major_slice_epoch = atomic_load (&caml_major_slice_epoch);
 
   /* if this is an auto-triggered GC slice, make it interruptible */
@@ -2366,6 +2374,7 @@ static void stw_finish_major_cycle (caml_domain_state* domain, void* arg,
 
 void caml_finish_major_cycle (int force_compaction)
 {
+  if (caml_mmtk_enabled) return;  /* no stock major cycle under MMTk */
   uintnat saved_major_cycles = caml_major_cycles_completed;
 
   while( saved_major_cycles == caml_major_cycles_completed ) {
@@ -2407,6 +2416,10 @@ static void empty_mark_stack (void)
 
 void caml_finish_marking (void)
 {
+  /* No stock marking under MMTk. Mark "done" so caml_domain_terminate's
+     marking_and_sweeping_done() is satisfied (the flag inits to 0 and is otherwise
+     only advanced by the now-inert stock mark phase). */
+  if (caml_mmtk_enabled) { Caml_state->marking_done = 1; return; }
   if (!Caml_state->marking_done) {
     CAML_EV_BEGIN(EV_MAJOR_FINISH_MARKING);
     empty_mark_stack();
@@ -2425,6 +2438,8 @@ void caml_finish_marking (void)
 
 void caml_finish_sweeping (void)
 {
+  /* No stock sweeping under MMTk. Mark "done" (see caml_finish_marking). */
+  if (caml_mmtk_enabled) { Caml_state->sweeping_done = 1; return; }
   if (Caml_state->sweeping_done) return;
   CAML_EV_BEGIN(EV_MAJOR_FINISH_SWEEPING);
   while (!Caml_state->sweeping_done) {
