@@ -50,12 +50,22 @@ checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
     heap. There is nothing to promote, so deleting the minor GC can't break
     correctness, and **no pre-init-window elimination is needed for the minor GC**
     (my earlier worry that pre-init objects get promoted via `oldify` was wrong —
-    they don't exist). The deletion is mechanical:
-      • `array.c` `Is_young(init)` branch is dead — MMTk objects aren't in the stock
-        young range and the range is always empty; drop the `caml_minor_collection()`.
-      • remove the (now no-op) `caml_empty_minor_heap*` calls in `domain.c` STW/teardown.
-      • delete oldify/promotion + `caml_minor_collection` + the remembered-set tables.
-    Build + boot (`ocamlc`) + testsuite after each step.
+    they don't exist). The deletion is mechanical (progress):
+      • ✅ neuter `caml_empty_minor_heap_promote` for bytecode too (skip under
+        `caml_mmtk_enabled`, not just `caml_mmtk_tlab`).
+      • ✅ `array.c` `Is_young(init)` branch dropped (dead).
+      • ✅ delete the oldify/promotion machinery — promote oldify body, `oldify_one`,
+        `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`,
+        `try_update_object_header` (−483 lines, build warning-clean; verified under
+        StickyImmix + Immix: parser.ml, multi-domain, Array.make).
+      • TODO: `ephe_clean_minor`/`custom_finalize_minor` (vacuous STW calls — neuter
+        then delete), `caml_empty_minor_heap_domain_clear`, the remembered-set tables
+        (`major_ref`/`ephe_ref`/`custom`, only populated by the stock write barrier
+        which MMTk bypasses), the `caml_minor_collection` entry. Then stage 3
+        (major GC + `shared_heap.c`).
+      KEEP: the all-domains minor-empty STW skeleton (`caml_empty_minor_heaps_once`
+      etc.) — the domain spawn/terminate rendezvous.
+    Build + boot (`ocamlc`) + multi-domain after each step.
   - **Stage 3 caveat (shared heap):** pre-init *large* allocations may still land in
     the stock shared heap via `caml_alloc_shr` (not yet measured). Measure that before
     deleting the major GC + `shared_heap.c`; those pre-init majors (if any) need a
