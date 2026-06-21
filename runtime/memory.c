@@ -320,16 +320,15 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
 #endif
   *fp = val;
 #ifndef NATIVE_CODE
+  /* Initialising write into a possibly-mature block: record the slot for MMTk's
+     generational plans (no-op otherwise). Replaces the stock minor remembered-set
+     update, which is dead under always-on MMTk (major_ref is never consumed).
+     caml_mmtk_enabled is false only in the brief pre-init window (no young objects).
+     Native is a no-op here too (see write_barrier / gc/mmtk/NOTES.md). */
   if (caml_mmtk_enabled) {
-    /* An initialising write into a possibly-mature block; remember the slot for
-       MMTk generational plans (no-op otherwise). */
     caml_mmtk_region_barrier(fp, 1);
-    return;
   }
-  /* vanilla-minor mode: fall through to the stock minor remembered-set update. */
 #endif
-  if (!Is_young((value)fp) && Is_block_and_young (val))
-    Ref_table_add(&Caml_state->minor_tables->major_ref, fp);
 }
 
 CAMLprim value caml_atomic_load_field (value obj, value vfield)
