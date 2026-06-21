@@ -35,7 +35,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **partial**, gated by `MMTK_WEAK_REFS` (default off = memory-safe interim that never clears). Flag-on: basic weak-clear / ephemeron-release / `Gc.finalise`/`finalise_last` work (smoke), but the full suite fixes only **1/8** targeted tests — **custom-block finalizers (`Custom_operations.finalize`) unimplemented** (stock calls them on `shared_heap` sweep; MMTk never does) + weak+finaliser-resurrection ordering wrong (`pr5233`). Does NOT yet unblock M9 stage 3. | 🟡 partial (gated) |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` gated by `MMTK_WEAK_REFS` (default off = memory-safe interim that never clears). Flag-on now does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (`Custom_operations.finalize` via MMTk's finalizer queue, incl. unmarshalled blocks — `pr3612` passes). Remaining before it fully unblocks stage 3: a weak+finaliser-resurrection over-retention case (`pr5233`, suspected LOS interaction) + finaliser-timing edge cases; full-suite re-measurement in progress. | 🟡 mostly working (gated) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). Default Immix clean. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
@@ -208,9 +208,10 @@ OCaml semantics MMTk must preserve:
     `process_weak_refs` retains+enqueues dead `finalise` values and enqueues dead
     `finalise_last` as unit; root scan uses `do_final=0`. Basic case validated (smoke).
   - **Custom-block finalizers** (`Custom_operations.finalize` — Bigarray, `Int64`,
-    channels, …): **NOT implemented under MMTk** (stock runs them on `shared_heap`
-    sweep; MMTk's sweep never does). Fails `pr3612`/`c-api/alloc_async`. This is the
-    main M6 gap and gates removing `shared_heap.c` — see `gc/mmtk/NOTES.md`.
+    channels, …): **implemented** via MMTk's finalizer queue (`add_finalizer`/
+    `get_finalized_object`) — register at `caml_alloc_custom` *and* the unmarshal path
+    (`intern.c`), drain + run finalize at a safepoint (`caml_mmtk_run_custom_finalizers`).
+    `pr3612` passes. Replaces the stock `shared_heap`-sweep finalization for stage 3.
 - **Lazy values** — work today (ordinary mutable blocks; no special GC support
   needed). Verified under MarkSweep + Immix.
 - **`Gc` module** — ✅ `Gc.major`/`full_major`/`compact`/`major_slice` now route

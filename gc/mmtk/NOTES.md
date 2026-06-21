@@ -5,6 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M6 custom-block finalize landed (pr3612 passes); pr5233 over-retention still open
+
+*2026-06-21*
+
+Closing most of the gap from the "INCOMPLETE" entry below. Implemented custom-block
+finalization (`Custom_operations.finalize`) via MMTk's finalizer queue
+(`memory_manager::add_finalizer`/`get_finalized_object`, FinalizableType =
+ObjectReference): register every finalizable custom block at creation, drain the
+dead ones at a safepoint and run their finalize op. Still gated on `MMTK_WEAK_REFS`.
+
+- Register sites: `caml_alloc_custom` (`custom.c`) **and** the unmarshal path
+  (`intern.c` ~806) — the latter was the catch: `Marshal.from_string` builds custom
+  blocks directly, bypassing `caml_alloc_custom`, so pr3612's ~1M deserialised blocks
+  weren't registered (only 1 of 1M finalized). Same lesson as the old M2 intern bug:
+  *every* object-creation path must be hooked. Bigarray sub-arrays go through
+  `caml_alloc_custom_mem`, so they're covered.
+- Drain: `caml_mmtk_run_custom_finalizers` (`mmtk.c`) called from
+  `caml_final_do_calls`; `caml_mmtk_uninterrupt` sets the domain's action-pending
+  post-GC so the drain runs at the next safepoint.
+- **`regression/pr3612` now PASSES** (flag on; flag-off still 1000001 ≠ −1). Smoke
+  tests still green. **Implication: `shared_heap.c` custom-finalize-on-sweep is now
+  replaced** for stage 3 (still need the rest of shared_heap audited).
+
+Also fixed an ephemeron/finaliser ordering bug: the mark pass was unlinking dead
+ephemerons from `ephe_info` *before* finalise-first could resurrect them, orphaning
+a resurrected weak array (PR#5233). Now the mark pass keeps dead ephemerons linked;
+only the clean pass (after resurrection) unlinks the still-dead ones.
+
+**STILL OPEN — `regression/pr5233`.** A weak array resurrected by its finaliser:
+after the referent dies, the weak slot should read "no value", but we print
+"value found / testing... ok" — i.e. the 1 MB string is **over-retained** (kept
+alive + intact), not dangling (so not the original safety bug, but still wrong).
+Root cause not yet found; the string is ≥16 KB so it lands in MMTk's **large-object
+space** — suspect a LOS + weak-clear or `is_reachable`-on-LOS interaction, or a
+retention path through the finaliser machinery. Needs a focused repro. Full-suite
+re-measurement with the flag is in progress to quantify the new score.
+
+---
+
 ## M6 full-suite validation: INCOMPLETE — custom-block finalize is the missing mechanism
 
 *2026-06-21*
