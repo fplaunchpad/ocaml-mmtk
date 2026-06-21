@@ -388,10 +388,18 @@ Stages (each independently buildable + testable):
    `caml_mmtk_enabled` is retained only as the pre-init readiness guard for the brief
    startup window (removing it needs MMTk-init-before-first-alloc, a separate perf
    step). The stock-GC code paths are now dead — they are deleted in the stages below.
-2. **Delete the stock minor GC** (`minor_gc.c`): oldify/promotion,
-   `caml_empty_minor_heap*`, the remembered-set tables (`major_ref`/`ephe_ref`/
-   `custom`), the stock path of `caml_alloc_small_dispatch`. Young region is purely
-   the TLAB; the write barrier keeps only MMTk's generational form.
+2. **Delete the stock minor GC** (`minor_gc.c`) — 🟡 in progress. Done: removed the
+   `MMTK_DISABLE` escape (MMTk is the only collector); neutered promotion for
+   bytecode too; **deleted the oldify/promotion machinery** (`oldify_one`,
+   `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`, `try_update_object_header`,
+   the promote oldify body) and **`ephe_clean_minor`** — ~510 lines gone, build
+   warning-clean, verified under StickyImmix + Immix. Remaining: `custom_finalize_minor`,
+   `caml_empty_minor_heap_domain_clear`, the remembered-set tables
+   (`major_ref`/`ephe_ref`/`custom`) + the stock write-barrier fallback, and the
+   stock path of `caml_alloc_small_dispatch`. **Kept:** the all-domains minor-empty
+   STW skeleton (`caml_empty_minor_heaps_once` etc.) — the domain spawn/terminate
+   rendezvous, not promotion. (Several remaining bits are interwoven with finalizers
+   + the write barrier; see `gc/mmtk/NOTES.md`.)
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
    mark/sweep/slices/mark-stack/pool/LOS. `caml_alloc_shr`/`caml_alloc_small` go
    straight to MMTk.
