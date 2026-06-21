@@ -93,6 +93,18 @@ extern void caml_mmtk_ephe_clean_pass(uintptr_t domain_addr,
                                       caml_mmtk_ephe_reachable_fn is_reachable,
                                       caml_mmtk_ephe_forward_fn forward);
 
+/* M6 finalisers (Gc.finalise / finalise_last), same gate + callbacks as above.
+ * update_first retains + queues dead first-set values (returns 1 if any retained,
+ * for the mark fixpoint); cleanup queues dead last-set values (as unit) and
+ * forwards surviving table values. Defined in runtime/finalise.c. */
+extern int  caml_mmtk_final_update_first(uintptr_t domain_addr,
+                                         caml_mmtk_ephe_reachable_fn is_reachable,
+                                         caml_mmtk_ephe_retain_fn retain, void *ctx);
+extern void caml_mmtk_final_cleanup(uintptr_t domain_addr,
+                                    caml_mmtk_ephe_reachable_fn is_reachable,
+                                    caml_mmtk_ephe_forward_fn forward,
+                                    caml_mmtk_ephe_retain_fn retain, void *ctx);
+
 /* Generational write barrier: record that `count` value-sized slots at `start`
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */

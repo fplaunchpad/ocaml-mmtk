@@ -57,6 +57,19 @@ extern "C" {
         is_reachable: extern "C" fn(usize) -> i32,
         forward: extern "C" fn(usize) -> usize,
     );
+    fn caml_mmtk_final_update_first(
+        domain: usize,
+        is_reachable: extern "C" fn(usize) -> i32,
+        retain: extern "C" fn(*mut c_void, usize) -> usize,
+        ctx: *mut c_void,
+    ) -> i32;
+    fn caml_mmtk_final_cleanup(
+        domain: usize,
+        is_reachable: extern "C" fn(usize) -> i32,
+        forward: extern "C" fn(usize) -> usize,
+        retain: extern "C" fn(*mut c_void, usize) -> usize,
+        ctx: *mut c_void,
+    );
 }
 
 #[inline]
@@ -119,13 +132,19 @@ impl Scanning<OCamlVM> for VMScanning {
 
         let mut buf: Vec<FieldSlot> = Vec::new();
         let buf_ptr = (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>();
+        // do_final_val: with MMTk-native finalisers (weak-refs mode) we must let
+        // finalisable *values* become unreachable so process_weak_refs can detect
+        // and run them — so 0 there (the root scan still keeps finaliser functions
+        // and the run-queue alive). Off (default): 1, keeping all finalisable
+        // values alive (finalisers never run — the conservative interim).
+        let do_final_val = if weak_refs_enabled() { 0 } else { 1 };
         unsafe {
             caml_do_roots(
                 collect_root_slot,
                 0, // darken_scanning_flags: scan everything
                 buf_ptr,
                 domain,
-                1, // keep finalisable values alive (we don't run finalisers yet)
+                do_final_val,
             );
             // Weak arrays / ephemerons. With MMTK_WEAK_REFS off (default), keep the
             // whole ephemeron graph alive + updated by rooting the domain's
@@ -185,8 +204,14 @@ impl Scanning<OCamlVM> for VMScanning {
         }
         let domains = domain_addrs();
 
-        // One mark round across all domains, with access to the tracer for
-        // retaining (resurrecting) the data of fully-reachable-key ephemerons.
+        // One retention round, with access to the tracer for resurrecting objects.
+        // Two phases, ordered so finalisers never fire prematurely:
+        //   1. ephemeron marking — retain data of all-keys-reachable ephemerons;
+        //   2. ONLY once ephemeron marking has converged this round, finalise-first
+        //      — retain + queue now-unreachable Gc.finalise values.
+        // Either phase making progress returns `true`, so MMTk re-runs us after the
+        // retained closure settles (a retained finaliser value may revive an
+        // ephemeron key, and vice-versa — the joint fixpoint handles both).
         let progress = tracer_context.with_tracer(worker, |tracer| {
             let mut retain = |v: usize| -> usize {
                 match managed_obj(v) {
@@ -196,23 +221,45 @@ impl Scanning<OCamlVM> for VMScanning {
             };
             let mut retain_dyn: &mut dyn FnMut(usize) -> usize = &mut retain;
             let ctx = (&mut retain_dyn as *mut &mut dyn FnMut(usize) -> usize).cast::<c_void>();
-            let mut any = false;
+
+            let mut ephe = false;
             for &d in &domains {
-                let p = unsafe {
+                ephe |= unsafe {
                     caml_mmtk_ephe_mark_pass(d, ephe_is_reachable, ephe_forward, ephe_retain, ctx)
-                };
-                any |= p != 0;
+                } != 0;
             }
-            any
+            if ephe {
+                return true; // keep marking ephemerons before touching finalisers
+            }
+
+            let mut fin = false;
+            for &d in &domains {
+                fin |= unsafe {
+                    caml_mmtk_final_update_first(d, ephe_is_reachable, ephe_retain, ctx)
+                } != 0;
+            }
+            fin
         });
 
         if progress {
             return true; // re-run after the VMRefClosure bucket drains
         }
 
-        // Fixpoint reached: clear dead keys/data and forward survivors.
+        // Fixpoint reached. Clean up (no resurrection happens here):
+        //   - ephemerons: clear dead keys/data, forward survivors;
+        //   - finalisers: queue dead finalise_last values (as unit), forward the
+        //     surviving table values (they are not roots in weak-refs mode).
         for &d in &domains {
-            unsafe { caml_mmtk_ephe_clean_pass(d, ephe_is_reachable, ephe_forward) };
+            unsafe {
+                caml_mmtk_ephe_clean_pass(d, ephe_is_reachable, ephe_forward);
+                caml_mmtk_final_cleanup(
+                    d,
+                    ephe_is_reachable,
+                    ephe_forward,
+                    ephe_retain,
+                    core::ptr::null_mut(),
+                );
+            }
         }
         false
     }
