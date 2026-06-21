@@ -42,19 +42,35 @@ jobs:
       - name: Configure
         run: ./configure
 
-      # Build only the bytecode world, under MarkSweep (non-moving): this needs
-      # no native compiler and never builds the manpages — so it sidesteps the
-      # open moving-GC ocamldoc crash (ROADMAP bug #2) entirely. setarch -R
-      # disables ASLR (the MMTk fixed-address metadata mmap flake).
+      # Build under MarkSweep (non-moving): never triggers the moving-GC bug, and
+      # the `world` + `opt` targets never build the manpages — so we sidestep the
+      # open moving-GC ocamldoc crash (ROADMAP bug #2) that breaks `world.opt`.
+      # `world` = bytecode system; `opt` = native compiler + native stdlib (needed
+      # to build/link native benchmarks). setarch -R disables ASLR (the MMTk
+      # fixed-address metadata mmap flake) — required for every MMTk process.
       - name: Build bytecode world (MarkSweep)
         run: |
           setarch "$(uname -m)" -R env MMTK_PLAN=MarkSweep MMTK_HEAP_SIZE_MB=2048 \
             make -j"$(nproc)" world
 
-      - name: Build CLBG benchmarks (bytecode)
-        working-directory: benchmarks/clbg
-        run: make bytecode OCAMLC="$GITHUB_WORKSPACE/runtime/ocamlrun $GITHUB_WORKSPACE/ocamlc"
+      - name: Build native compiler + libs (MarkSweep)
+        run: |
+          setarch "$(uname -m)" -R env MMTK_PLAN=MarkSweep MMTK_HEAP_SIZE_MB=2048 \
+            make -j"$(nproc)" opt
 
+      # Build both bytecode and native benchmarks. The in-tree ./ocamlc and
+      # ./ocamlopt are bytecode images with a runtime shebang that doesn't resolve
+      # here, so drive them through ocamlrun. setarch -R guards the per-file
+      # compiler invocations against the mmap flake.
+      - name: Build CLBG benchmarks (bytecode + native)
+        working-directory: benchmarks/clbg
+        run: |
+          setarch "$(uname -m)" -R env MMTK_PLAN=MarkSweep make all \
+            OCAMLC="$GITHUB_WORKSPACE/runtime/ocamlrun $GITHUB_WORKSPACE/ocamlc" \
+            OCAMLOPT="$GITHUB_WORKSPACE/runtime/ocamlrun $GITHUB_WORKSPACE/ocamlopt"
+
+      # validate runs bytecode under all 5 plans and, now that build/*.native
+      # exist, native under Immix + StickyImmix automatically.
       - name: Validate correctness across all plans
         working-directory: benchmarks/clbg
         env:
