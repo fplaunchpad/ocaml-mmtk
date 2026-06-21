@@ -41,10 +41,25 @@ reachable under always-on:
 checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
   0. **✅ done** — remove the `MMTK_DISABLE` escape + `caml_mmtk_wanted` so MMTk is
      unconditional; the stock GC is now reachable only in the pre-init window.
-  - **Next enabler: eliminate the pre-init window** (initialise MMTk before the first
-    allocation) so `caml_mmtk_enabled` is true from the start. This is what makes the
-    stock alloc/barrier paths *fully* dead and cleanly deletable — without it, steps
-    b/d must keep a minimal stock path behind the init guard.
+  - **MEASURED (2026-06-21): the stock minor heap is never used under always-on, so
+    the stock minor GC is vacuous → deletable.** A diagnostic at the MMTk-enable point
+    (`caml_mmtk_domain_init`) prints `young_ptr == young_end`, **used = 0 bytes**:
+    zero pre-init small allocations. The minor heap is set up but empty when MMTk
+    takes over, and post-init every small alloc goes to MMTk — so `oldify` /
+    `caml_empty_minor_heap*` / `caml_minor_collection` only ever run on an **empty**
+    heap. There is nothing to promote, so deleting the minor GC can't break
+    correctness, and **no pre-init-window elimination is needed for the minor GC**
+    (my earlier worry that pre-init objects get promoted via `oldify` was wrong —
+    they don't exist). The deletion is mechanical:
+      • `array.c` `Is_young(init)` branch is dead — MMTk objects aren't in the stock
+        young range and the range is always empty; drop the `caml_minor_collection()`.
+      • remove the (now no-op) `caml_empty_minor_heap*` calls in `domain.c` STW/teardown.
+      • delete oldify/promotion + `caml_minor_collection` + the remembered-set tables.
+    Build + boot (`ocamlc`) + testsuite after each step.
+  - **Stage 3 caveat (shared heap):** pre-init *large* allocations may still land in
+    the stock shared heap via `caml_alloc_shr` (not yet measured). Measure that before
+    deleting the major GC + `shared_heap.c`; those pre-init majors (if any) need a
+    home (MMTk) or to be eliminated by moving MMTk-enable earlier.
   a. Reroute/neuter stock call sites in `domain.c` STW + `array.c` so always-on never
      invokes stock minor collection (MMTk drives collection).
   b. Remove the stock write-barrier fallback + `Ref_table` machinery
