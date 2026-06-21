@@ -103,13 +103,30 @@ A second variant flagging slots pointing to **unreachable** objects fired heavil
 meaningless — the VO bit is at object starts, not infix interiors).
 
 Conclusion: the corrupted RETURN frame's stale `env` is **not** an unforwarded
-value-stack slot. The miss is in a **register (`accu`/`env`) or an `sp`
-misalignment** — state a heap/stack scan can't see. Next: forward-step from event
-1795 watching `accu`/`env` (r13/r15) build the frame, and disambiguate *stale-env*
-(env points to moved/freed memory) vs *sp-misaligned* (do_return reads the wrong
-slots — a code pointer `0x748401261f5c` sits 6 words above the crash sp, so the
-real return frame is nearby). The check + `caml_mmtk_debug_stack_range` are kept
-(gated off) as reusable tooling.
+value-stack slot. The check + `caml_mmtk_debug_stack_range` are kept (gated off)
+as reusable tooling.
+
+**It is an `sp` imbalance, not a stale pointer.** Scanning the stack around the
+crash `sp` (`0x619797ff1038`) shows the *real* return frames plainly — valid
+`[code_ptr, closure, Val_long]` triples at `0x1080`
+(`[0x748401261f5c, 0x201033516a8, 0x1]`), `0x10b8`, `0x1110`, `0x1130` (code
+pointers all inside `[prog, prog+prog_size)` = `[0x748401101010, +3137604)`). But
+`do_return` read its frame at `0x1038`, *below* all of them, where the words are
+the function's working data (`[0x1, 0x2010349e6b8, 0xffff…ec41, …]`), not a frame —
+`sp[0]=0x1` is not a code pointer. So `do_return` ran with `sp` left too low (extra
+slots on the value stack) and misread operands as `[pc, env, extra_args]`. The
+"stale env" (`0x2010349e6b8`, a *live* tag-3 block freshly allocated after the last
+GC) is just whichever live pointer happened to sit in the misread slot.
+
+This reframes the bug: **a stack-pointer accounting error**, GC-triggered (Sticky­
+Immix's per-minor-GC moving makes it deterministic; Immix opportunistic → rare),
+consistent with the clean forwarded-check (an imbalance is not an unforwarded
+slot). Prime suspect: a `Setup_for_gc`/`Restore_after_gc` (−3/+3) vs
+`Setup_for_c_call`/`Restore_after_c_call` (−2/+2) mismatch, or `current_stack->sp`
+changing across an allocation's STW so `Restore_after_gc`'s reload lands wrong.
+Next: forward-step from event 1795 watching `sp` (and `current_stack->sp`) across
+each Setup/Restore and the final RETURN to find where `sp` diverges from the real
+frame at `0x1080`.
 
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
