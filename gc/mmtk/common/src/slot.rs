@@ -10,8 +10,10 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use mmtk::memory_manager;
+use mmtk::util::metadata::side_metadata::SideMetadataSpec;
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::slot::{MemorySlice, Slot};
 
@@ -24,6 +26,41 @@ use crate::header::{tag_of, wosize_of, TAG_INFIX, WORD_SIZE};
 /// object outside MMTk's heap (atoms, code, anything allocated before MMTk was
 /// enabled). For such slots `load` returns `None` and `store` is never called.
 const NOT_TRACEABLE: usize = usize::MAX;
+
+/// MMTk's local forwarding-bits side-metadata spec, injected once by the binding
+/// at MMTk init via [`set_forwarding_bits_spec`]. Reading it tells us,
+/// authoritatively, whether the object at an address has begun forwarding — the
+/// analogue of vanilla OCaml's `hd == 0` marker.
+///
+/// We capture the spec rather than calling the VM-generic
+/// `object_forwarding::is_forwarded::<VM>` so this (version-independent) crate
+/// stays free of the `VM` type. The binding uses one fixed metadata layout —
+/// forwarding *pointer* in the header word, forwarding *bits* on the side — so a
+/// single spec suffices, and the read is a plain side-metadata load.
+static FORWARDING_BITS_SPEC: OnceLock<SideMetadataSpec> = OnceLock::new();
+
+/// Register MMTk's local forwarding-bits spec
+/// (`VMObjectModel::LOCAL_FORWARDING_BITS_SPEC`). Call once, at MMTk init.
+pub fn set_forwarding_bits_spec(spec: SideMetadataSpec) {
+    let _ = FORWARDING_BITS_SPEC.set(spec);
+}
+
+/// True if the object at `addr` has been (or is being) forwarded by a moving GC.
+///
+/// MMTk overwrites a forwarded object's header word with the forwarding pointer,
+/// so that word is no longer a valid OCaml header (its low byte can even collide
+/// with a real tag such as `Infix_tag`, 0xf9). The authoritative "is forwarded"
+/// signal is the 2-bit side-metadata state (`0b00` not-triggered, `0b10` being-
+/// forwarded, `0b11` forwarded). `addr` must lie in an MMTk space — its metadata
+/// is then mapped. Returns `false` before the spec is registered (startup window)
+/// and on non-moving builds, where nothing is ever forwarded.
+#[inline]
+fn is_forwarded(addr: Address) -> bool {
+    match FORWARDING_BITS_SPEC.get() {
+        Some(spec) => spec.load_atomic::<u8>(addr, Ordering::SeqCst) != 0,
+        None => false,
+    }
+}
 
 /// A slot (address of a memory location) that holds an OCaml value.
 ///
@@ -90,32 +127,25 @@ impl FieldSlot {
         // closure, not the infix object. The infix header's size field is the
         // offset, in words, from the parent closure to the infix object
         // (verified GC paper, Fig. 3): parent = infix - wosize(header) * WORD.
+        // CAUTION: during a moving GC `addr` may point to an object that has
+        // already been forwarded. MMTk keeps the forwarding pointer *in the header
+        // word* (LOCAL_FORWARDING_POINTER_SPEC = in_header(0)), so the word at
+        // `addr - WORD_SIZE` can be a forwarding pointer, not an OCaml header — and
+        // a forwarding pointer's low byte can equal Infix_tag (0xf9) by coincidence
+        // of the destination address, which would make us compute a bogus infix
+        // offset. Consult the authoritative forwarding-bits side metadata first
+        // (the analogue of vanilla oldify_one checking `hd == 0` before testing
+        // Infix_tag, runtime/minor_gc.c): if `addr` is forwarded, treat the slot as
+        // an ordinary reference — the trace follows the forwarding pointer and
+        // `store` rewrites the slot with the relocated address.
+        //
+        // For a genuine infix pointer `addr` is interior to a closure (never an
+        // object start), so its forwarding bits read not-triggered and we use the
+        // real Infix_tag header; this holds because forwarding bits are only ever
+        // set at object starts, the same invariant vanilla relies on.
         let header = unsafe { (addr - WORD_SIZE).load::<usize>() };
-        if tag_of(header) == TAG_INFIX {
-            // CAUTION: during a moving GC `addr` may point to an object that has
-            // already been forwarded. MMTk keeps the forwarding pointer *in the
-            // header word* (LOCAL_FORWARDING_POINTER_SPEC = in_header(0)), so the
-            // word we just read can be a forwarding pointer, not an OCaml header
-            // — and a forwarding pointer's low byte can equal Infix_tag (0xf9) by
-            // coincidence of the destination address. A genuine Infix_tag header
-            // yields a small offset whose parent (addr - offset) is the enclosing
-            // closure, still inside a committed MMTk space; a forwarding pointer
-            // misread as Infix_tag yields a huge offset whose "parent" lands in
-            // unmapped (reserved-but-uncommitted) memory. In that case treat the
-            // slot as an ordinary reference: the trace then follows the forwarding
-            // pointer normally, and `store` rewrites the slot with the new
-            // location. Mirrors vanilla oldify_one, which checks "already
-            // forwarded" (hd == 0) before testing Infix_tag (runtime/minor_gc.c).
-            let offset = wosize_of(header) * WORD_SIZE;
-            if offset < raw {
-                let parent = unsafe {
-                    ObjectReference::from_raw_address_unchecked(Address::from_usize(raw - offset))
-                };
-                if memory_manager::is_in_mmtk_spaces(parent) {
-                    return offset;
-                }
-            }
-            0
+        if tag_of(header) == TAG_INFIX && !is_forwarded(addr) {
+            wosize_of(header) * WORD_SIZE
         } else {
             0
         }

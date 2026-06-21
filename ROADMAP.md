@@ -347,9 +347,10 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    (`gc/mmtk/common/src/slot.rs`, `FieldSlot::classify`): a forwarding pointer
    stored in the header word (`in_header(0)`) whose low byte coincides with
    `Infix_tag` (`0xf9`/249) was misread as a real infix header, so a field was
-   silently never forwarded. The classify path now validates the infix parent is in
-   a committed space (mirrors vanilla `oldify_one` checking "already forwarded"
-   before `Infix_tag`) — see `gc/mmtk/NOTES.md`. A from-scratch `make all` under
+   silently never forwarded. `classify` now consults MMTk's forwarding-bits side
+   metadata before trusting the header (mirrors vanilla `oldify_one` checking
+   "already forwarded" before `Infix_tag`; the binding injects the one spec at init)
+   — see `gc/mmtk/NOTES.md`. A from-scratch `make all` under
    StickyImmix now **builds the whole compiler cleanly — 843 compile steps, 0
    crashes** — including the ocamldoc `Stdlib.3o` manpage step that was the original
    intermittent `Lexing.engine` crash. **This unblocks the M9 always-on merge** on

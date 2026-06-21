@@ -30,14 +30,28 @@ pointee is forwarded *before* a referencing slot is processed **and** the forwar
 address's low byte happens to be `0xf9`.
 
 **Fix.** Mirror vanilla `oldify_one`, which checks "already forwarded" (`hd == 0`)
-*before* testing `Infix_tag` (`runtime/minor_gc.c:268`). In `classify`, when the
-header looks like `Infix_tag`, validate it: a genuine infix offset's parent
-(`addr − offset`) is the enclosing closure, still inside a **committed** MMTk space;
-a forwarding pointer misread as `Infix_tag` yields a huge offset whose "parent"
-lands in reserved-but-uncommitted memory. Guard with `is_in_mmtk_spaces(parent)` —
-if it fails, treat the slot as an ordinary reference (`info = 0`) so the trace
-follows the forwarding pointer normally. Genuine infix (closure forwarded or not)
-is unaffected: its parent is always a committed closure.
+*before* testing `Infix_tag` (`runtime/minor_gc.c:268`). MMTk's equivalent of
+`hd == 0` is the **forwarding-bits side metadata** (`LOCAL_FORWARDING_BITS_SPEC`:
+`0b00` not-triggered / `0b10` being-forwarded / `0b11` forwarded). So in `classify`,
+when the header looks like `Infix_tag`, first consult that state: if `addr` is
+forwarded, the header word is a forwarding pointer (not a real header) → treat the
+slot as an ordinary reference (`info = 0`) so the trace follows the forwarding
+pointer and `store` rewrites the slot. For a genuine infix pointer `addr` is
+interior to a closure (never an object start), so its bits read not-triggered and we
+use the real `Infix_tag` header — forwarding bits are only ever set at object
+starts, the same invariant vanilla relies on.
+
+This is checked authoritatively: reading the forwarding bits needs only the concrete
+`SideMetadataSpec`, not the `VM` type (the `<VM>` on `object_forwarding::is_forwarded`
+only *fetches* the spec). The binding injects that one spec into `common` at MMTk
+init (`set_forwarding_bits_spec`), and `classify` does a single side-metadata load on
+the rare `Infix_tag` branch — no FieldSlot/scanning/barrier changes, no new feature.
+*(An earlier version of this fix inferred "forwarded" from the offset magnitude —
+a genuine infix offset is small so `addr − offset` stays in committed space, a
+collision's is ~address/128 so it lands in uncommitted memory. That worked for the
+heaps we run but was config-dependent — it assumed `heap_base/128 > committed_span`,
+which a ≳17 GB or low-mapped heap would break — so it was replaced with the
+side-metadata check above.)*
 
 **Result.** StickyImmix went from **crashing at every heap size** to **completing
 `ocamlc -c parsing/parser.ml` at 96 MB → 1024 MB** (96 MB: 149 GCs / 2.6 M copied;

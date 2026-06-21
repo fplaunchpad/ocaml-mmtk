@@ -49,6 +49,17 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         .set(mmtk_instance)
         .ok()
         .expect("mmtk_ocaml_init called more than once");
+
+    // Hand the forwarding-bits side-metadata spec to the common crate so
+    // FieldSlot::classify can authoritatively distinguish an already-forwarded
+    // object's header (now a forwarding pointer) from a genuine Infix_tag header,
+    // without this crate needing the VM type. Our object model uses a single fixed
+    // layout (forwarding bits on the side), so one spec is all classify needs.
+    mmtk_ocaml_common::slot::set_forwarding_bits_spec(
+        *<crate::object_model::VMObjectModel as mmtk::vm::ObjectModel<OCamlVM>>::LOCAL_FORWARDING_BITS_SPEC
+            .as_spec()
+            .extract_side_spec(),
+    );
 }
 
 /// Start MMTk GC worker threads.  Call once after `mmtk_ocaml_init`, before
