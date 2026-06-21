@@ -2306,8 +2306,17 @@ void caml_opportunistic_major_collection_slice(intnat howmuch)
 
 void caml_major_collection_slice(intnat howmuch)
 {
-  if (caml_mmtk_enabled) return;  /* MMTk owns collection; the stock slice is inert */
   uintnat major_slice_epoch = atomic_load (&caml_major_slice_epoch);
+  if (caml_mmtk_enabled) {
+    /* MMTk owns collection — skip the stock slice, but STILL record this domain's
+       major-slice epoch. Otherwise caml_reset_young_limit keeps observing
+       (domain->major_slice_epoch < caml_major_slice_epoch), re-arms the interrupt at
+       every safepoint, and the bytecode mutator spins forever in caml_poll_gc_work
+       (the native TLAB path early-returns before reaching here, so this bites
+       bytecode only). */
+    Caml_state->major_slice_epoch = major_slice_epoch;
+    return;
+  }
 
   /* if this is an auto-triggered GC slice, make it interruptible */
   if (howmuch == AUTO_TRIGGERED_MAJOR_SLICE) {
