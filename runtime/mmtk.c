@@ -307,7 +307,16 @@ static int caml_mmtk_ephe_mark_list(value *headp,
     int live = is_reachable(e);
     value cur = live ? forward(e) : e;   /* dead objects don't move */
     value next = Ephe_link(cur);
-    if (!live) { *linkp = next; e = next; continue; }  /* drop dead ephemeron */
+    if (!live) {
+      /* Keep a dead ephemeron LINKED for now — a finaliser may resurrect this
+         block before the clean pass (PR#5233: a finalised weak array). Unlinking
+         it here would orphan it from ephe_info so its weak slots would never clear
+         after resurrection, leaving dangling pointers. The clean pass (which runs
+         after finaliser resurrection) unlinks the ones still dead by then. */
+      linkp = &Ephe_link(cur);
+      e = next;
+      continue;
+    }
     *linkp = cur;                                      /* fix forwarded link */
 
     value data = Ephe_data(cur);
