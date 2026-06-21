@@ -5,6 +5,66 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Bug #2 / ocamldoc-CI: latent moving-GC crash — confirmed live + characterised
+
+*2026-06-21*
+
+The latent moving-GC bug is the **same crash failing CI**: the linux-arm64 `Build`
+job SEGVs at `make -C ocamldoc man` (api_docgen) — the "rare ocamldoc
+`Lexing.engine` crash" long tied here to the moving GC. CI builds the default
+(Immix), so it manifests on **Immix** too (opportunistic moving → rare), while
+StickyImmix (always-relocating) triggers it deterministically. So it is not a
+tight-heap-only edge — it blocks CI. The root cause is in architecture-independent
+root/stack handling, so the x86-64 StickyImmix repro fixes the Arm64 crash too.
+
+**Repro (current tree, `~/ocaml-mmtk-del`).** The bootstrap compile of parser.ml
+under the *boot* compiler:
+`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=64 setarch x86_64 -R ./boot/ocamlrun
+./boot/ocamlc <boot flags: -nostdlib -I ./boot -use-prims runtime/primitives -g
+-strict-sequence … -c parsing/parser.ml>` (script `~/repro-parser-segv.sh`).
+Exit 139 on ≈25% of runs at 64 MB (intermittent — layout/timing sensitive; use
+`rr record --chaos` to raise the rate). Immix: clean (exit 2 = the standalone
+warning-as-error, *not* a crash). NB: a `-I stdlib` *standalone* invocation
+short-circuits with a `camlinternalMenhirLib.cmi` naming error before the heavy
+allocation — must use the boot flags (`-I ./boot`) for a full compile that crashes.
+
+**Crash mechanism** (from the saved rr trace `~/.local/share/rr/strcrash`; replay
+is deterministic). SIGSEGV at `interp.c:623` `Next` — the bytecode dispatch
+`jmp *jumptable[*pc]` — faulting on `movslq (%rax),%rax` because **pc is garbage**
+(0x1). Line 623 is the tail of `do_return` "return to callee":
+`pc=(code_t)sp[0]; env=sp[1]; extra_args=Long_val(sp[2])`. The consumed RETURN
+frame on the bytecode value stack is corrupt:
+- `sp[0]` saved return-PC = `0x1`              (want a bytecode addr ~`0x748401……`)
+- `sp[1]` saved env       = `0x2010349e6b8`, hdr `0x1403` → **tag 3, wosize 320**
+                            (want the caller's `Closure_tag` closure)
+- `sp[2]` extra_args      = `0xffff…ec41`
+So a whole live RETURN frame went stale across a StickyImmix move: the saved-env
+slot points at a live but *wrong* block (tag-3 — memory the moved closure's old
+address was reused for), and the adjacent return-PC slot is garbage. `sanity` does
+**not** flag it (heap is consistent), so the unforwarded slot is a **root the GC
+scan missed**, not a heap field — matches the prior bug-#2 signature.
+
+**Where it is NOT.** The normal alloc path publishes roots correctly:
+`Setup_for_gc` (interp.c:76) pushes accu/env/pc and sets `current_stack->sp = sp`
+before every `Alloc_small(…,Enter_gc)`, and the MMTk shr/alloc hooks
+(`CAML_MMTK_SETUP_ROOTS`) mirror it — so accu/env around a normal allocation are
+covered. The missed slot is a *deeper* live RETURN frame, so the suspect is the
+value-stack scan running with a stale/short `sp` at some GC, or a StickyImmix
+generational (nursery / remembered-set) path not forwarding a stack-held young
+closure. TBD — needs reverse-execution.
+
+**rr recording friction (open).** Fresh `rr record` of the MMTk runtime aborts in
+MMTk init — `space.rs:724 failed to mmap meta memory` ("Inappropriate ioctl" with
+the syscall buffer on; "File exists" with `-n`): rr's memory layout collides with
+MMTk's fixed metadata mmap. The Jun-20 `strcrash` trace still replays fine (use
+it). Fresh traces against the current tree need this solved (try
+`--disable-avx-512` / `--num-cores=1`, or shrink the metadata footprint).
+
+**Next step.** On the strcrash replay: find the GC that moved the saved-env
+closure (`MMTK_VERBOSE` GC count / binary-search on GC count), then determine why
+its value-stack slot was not forwarded — reverse-continue to *breakpoints* (NOT
+hardware watchpoints — rr async bug) or a software-watchpoint reverse on the slot.
+
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
 *2026-06-21*
