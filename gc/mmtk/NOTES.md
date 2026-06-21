@@ -90,10 +90,31 @@ checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
       Wiring native `caml_modify` → `caml_mmtk_region_barrier` is a prerequisite if
       native StickyImmix is ever to be generationally correct — and should be done
       *before* deleting the stock fallback, or jointly.
-  - **Stage 3 caveat (shared heap):** pre-init *large* allocations may still land in
-    the stock shared heap via `caml_alloc_shr` (not yet measured). Measure that before
-    deleting the major GC + `shared_heap.c`; those pre-init majors (if any) need a
-    home (MMTk) or to be eliminated by moving MMTk-enable earlier.
+  - **Stage 2 essentially done** (2026-06-21): the stock minor GC's active machinery
+    is gone — promotion/oldify, ephe/custom minor cleaning, the whole minor
+    remembered-set (`major_ref` field + all its populators). What remains is *not*
+    dead-but-vacuous code: `caml_minor_collection` is still reached by `Gc.minor`
+    (`gc_ctrl.c:240`, runs the neutered STW empty), `caml_alloc_small_dispatch`'s
+    stock path handles TLAB refill, and `ephe_ref`/`custom` are still populated by
+    weak/custom ops. Those are kept until M6 (weak/ephemeron/finaliser) and the
+    dispatch are addressed.
+  - **Stage 3 scoping (major GC + `shared_heap.c`) — INTERWOVEN, do as a coordinated
+    effort:**
+    - `caml_finish_major_cycle` is already prevented under MMTk — `Gc.major`/
+      `full_major`/`compact` route to `caml_mmtk_collect` (mmtk.c), which triggers a
+      real MMTk collection instead (the stock cycle "corrupts the bypassed shared
+      heap"). The *auto* major slice (`domain.c:2154`) still fires if
+      `requested_major_slice` is set — need to confirm whether anything sets it under
+      MMTk (most setters are in the bypassed `caml_alloc_shr` stock path).
+    - `caml_darken` is **still called** from `weak.c` + `finalise.c` (the parked M6
+      features), so it (and the mark machinery it drives) cannot be deleted until
+      weak/ephemeron/finaliser are reworked on MMTk.
+    - `caml_shared_try_alloc` (the stock shared heap) is used by `intern.c`
+      (unmarshalling) and the dead `caml_alloc_shr` stock path. Measure pre-init
+      large allocations (do any land in the stock shared heap?) before deleting
+      `shared_heap.c`; those (if any) need an MMTk home or pre-init-window removal.
+    Net: stage 3 is gated on M6 (weak/ephemeron/finaliser) and the intern path — a
+    bigger coordinated change than the minor-GC excision.
   a. Reroute/neuter stock call sites in `domain.c` STW + `array.c` so always-on never
      invokes stock minor collection (MMTk drives collection).
   b. Remove the stock write-barrier fallback + `Ref_table` machinery
