@@ -19,7 +19,7 @@ use mmtk::vm::SlotVisitor;
 use mmtk::vm::{ObjectTracer, ObjectTracerContext, RootsWorkFactory, Scanning};
 use mmtk::Mutator;
 
-use mmtk_ocaml_common::scanning::scan_ocaml_object;
+use mmtk_ocaml_common::scanning::{continuation_stack, scan_ocaml_object};
 use mmtk_ocaml_common::slot::FieldSlot;
 
 use crate::active_plan::domain_addrs;
@@ -38,6 +38,15 @@ extern "C" {
         do_final_val: i32,
     );
     fn caml_scan_global_roots(f: ScanningAction, data: *mut c_void);
+    /// Scan a suspended fiber stack (and its parent chain) — used to trace the stack
+    /// held by a continuation block (runtime/fiber.c). `f` is called per root slot.
+    fn caml_scan_stack(
+        f: ScanningAction,
+        fflags: i32,
+        fdata: *mut c_void,
+        stack: *mut c_void,
+        v_gc_regs: *mut usize,
+    );
     /// Report a domain's weak arrays / ephemerons as strong roots (interim, until
     /// proper weak-reference processing) so they cannot dangle under MMTk.
     fn caml_mmtk_scan_ephe_roots(f: ScanningAction, data: *mut c_void, domain: *mut c_void);
@@ -117,6 +126,14 @@ extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) 
     buf.push(FieldSlot::from_address(Address::from_mut_ptr(slot)));
 }
 
+/// Callback handed to `caml_scan_stack` while tracing a continuation block: feed
+/// each fiber-stack slot to the GC worker's slot visitor. `data` points to a
+/// `&mut dyn SlotVisitor<FieldSlot>`.
+extern "C" fn visit_cont_stack_slot(data: *mut c_void, _v: usize, slot: *mut usize) {
+    let visitor = unsafe { &mut *(data as *mut &mut dyn SlotVisitor<FieldSlot>) };
+    visitor.visit_slot(FieldSlot::from_address(Address::from_mut_ptr(slot)));
+}
+
 pub struct VMScanning;
 
 impl Scanning<OCamlVM> for VMScanning {
@@ -184,6 +201,27 @@ impl Scanning<OCamlVM> for VMScanning {
         object: ObjectReference,
         slot_visitor: &mut SV,
     ) {
+        // A continuation block holds a suspended fiber stack (field 0) that is
+        // reachable only through this block; scan_ocaml_object treats Cont_tag as an
+        // ordinary block and skips it (field 0 reads as an immediate). Scan that
+        // stack (and its parent chain) via caml_scan_stack — the analogue of stock
+        // caml_darken_cont — feeding each stack slot to the slot visitor. Without
+        // this, a GC taken while a callback/continuation has detached the parent
+        // fiber chain reclaims live stack objects (crash on resume; cf. nested_fiber).
+        if let Some(stack) = continuation_stack(object) {
+            let mut dyn_visitor: &mut dyn SlotVisitor<FieldSlot> = slot_visitor;
+            let data = (&mut dyn_visitor as *mut &mut dyn SlotVisitor<FieldSlot>)
+                .cast::<c_void>();
+            unsafe {
+                caml_scan_stack(
+                    visit_cont_stack_slot,
+                    0,
+                    data,
+                    stack.to_mut_ptr::<c_void>(),
+                    core::ptr::null_mut(),
+                );
+            }
+        }
         scan_ocaml_object(object, slot_visitor);
     }
 

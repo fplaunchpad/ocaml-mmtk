@@ -3,13 +3,39 @@
 //! Every live OCaml block reached during tracing is passed here; we visit
 //! every field that may hold a heap pointer.
 
-use mmtk::util::ObjectReference;
+use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::SlotVisitor;
 
 use crate::header::{
-    tag_of, wosize_of, TAG_CLOSURE, TAG_FORWARD, TAG_INFIX, TAG_NO_SCAN, WORD_SIZE,
+    tag_of, wosize_of, TAG_CLOSURE, TAG_CONTINUATION, TAG_FORWARD, TAG_INFIX, TAG_NO_SCAN,
+    WORD_SIZE,
 };
 use crate::slot::FieldSlot;
+
+/// If `object` is a continuation block (Cont_tag), return the address of the
+/// suspended fiber `stack_info` it holds in field 0 (`Val_ptr(stack) = stack + 1`),
+/// or `None` if it is not a continuation or the stack has been consumed
+/// (`caml_continuation_use` leaves field 0 = `Val_unit`).
+///
+/// MMTk's `scan_ocaml_object` treats a Cont_tag block as an ordinary block, but its
+/// field 0 reads as an immediate (low bit set) so the stack is skipped — and that
+/// stack is reachable *only* through this block. The binding must therefore scan it
+/// via `caml_scan_stack` (the analogue of stock `caml_darken_cont`); this helper
+/// recovers the pointer (`Ptr_val`), keeping the layout knowledge in `common`.
+pub fn continuation_stack(object: ObjectReference) -> Option<Address> {
+    let base = object.to_raw_address();
+    let header: usize = unsafe { (base - WORD_SIZE).load() };
+    if tag_of(header) != TAG_CONTINUATION {
+        return None;
+    }
+    let field0: usize = unsafe { base.load() }; // Val_ptr(stack), or Val_unit if consumed
+    let stack = field0 & !1usize; // Ptr_val: clear the tag bit (Val_unit -> 0)
+    if stack == 0 {
+        None
+    } else {
+        Some(unsafe { Address::from_usize(stack) })
+    }
+}
 
 /// Visit all GC-visible pointer fields of an OCaml heap block.
 ///
