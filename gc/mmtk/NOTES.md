@@ -5,6 +5,50 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 2 scoping: excising the stock minor GC — entanglement + the bridge it burns
+
+*2026-06-21*
+
+The self-hosting gate is **met** (clean `make all` under MMTk on Immix *and*
+StickyImmix after the moving-GC fix), so M9 stage 2 (delete the stock minor GC) is
+unblocked on correctness. But it is **not** an isolated removal — audit of what's
+reachable under always-on:
+
+- `caml_minor_collection` — called from `array.c` and within `minor_gc.c`.
+- `caml_empty_minor_heap*` — woven through `domain.c` (STW handlers, domain
+  teardown, `caml_empty_minor_heaps_once`).
+- `caml_alloc_small_dispatch` — called from `signals_nat.c` (native alloc slow path)
+  and referenced by `mmtk.c`/`domain.c`.
+- `oldify_one`/`oldify_mopup` — internal to `minor_gc.c`.
+- `Ref_table_add` / remembered set — `array.c` and the *stock fallback* of the write
+  barrier in `memory.c` (after the `if (caml_mmtk_enabled) { region_barrier; return; }`
+  early-return — dead under always-on, modulo the caveat below).
+
+**Two couplings that gate the surgery:**
+1. **`MMTK_DISABLE` is the stock GC.** `MMTK_DISABLE=1` flips `caml_mmtk_enabled`
+   off and runs the *stock* collector — that is the M8 **benchmark baseline**
+   (MMTk vs stock). Deleting the stock GC means dropping `MMTK_DISABLE` and **losing
+   the ability to measure against stock**. So capture the M8 stock-vs-MMTk numbers
+   *before* excising — it burns that bridge.
+2. **`caml_mmtk_enabled` is also the pre-init readiness guard** (brief startup window
+   before MMTk init). The "dead" stock fallbacks can't be fully removed until
+   MMTk-init-before-first-alloc is done (a separate step); until then the pre-init
+   window can still reach them.
+
+**Proposed deletion order** (each independently buildable + testable; do it on the
+checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
+  a. Reroute/neuter stock call sites in `domain.c` STW + `array.c` so always-on never
+     invokes stock minor collection (MMTk drives collection).
+  b. Remove the stock write-barrier fallback + `Ref_table` machinery
+     (`memory.c`/`array.c`), keeping only MMTk's generational barrier.
+  c. Delete oldify/promotion + `caml_empty_minor_heap*` + `caml_minor_collection`
+     from `minor_gc.c`.
+  d. `caml_alloc_small_dispatch` → MMTk refill only.
+Then stage 3 (major GC + shared heap), stage 4 (domain/`Gc` module on MMTk stats),
+stage 5 (header color/mark-bit reconciliation).
+
+---
+
 ## ROOT-CAUSED + FIXED: the moving-GC bug — forwarding-pointer / `Infix_tag` collision
 
 *2026-06-20*
