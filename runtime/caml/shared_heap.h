@@ -109,16 +109,6 @@ Caml_inline status caml_allocation_status(void) {
     : caml_global_heap_state.UNMARKED;
 }
 
-void caml_redarken_pool(struct pool*, scanning_action, void*);
-
-intnat caml_sweep(struct caml_heap_state*, intnat);
-
-void caml_cycle_heap_from_stw_single(void);
-
-/* must be called on each domain
-   (after caml_cycle_heap_from_stw_single) */
-void caml_cycle_heap(struct caml_heap_state*);
-
 /* Heap invariant verification (for debugging) */
 void caml_verify_heap_from_stw(caml_domain_state *domain);
 
