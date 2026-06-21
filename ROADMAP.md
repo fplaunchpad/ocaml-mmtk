@@ -406,7 +406,19 @@ Stages (each independently buildable + testable):
    native StickyImmix — see `gc/mmtk/NOTES.md`).
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
    mark/sweep/slices/mark-stack/pool/LOS. `caml_alloc_shr`/`caml_alloc_small` go
-   straight to MMTk.
+   straight to MMTk. **🔴 Blocked on M6 — audited 2026-06-21 (see `gc/mmtk/NOTES.md`).**
+   The stock major collector is *not* dead under always-on MMTk: `caml_darken` is
+   still called from `weak.c`/`finalise.c`, and the cycle machinery
+   (`caml_finish_major_cycle`/`caml_finish_marking`/`caml_finish_sweeping` +
+   `caml_orphan_ephemerons`/`caml_orphan_finalisers`) is run at **every domain
+   termination** (`caml_domain_terminate`, reached at process exit) — plus the slice
+   is still driven by custom-block `caml_adjust_gc_speed` and the TLAB-half-fill
+   `advance_global_major_slice_epoch` epoch. It runs correctly today only because the
+   stock heap is near-empty (the pre-init handful) and `caml_darken` still marks live
+   stock objects before sweep; making it inert (slice + `caml_darken` no-ops) would
+   sweep those objects (use-after-free) or break termination's mark/orphan logic.
+   Removing it therefore **requires M6 first** — MMTk-native weak/ephemeron/finaliser
+   processing so termination + orphaning no longer route through the stock cycle.
 4. **Domain + `Gc` module cleanup**: remove the minor-heap arena
    (`allocate/free_minor_heap_arena`, the reservation) — the nursery comes from
    MMTk; reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk

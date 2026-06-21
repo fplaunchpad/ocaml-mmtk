@@ -5,6 +5,58 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 stage 3 audit: the stock *major* GC is still load-bearing under MMTk — gated on M6
+
+*2026-06-21*
+
+Stage 2 (stock minor GC) is done and validated (clean `make all` + `world.opt`,
+bytecode + native, Immix + StickyImmix, multi-domain). The next stage on paper is
+"delete the stock major GC + shared heap." Audit result: **it is not dead code —
+it is exercised on every run under always-on MMTk**, so it cannot be guarded-off and
+deleted without M6 (MMTk-native weak/ephemeron/finaliser). Mapping:
+
+**What still drives the stock major slice under MMTk** (`caml_request_major_slice`
+sets `requested_major_slice` directly → the auto-driver at `domain.c` ~2154 runs
+`caml_major_collection_slice`):
+- `caml_adjust_gc_speed` (`memory.c`) — custom-block off-heap accounting; fires once
+  `extra_heap_resources > 0.2`.
+- `advance_global_major_slice_epoch` (`domain.c`) — advances `caml_major_slice_epoch`
+  when a domain burns half its (TLAB) minor arena; the epoch check at `domain.c`
+  ~2141 then requests a slice.
+- (the `alloc_shr` stock path at `memory.c` ~458 is dead — after the
+  `if (caml_mmtk_enabled) return caml_mmtk_alloc_shr(...)` early-return.)
+
+**What runs the full cycle machinery under MMTk** — `caml_domain_terminate`
+(`domain.c` ~2300, reached at **process exit** for the last domain and on every
+`Domain.join`): `caml_finish_sweeping()` → `caml_finish_major_cycle(0)` (last
+domain) → `caml_finish_marking()` → `caml_orphan_ephemerons` / `caml_orphan_finalisers`,
+looping until no marking/sweeping work remains.
+
+**Why it works today and why a naive cut breaks:** the stock shared heap holds only
+the pre-init handful of `caml_alloc_shr` objects (everything after init is an MMTk
+object). The slice/cycle marks from roots via `caml_darken` (still called from
+`weak.c` ×4 and `finalise.c`), then sweeps. So:
+- Making the *slice* inert but leaving `caml_darken` live → `caml_darken` keeps
+  pushing to a mark stack nobody drains; `num_domains_to_mark`/`marking_done`
+  invariants drift.
+- Making `caml_darken` inert but leaving the *slice/cycle* live → mark phase marks
+  nothing, sweep frees the live pre-init stock objects → **use-after-free**; and
+  termination's mark/orphan logic breaks.
+- Making both inert → termination's `caml_orphan_ephemerons/finalisers` + the
+  finish-cycle still expect a coherent stock heap state.
+
+**Conclusion / order of work.** Stage 3 is **blocked on M6**, not on a clever guard.
+M6 = real MMTk weak-reference processing (a `Scanning::process_weak_refs` pass in the
+binding that, after transitive closure, queries `is_reachable` to clear dead weak
+slots / queue finalisable values), replacing today's conservative
+`caml_mmtk_scan_ephe_roots` (which keeps the entire ephemeron graph alive as strong
+roots). Once weak/ephemeron/finaliser no longer route through `caml_darken` and the
+stock cycle, `caml_domain_terminate` can drop the `caml_finish_*`/orphan calls, the
+slice drivers can be guarded under MMTk, and `major_gc.c`/`shared_heap.c` mark/sweep/
+slice/pool/LOS become genuinely dead and deletable. See [[mmtk-ocaml-bringup-plan]].
+
+---
+
 ## M9 stage 2 scoping: excising the stock minor GC — entanglement + the bridge it burns
 
 *2026-06-21*
