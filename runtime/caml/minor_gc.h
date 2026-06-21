@@ -67,7 +67,10 @@ struct caml_custom_elt {
 struct caml_custom_table CAML_TABLE_STRUCT(struct caml_custom_elt);
 
 struct caml_minor_tables {
-  struct caml_ref_table major_ref;
+  /* major_ref (the stock minor->major remembered set) is gone: under always-on
+     MMTk it is never populated — the write barrier records modified slots via
+     MMTk's region barrier instead. ephe_ref (weak/ephemerons) and custom (custom
+     blocks) are still populated. */
   struct caml_ephe_ref_table ephe_ref;
   struct caml_custom_table custom;
 };

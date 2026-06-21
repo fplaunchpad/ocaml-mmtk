@@ -101,15 +101,12 @@ struct caml_minor_tables* caml_alloc_minor_tables(void)
 
 static void reset_minor_tables(struct caml_minor_tables* r)
 {
-  reset_table((struct generic_table *)&r->major_ref);
   reset_table((struct generic_table *)&r->ephe_ref);
   reset_table((struct generic_table *)&r->custom);
 }
 
 void caml_free_minor_tables(struct caml_minor_tables* r)
 {
-  CAMLassert(r->major_ref.ptr == r->major_ref.base);
-
   reset_minor_tables(r);
   caml_stat_free(r);
 }
@@ -191,7 +188,6 @@ void caml_empty_minor_heap_domain_clear(caml_domain_state* domain)
 
   caml_final_empty_young(domain);
 
-  clear_table ((struct generic_table *)&minor_tables->major_ref);
   clear_table ((struct generic_table *)&minor_tables->ephe_ref);
   clear_table ((struct generic_table *)&minor_tables->custom);
 
