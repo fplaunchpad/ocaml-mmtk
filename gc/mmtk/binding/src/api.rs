@@ -45,6 +45,9 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // the other pass-through knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …).
 
     let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
+    // Whether this plan ever relocates objects. Only moving plans map the
+    // forwarding-bits side metadata, so only they may register the spec below.
+    let plan_moves = mmtk_instance.get_plan().constraints().moves_objects;
     SINGLETON
         .set(mmtk_instance)
         .ok()
@@ -55,11 +58,19 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // object's header (now a forwarding pointer) from a genuine Infix_tag header,
     // without this crate needing the VM type. Our object model uses a single fixed
     // layout (forwarding bits on the side), so one spec is all classify needs.
-    mmtk_ocaml_common::slot::set_forwarding_bits_spec(
-        *<crate::object_model::VMObjectModel as mmtk::vm::ObjectModel<OCamlVM>>::LOCAL_FORWARDING_BITS_SPEC
-            .as_spec()
-            .extract_side_spec(),
-    );
+    //
+    // ONLY for moving plans: a non-moving plan (NoGC, MarkSweep, …) never forwards
+    // and never maps this side metadata, so reading it would be a wild access (SEGV
+    // the first time classify sees an Infix_tag header). Leaving the spec unset
+    // makes is_forwarded() return false, which is correct there — nothing is ever
+    // forwarded, so every Infix_tag header is genuine.
+    if plan_moves {
+        mmtk_ocaml_common::slot::set_forwarding_bits_spec(
+            *<crate::object_model::VMObjectModel as mmtk::vm::ObjectModel<OCamlVM>>::LOCAL_FORWARDING_BITS_SPEC
+                .as_spec()
+                .extract_side_spec(),
+        );
+    }
 }
 
 /// Start MMTk GC worker threads.  Call once after `mmtk_ocaml_init`, before

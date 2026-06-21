@@ -5,6 +5,40 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Fix: `is_forwarded` broke non-moving plans; and the CI bug is RELOCATION, not a missed root
+
+*2026-06-21*
+
+Two results from a MarkSweep (non-moving) cross-check of the parser.cmo crash.
+
+**Bug fixed — the bug-#1 `is_forwarded` check crashed every non-moving plan.**
+`FieldSlot::classify` (slot.rs) calls `is_forwarded(addr)` on the `Infix_tag`
+branch (the bug-#1 forwarding-pointer/Infix disambiguation), which reads the
+forwarding-bits **side metadata**. The binding registered that spec
+unconditionally at init (`api.rs`), but **non-moving plans (MarkSweep, NoGC) never
+map it** — so the *first* infix-tagged field scanned read unmapped memory →
+deterministic SIGSEGV in `is_forwarded`. MarkSweep was 12/12 crash. Fix: register
+the spec **only when `plan.constraints().moves_objects`** is true; non-moving plans
+leave it unset, so `is_forwarded` returns `false` — correct there (nothing is ever
+forwarded, so every `Infix_tag` header is genuine). After the fix: MarkSweep
+**8/8 clean**, Immix/StickyImmix unchanged (bug-#1 fix intact). Run via
+`runtime/ocamlrun` (the `boot/ocamlrun` bootstrap binary is stale — rebuild
+relinks `runtime/`, not `boot/`).
+
+**The CI/ocamldoc bug is a RELOCATION bug, not a missed root.** With the above fix,
+MarkSweep runs parser.cmo **clean** (8/8) while StickyImmix/Immix still crash. A
+*missed root* would crash under MarkSweep too (the object would be collected); it
+doesn't, so the object stays **live** — it just **moves**, and a reference to it is
+**not updated**. Combined with the earlier findings (value-stack slots forwarded
+correctly; `caml_global_data`/globals scanned every GC), the un-updated reference
+is neither on the value stack nor in the globals: it is a pointer the interpreter
+holds **across a GC in a place that is marked-live but not relocation-updated** —
+e.g. a C-local/register copy other than `accu`/`env` (which `Setup_for_gc`
+publishes), or an interior/infix pointer mishandled on move. Next: record **Immix
+with `MMTK_IMMIX_ALWAYS_DEFRAG=1`** (forces a move every GC → deterministic, and
+Immix's metadata records under rr where StickyImmix's does not) and watch the
+specific reference go stale across one GC.
+
 ## Bug #2 / ocamldoc-CI: latent moving-GC crash — confirmed live + characterised
 
 *2026-06-21*
