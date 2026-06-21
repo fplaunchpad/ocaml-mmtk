@@ -31,13 +31,37 @@ MarkSweep runs parser.cmo **clean** (8/8) while StickyImmix/Immix still crash. A
 doesn't, so the object stays **live** — it just **moves**, and a reference to it is
 **not updated**. Combined with the earlier findings (value-stack slots forwarded
 correctly; `caml_global_data`/globals scanned every GC), the un-updated reference
-is neither on the value stack nor in the globals: it is a pointer the interpreter
-holds **across a GC in a place that is marked-live but not relocation-updated** —
-e.g. a C-local/register copy other than `accu`/`env` (which `Setup_for_gc`
-publishes), or an interior/infix pointer mishandled on move. Next: record **Immix
-with `MMTK_IMMIX_ALWAYS_DEFRAG=1`** (forces a move every GC → deterministic, and
-Immix's metadata records under rr where StickyImmix's does not) and watch the
-specific reference go stale across one GC.
+is neither on the value stack nor in the globals.
+
+**Plan matrix narrows it to the Immix-defrag forwarding path (NOT the generational
+barrier).** parser.cmo @ 64 MB, fresh runtime:
+- MarkSweep (never moves): **clean** (after the is_forwarded fix).
+- GenImmix (generational, *copying* nursery — always moves young): **clean** (6/6).
+- Immix + `MMTK_IMMIX_ALWAYS_DEFRAG=1` (full-heap defrag every GC): **clean** (6/6).
+- Immix (default, opportunistic defrag): **rare** crash (the CI ocamldoc case).
+- StickyImmix (sticky nursery collected *in Immix* + opportunistic defrag): **~25%**.
+
+GenImmix shares the generational write barrier and is clean → the bug is **not** the
+barrier. It is specific to **Immix-style in-place forwarding** (forwarding pointer
+in the header + side bits) exercised by StickyImmix's frequent young-in-Immix
+collection (and rarely by plain Immix). Notably `ALWAYS_DEFRAG` (move *everything*)
+is clean while *opportunistic* defrag crashes — so the trigger is **partial**
+moving: some objects relocate, some don't, in the same GC, and a reference assumes
+the wrong one. This is bug #1's exact area (the in-header forwarding ptr / Infix
+handling); bug #2 is a residual there. Verified *correct* so far: `FieldSlot::
+classify` / `load` / `store` (infix offset applied on both sides), and the write
+barrier (shared with clean GenImmix). Remaining suspects: the object **copy**
+(`copy_object`) under Immix defrag, closure **field-range scanning**
+(`scan_ocaml_object` TAG_CLOSURE/TAG_INFIX — note the stale "implement infix
+redirect in copy_object" TODO at common/scanning.rs:62), or a slot read **before**
+its referent is forwarded vs **after** (order-dependence, like bug #1).
+
+Next: this needs StickyImmix under rr, but StickyImmix's metadata won't record
+under rr (Immix/GenImmix/MarkSweep do). Options: (a) chase it on the existing
+`strcrash` StickyImmix trace looking for a slot that reads an *un-forwarded* object
+mid-defrag; (b) try recording plain Immix in a loop until the rare crash; (c) make
+the binding scan-time check (`MMTK_DEBUG_STACK_CHECK`) general — flag *any* traced
+slot whose load resolves to a forwarded object that the trace then fails to update.
 
 ## Bug #2 / ocamldoc-CI: latent moving-GC crash — confirmed live + characterised
 
