@@ -58,14 +58,22 @@ checkpointed `5.5+mmtk` head, build + `sanity` + regression each step):
         `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`,
         `try_update_object_header` (−483 lines, build warning-clean; verified under
         StickyImmix + Immix: parser.ml, multi-domain, Array.make).
-      • TODO: `ephe_clean_minor`/`custom_finalize_minor` (vacuous STW calls — neuter
-        then delete), `caml_empty_minor_heap_domain_clear`, the remembered-set tables
-        (`major_ref`/`ephe_ref`/`custom`, only populated by the stock write barrier
-        which MMTk bypasses), the `caml_minor_collection` entry. Then stage 3
+      • ✅ delete `ephe_clean_minor` (guarded by `prom.locked_ephemerons`, always
+        false now) and `custom_finalize_minor` (body fully `Is_young`-gated → vacuous;
+        custom finalization is MMTk's job, parked). Verified incl. a custom-block
+        test (Int64 + channels).
+      • TODO (interwoven — do as a coordinated change, with native + finalizer +
+        write-barrier tests): `caml_empty_minor_heap_domain_clear` + the remembered-set
+        tables (`major_ref`/`ephe_ref`/`custom`) + the stock write-barrier fallback in
+        `memory.c` (Ref_table/darken — dead under always-on but the write barrier is a
+        hot path used by native too) + the custom-table population
+        (`add_to_custom_table` in `custom.c`/`intern.c`) + the `caml_minor_collection`
+        entry + the stock path of `caml_alloc_small_dispatch`. Then stage 3
         (major GC + `shared_heap.c`).
       KEEP: the all-domains minor-empty STW skeleton (`caml_empty_minor_heaps_once`
       etc.) — the domain spawn/terminate rendezvous.
-    Build + boot (`ocamlc`) + multi-domain after each step.
+    Build + boot (`ocamlc`) + multi-domain after each step. (Full `make all` under
+    StickyImmix re-validated after the oldify deletion: 0 crashes, 0 errors.)
   - **Stage 3 caveat (shared heap):** pre-init *large* allocations may still land in
     the stock shared heap via `caml_alloc_shr` (not yet measured). Measure that before
     deleting the major GC + `shared_heap.c`; those pre-init majors (if any) need a
