@@ -5,6 +5,30 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Default-on M6 validated by full bootstrap; bug #5: fuzzer OOM hang
+
+*2026-06-21*
+
+`MMTK_WEAK_REFS` is now ON by default. Validated under the heavy stress test — a full
+`make clean && make world` bootstrap, where the **compiler's own internal Weak
+hashtables now actively clear** (vs the old keep-alive). Results: clean bytecode
+bootstrap on **Immix and StickyImmix**, clean native `world.opt`, and a clean
+core/lib testsuite spot-check (`basic` 76/76, all `lib-*`). So weak-clearing under
+the real compiler workload is correct. This is the green light for the M9 stage-3
+removal (next).
+
+**bug #5 (separate, not weak-ref): `lib-marshal/fuzzy` hangs under MMTk.** The fuzzer
+flips random bytes in a marshalled buffer then `Marshal.from_bytes`, expecting a
+`Failure`/`Invalid_argument`/`Out_of_memory` it catches. At `-n ≥ 100` the `ocamlrun`
+child pins 100% CPU at a flat ~16 MB RSS and never completes (not OOM-killed, not
+SIGSEGV; `-n 50` completes fine). Likely a corrupted length field makes the
+unmarshaler request an absurd allocation that, under MMTk, **spins in the
+allocator/GC instead of raising `Out_of_memory`** (which the test would catch). An
+OOM-surfacing behavioural difference (MMTk allocation-failure → OCaml exception path),
+not a GC-correctness bug. Deferred.
+
+---
+
 ## M6 is solid: pr5233 fixed (full_major must be exhaustive); "1/8" was a harness artifact
 
 *2026-06-21*
