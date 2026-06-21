@@ -54,8 +54,8 @@ integration comes later.
 | M3 | **Immix** (moving): infix-pointer fixup, clean `Out_of_memory` | ✅ done |
 | M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans), single- **and** multi-domain; staticlib auto-linked | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers | ⏸ parked |
-| M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 dirs (tabled-feature tests disabled); broader dirs next | 🟡 |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **implemented + validated**, gated by `MMTK_WEAK_REFS` (default off = memory-safe interim). Flag-on: weak refs clear, ephemeron data releases, `Gc.finalise`/`finalise_last` run | 🟢 implemented (gated) |
+| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass**; failures are unsupported features (weak/finaliser — fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) + 1 multidomain-StickyImmix SIGSEGV (bug #3). Default Immix clean | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
 | M9 | **MMTk-only: excise the stock GC** — MMTk always-on (done), then delete the stock minor/major GC + shared heap | 🟡 in progress |
 | — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | ✅ |

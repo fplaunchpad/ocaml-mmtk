@@ -35,8 +35,8 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | — | Pinning: validated under forced defrag (broaden via M7); evacuation-time OOM assert remains | 🟡 |
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers (interim scheme is memory-safe but never clears; `process_weak_refs` design pinned — unblocks M9 stage 3) | ⏸ parked (design ready) |
-| M7 | Pass the OCaml testsuite — core passes under TLAB Immix: **95/96** across 14 `basic*`/`callback`/etc. dirs (ASLR off via `setarch -R`, tabled-feature tests disabled). Lone miss = a benign bytecode signal-delivery-timing diff (native passes). Broader dirs next. | 🟡 |
+| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **implemented + validated**, gated by `MMTK_WEAK_REFS` (default off = memory-safe interim that never clears). Flag-on: weak refs clear, ephemeron data releases, `Gc.finalise`/`finalise_last` run. Unblocks M9 stage 3. | 🟢 implemented (gated) |
+| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). Default Immix clean. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — make MMTk always-on, then delete the stock minor/major GC + shared heap; `mmtk-ocaml` becomes a single-GC runtime | 🟡 in progress |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
@@ -191,19 +191,21 @@ this finding).
 
 ### E. Runtime feature support
 OCaml semantics MMTk must preserve:
-- **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) — interim
-  `caml_mmtk_scan_ephe_roots` roots the `domain->ephe_info` lists so they don't
-  dangle. It is **memory-safe under moving plans now**: it pins each ephemeron block
-  (`mmtk_ocaml_pin_object`) so the block can't relocate, and reports its interior
-  fields as *updatable* root slots so live keys/data are forwarded. The limitation is
-  *semantic*, not safety: it keeps the entire ephemeron graph alive, so **weak refs
-  never clear** and dead keys are never tombstoned. Proper fix = MMTk-native weak-ref
-  processing via `Scanning::process_weak_refs` — **concrete design pinned in
-  `gc/mmtk/NOTES.md` (M6 design, 2026-06-21)**; this is the unblock for M9 stage 3.
-- **Finalisers** — first-class (`Gc.finalise`) and last-ditch
-  (`Gc.finalise_last`). Don't run yet — the root scan passes `do_final=1` to keep
-  *all* finalisable values alive (so they leak). Handled by the same
-  `process_weak_refs` pass (retain-one-cycle + enqueue) in the M6 design.
+- **Weak arrays & ephemerons** (`Weak`, `Ephemeron`, `Weak.Make`, …) — two schemes,
+  selected by `MMTK_WEAK_REFS`:
+  - *default (off)* — interim `caml_mmtk_scan_ephe_roots` roots the
+    `domain->ephe_info` lists, pinning each ephemeron block and reporting its fields
+    as updatable root slots. Memory-safe under moving plans, but keeps the whole
+    ephemeron graph alive: **weak refs never clear**.
+  - *on* — **`Scanning::process_weak_refs` (M6, implemented + validated)**: ephemeron
+    mark fixpoint (retain data iff all keys reachable) + clean pass (clear dead
+    keys/data, forward survivors). Weak refs clear and dead keys tombstone correctly.
+- **Finalisers** — first-class (`Gc.finalise`) and last-ditch (`Gc.finalise_last`).
+  *Default (off)*: don't run — the root scan passes `do_final=1`, keeping all
+  finalisable values alive (they leak). *`MMTK_WEAK_REFS` on*: **run** — the same
+  `process_weak_refs` pass retains+enqueues dead `finalise` values (passed to the
+  finaliser) and enqueues dead `finalise_last` values (as unit); root scan uses
+  `do_final=0` so values can become unreachable. Validated on StickyImmix + Immix.
 - **Lazy values** — work today (ordinary mutable blocks; no special GC support
   needed). Verified under MarkSweep + Immix.
 - **`Gc` module** — ✅ `Gc.major`/`full_major`/`compact`/`major_slice` now route
@@ -299,16 +301,19 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   suite under `setarch $(uname -m) -R`** (ADDR_NO_RANDOMIZE, inherited) → flakiness
   gone (0/40). A binding-side deterministic-metadata fix is a follow-up.
 - **Run recipe**: build `testing.{cma,cmxa}`, then `setarch $(uname -m) -R env
-  MMTK_ENABLED=1 MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=2048 make -C testsuite one
-  DIR=tests/<dir>` (native nursery mode auto-selected from the plan).
-- **Definitive result (ASLR off, tabled tests disabled): 95/96** across `basic`,
-  `basic-float`, `basic-more`, `basic-io`(+2), `basic-manyargs`, `basic-modules`,
-  `basic-multdef`, `basic-private`, `array-functions`, `callback`, `runtime-errors`,
-  `exotic-syntax`, `extension-constructor`, `letrec`, `letmodule`, `comparisons`.
-  The single miss is `callback/signals_alloc.ml` **bytecode** variant: a signal is
-  delivered one allocation-step differently under MMTk (`01243` vs `01234`) — the
-  signal *is* handled; benign timing, and the **native** variant passes. Every
-  other sampled "failure" across the journey was tabled-feature, missing-`testing.cma`,
+  MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=2048 make -C testsuite one DIR=tests/<dir>`
+  (MMTk is always-on; native nursery mode auto-selected from the plan). For a full
+  bytecode run set `native_compiler=false`/`native_dynlink=false` in
+  `ocamltest/ocamltest_config.ml` and use a per-dir timeout cap.
+- **Definitive result — full bytecode suite under StickyImmix (2026-06-21): 1476/1524
+  pass.** All core dirs pass. The 48 non-pass: 1 real regression (bug #3,
+  `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only — see
+  `gc/mmtk/NOTES.md`) + 47 unsupported-feature failures (weak/finaliser, now fixed by
+  `MMTK_WEAK_REFS=1`; `Gc.stat`/memprof/runtime-events). The earlier narrow run
+  (95/96 across 14 `basic*`/`callback` dirs under TLAB Immix) is superseded.
+  One benign known diff: `callback/signals_alloc.ml` **bytecode** variant delivers a
+  signal one allocation-step differently under MMTk (`01243` vs `01234`) — the signal
+  *is* handled; **native** passes. Every other sampled "failure" was tabled-feature, missing-`testing.cma`,
   or ASLR-flake — never an MMTk correctness difference (output byte-identical to stock).
   Next: extend to more dirs (`lib-*`, `typing-*`, `effects` [fibers], `tool-*`).
 

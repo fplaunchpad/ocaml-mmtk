@@ -5,6 +5,83 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Testsuite baseline under StickyImmix (M9 stage-2 tree) + a new multidomain repro
+
+*2026-06-21*
+
+Ran the bytecode testsuite on the committed stage-2 tree (`26c86d681a`) under
+`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=512` (default flag-off scheme). Result:
+**1524 tests → 1476 PASS, 48 non-PASS.** All core dirs pass (basic*, lib-* data
+structures, float, effects, exceptions, callback, parallel bar one). Harness notes
+for next time: build with `make world` (not `make all` — a fresh tree has no
+`boot/ocamlrun`); set `native_compiler=false`/`native_dynlink=false` in
+`ocamltest/ocamltest_config.ml` or every test's native variant errors and masks the
+bytecode result; run per-dir with a ~120s/test cap (serial `make all` hangs on the
+finaliser tests). Full log on turing `/tmp/testsuite-stickyimmix.log`.
+
+**Real regression (1) — new repro, bug #3:**
+`tests/parallel/domain_parallel_spawn_burn_gc_set.ml` **SIGSEGVs deterministically
+under StickyImmix** (every run) but prints `ok`/exits 0 **under Immix** (every run).
+Multi-domain test that hammers `Gc.set` + `Gc.minor`/`Gc.major` + `Domain.spawn`.
+StickyImmix-specific (generational/moving) + multi-domain — the same class as the
+tight-heap root-coverage gap (bug #2). Default plan is Immix (passes), so it does
+not block the default, but it is a genuine moving+multidomain bug to root-cause
+(likely a missed/!forwarded root on the spawn/STW path under a generational plan).
+
+**The other 47 are known-unsupported, none are crashes**, and they split into
+buckets — importantly, two of them are exactly what **M6 (`MMTK_WEAK_REFS=1`)
+fixes**, so they double as M6's broader acceptance test:
+- *finalisers don't fire* (6): `c-api/alloc_async`, `backtrace/callstack`,
+  `lib-threads/tls`, `lib-sys/opaque`, `regression/pr3612`, `callback/signals_alloc`
+  — **M6 should fix.**
+- *weak refs don't clear* (2): `regression/pr5233`, `tool-ocaml/t340-weak` —
+  **M6 should fix.**
+- *Gc.stat/counters differ from stock* (6: `misc/gcwords`, `lib-obj/with_tag`,
+  `regression/pr7798`, `lib-bigarray/subarraystub`, `parallel/major_gc_wait_backup`,
+  `tool-ocaml/t350-heapcheck`) — M9 stage-4 (`Gc.stat` on MMTk numbers), not M6.
+- *statmemprof* (18) — `Gc.Memprof` sampling unsupported by MMTk.
+- *lib-runtime-events* (8) — MMTk doesn't emit stock `EV_MINOR/EV_MAJOR`.
+- build-infra quirks (`output-complete-obj` custom relink misses `libmmtk_ocaml.a`;
+  2 slow-not-hung timeouts) — not GC bugs.
+
+---
+
+## M6 implemented + validated (gated by `MMTK_WEAK_REFS`)
+
+*2026-06-21*
+
+The M6 design below is now **implemented and validated**, merged to `m9-mmtk-only`
+behind `MMTK_WEAK_REFS=1` (default off — the conservative `caml_mmtk_scan_ephe_roots`
+keep-all-alive scheme is still the default, so behaviour is unchanged unless the flag
+is set). What landed:
+
+- `process_weak_refs` (scanning.rs) runs a two-phase pass: an **ephemeron mark
+  fixpoint** (retain data only when all keys are reachable) interleaved with
+  **finalise-first** retention (ordered *after* ephemeron marking converges each
+  round, so a value reachable via a live ephemeron's data is never finalised
+  early), then a **cleanup** phase (clear dead ephemeron keys/data, queue dead
+  `finalise_last` values as unit, forward all survivors).
+- C glue: `caml_mmtk_ephe_mark_pass`/`_clean_pass` (runtime/mmtk.c) and
+  `caml_mmtk_final_update_first`/`_cleanup` (runtime/finalise.c), driven by
+  is_reachable/forward/retain callbacks that the binding closes over the GC
+  worker's tracer. Under the flag the root scan passes `do_final_val=0` (keep
+  finaliser *functions* + the run-queue alive, let table *values* die).
+- Finalisers actually **run** now (under the flag) — `Gc.finalise` and
+  `Gc.finalise_last` both fire.
+
+**Validation (turing, StickyImmix + Immix, 32 MB heap):** weak-clear/ephemeron
+smoke `ALL PASS` ×11, finaliser smoke `PASS` ×5; flag-off baseline reproduces the
+expected "never clears" behaviour; **no crash, no sanity panic, and no live
+referent/key ever wrongly cleared** (the memory-safety invariant). Smoke tests are
+narrow but cover the core machinery; broader validation = re-enable the tabled
+weak/ephemeron/finaliser testsuite dirs and run them under the flag (pending).
+
+**Next (M9 stage 3 unblock):** broader testsuite validation → flip the default →
+remove the conservative scheme + the stock major GC (the removal cascade in the
+stage-3 audit entry below).
+
+---
+
 ## M6 design: MMTk-native weak/ephemeron/finaliser via `Scanning::process_weak_refs`
 
 *2026-06-21*
