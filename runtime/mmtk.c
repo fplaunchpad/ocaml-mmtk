@@ -59,13 +59,14 @@ static int caml_mmtk_collects = 0;
 static int caml_mmtk_generational = 0;
 static int caml_mmtk_collection_started = 0;
 
-/* M6 (experimental, gated by MMTK_WEAK_REFS=1): drive MMTk-native weak-reference
-   / ephemeron processing via the binding's Scanning::process_weak_refs instead of
-   the conservative caml_mmtk_scan_ephe_roots scheme (which keeps the whole
-   ephemeron graph alive — weak refs never clear). Off by default until validated
-   against the weak/ephemeron/finaliser testsuite; see gc/mmtk/NOTES.md (M6 design).
-   Read by the binding (scanning.rs) at the start of weak processing. */
-int caml_mmtk_weak_refs = 0;
+/* M6: MMTk-native weak-reference / ephemeron / finaliser processing via the
+   binding's Scanning::process_weak_refs (weak refs clear, ephemeron data releases
+   on dead keys, Gc.finalise/finalise_last + custom-block finalizers run). Now ON by
+   default; set MMTK_WEAK_REFS=0 to fall back to the conservative
+   caml_mmtk_scan_ephe_roots scheme (keep the whole ephemeron graph alive — never
+   clears). The opt-out is transitional, to be removed with the conservative scheme
+   in M9 stage 3. See gc/mmtk/NOTES.md. */
+int caml_mmtk_weak_refs = 1;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
  * space. Conservative: smaller than the smallest line/block in collecting
@@ -104,8 +105,9 @@ void caml_mmtk_init(void)
                            || strcmp(plan, "GenCopy") == 0);
 
   {
+    /* On by default; MMTK_WEAK_REFS=0 opts out to the conservative scheme. */
     const char *wr = getenv("MMTK_WEAK_REFS");
-    caml_mmtk_weak_refs = (wr != NULL && wr[0] == '1');
+    caml_mmtk_weak_refs = (wr == NULL || wr[0] != '0');
   }
 
   if (getenv("MMTK_VERBOSE") != NULL) {
