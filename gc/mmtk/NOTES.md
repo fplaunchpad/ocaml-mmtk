@@ -121,12 +121,33 @@ GC) is just whichever live pointer happened to sit in the misread slot.
 This reframes the bug: **a stack-pointer accounting error**, GC-triggered (Sticky­
 Immix's per-minor-GC moving makes it deterministic; Immix opportunistic → rare),
 consistent with the clean forwarded-check (an imbalance is not an unforwarded
-slot). Prime suspect: a `Setup_for_gc`/`Restore_after_gc` (−3/+3) vs
-`Setup_for_c_call`/`Restore_after_c_call` (−2/+2) mismatch, or `current_stack->sp`
-changing across an allocation's STW so `Restore_after_gc`'s reload lands wrong.
-Next: forward-step from event 1795 watching `sp` (and `current_stack->sp`) across
-each Setup/Restore and the final RETURN to find where `sp` diverges from the real
-frame at `0x1080`.
+slot).
+
+**Root chain traced (forward watch from event 1795 — reliable).** The last write
+to the crash's `sp[0]` slot (`0x619797ff1038`) is `interp.c:509` `sp[0] = arg1`
+inside **APPLY2**, with `arg1 = 0x1` (the integer `0` — the *first argument*). So
+`do_return` later reads that argument slot as the return PC (`pc=0x1`) → SIGSEGV.
+At that APPLY2, `accu` (the applied closure) = `0x2010336c9d0`: a **valid
+`Closure_tag` block** (hdr `0x8f7`, wosize 2) with a **valid code pointer**
+`0x7484011199d0` (in `[prog,prog+size)`) — but `closinfo = 0x5`, i.e. **arity 0**.
+Applying an arity-0 closure via APPLY2 (2 args) is nonsensical: `accu` holds the
+**wrong closure** (valid memory, wrong function). The arity/`extra_args` dance then
+miscounts and leaves `sp` misaligned, so `do_return` reads an argument as the
+return frame.
+
+**So the primary corruption is a wrong/stale closure in the `accu` *register*** —
+not the value stack (hence the clean forwarded-check; `accu` lives in a C register,
+`r13`). Likely a closure that moved in a GC where `accu` was not published as a
+root, its old address then reused by the arity-0 closure now in `accu`. **Prime
+suspect: `Setup_for_c_call` (interp.c:105) publishes `env` + `pc+1` but NOT `accu`**
+— and the last GC before the crash (event 1795) looked like a C-call GC (published
+`sp[0]=env=heap`, `sp[1]=0x748401102704=pc+1`). If a bytecode C primitive can leave
+a live closure in `accu` across its allocation-triggered GC, `accu` goes stale.
+(Stock OCaml's C primitives root their own args, so this may be an interpreter-side
+gap specific to how MMTk collects mid-primitive.) Next: confirm whether `accu` at
+the APPLY2 should have been a different (live) closure — trace `accu`'s last load
+before the APPLY2 and check whether its source moved across a C-call GC; then audit
+`accu` liveness across `Setup_for_c_call`/`Enter_gc` on the C_CALL opcodes.
 
 ## M6 fix: adopt orphaned finalisers under MMTk (cross-domain handover)
 
