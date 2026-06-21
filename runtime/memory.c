@@ -186,40 +186,26 @@ Caml_inline void write_barrier(
 {
   /* HACK: can't assert when get old C-api style pointers
     CAMLassert (Is_block(obj)); */
+  (void)old_val; (void)new_val;
 
+  /* MMTk owns the heap, so OCaml's stock write barrier (the minor remembered-set
+     update and the major SATB deletion barrier caml_darken) is gone — its GC state
+     is bypassed. The bytecode runtime records the modified slot via MMTk's region
+     barrier instead: needed by the generational plans (GenImmix/StickyImmix), a
+     no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address (for
+     caml_modify, field is 0). caml_mmtk_enabled is false only in the brief pre-init
+     window, where there are no young objects to remember. */
 #ifndef NATIVE_CODE
-  /* Under MMTk the heap is managed by MMTk, not OCaml's generational/incremental
-     major GC. OCaml's own write barrier (the SATB deletion barrier caml_darken
-     on the old value, and the minor remembered-set update) operates on GC state
-     we have bypassed and must not run. Instead, remember the modified slot via
-     MMTk's barrier — needed by MMTk generational plans (GenImmix/StickyImmix),
-     a no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address
-     (for caml_modify, obj is the field pointer and field is 0). */
   if (caml_mmtk_enabled) {
     caml_mmtk_region_barrier(Op_val(obj) + field, 1);
-    return;
   }
-  /* In vanilla-minor mode, fall through to the stock write barrier: it maintains
-     the minor remembered set (Ref_table_add) for MMTk(major)->minor pointers,
-     which the stock minor GC scans as roots. caml_darken (stock-major SATB) is
-     a no-op because the stock major GC never starts marking under MMTk. */
+#else
+  /* Native caml_modify does not (yet) call the MMTk region barrier — fine for the
+     default non-generational Immix; a gap for native StickyImmix's old->young
+     remembering (see gc/mmtk/NOTES.md). Keeping it a no-op avoids per-write barrier
+     overhead on the default native fast path. */
+  (void)obj; (void)field;
 #endif
-
-  if (!Is_young(obj)) {
-
-    if (Is_block(old_val)) {
-       /* if old is in the minor heap,
-          then this is in a remembered set already */
-       if (Is_young(old_val)) return;
-       /* old is a block and in the major heap */
-       if (caml_marking_started())
-         caml_darken(Caml_state, old_val, 0);
-     }
-     /* this update is creating a new link from major to minor, remember it */
-     if (Is_block_and_young(new_val)) {
-       Ref_table_add(&Caml_state->minor_tables->major_ref, Op_val(obj) + field);
-     }
-   }
 }
 
 CAMLno_tsan /* We remove the ThreadSanitizer instrumentation of memory accesses
