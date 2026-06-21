@@ -108,7 +108,11 @@ via `runtime/ocamlrun` (the `boot/ocamlrun` bootstrap binary is stale — rebuil
 relinks `runtime/`, not `boot/`). **Validated broadly: the full bytecode testsuite
 under MarkSweep now passes 1367 (140 skipped, 44 failed — the failures are the
 known-unsupported set: statmemprof/runtime-events/Gc.stat + by-design, same class
-as Immix). Before the fix MarkSweep crashed on essentially every test.**
+as Immix). Before the fix MarkSweep crashed on essentially every test.** No
+regression on the default plan either: the full suite under **Immix** passes 1366
+(140 skipped, 45 failed — same failure profile; the +1 vs MarkSweep is consistent
+with the rare moving-GC bug #2). So this session's changes (finaliser-handover fix,
+`is_forwarded` gating, gated debug tooling) leave Immix unregressed.
 
 **The CI/ocamldoc bug is a RELOCATION bug, not a missed root.** With the above fix,
 MarkSweep runs parser.cmo **clean** (8/8) while StickyImmix/Immix still crash. A
