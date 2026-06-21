@@ -5,6 +5,47 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M6 is solid: pr5233 fixed (full_major must be exhaustive); "1/8" was a harness artifact
+
+*2026-06-21*
+
+Two findings resolve the M6 picture — it is in good shape, and the major-GC removal
+is unblocked.
+
+**(1) `regression/pr5233` root-caused + fixed.** Symptom: a weakly-reachable value
+was over-retained (weak slot never cleared) — but ONLY under StickyImmix, and only
+for **large-object-space** values. Isolated with a minimal test (`Weak.set` a 1 MB
+Bytes, `Gc.full_major` ×3, check): StickyImmix → RETAINED, Immix → CLEARED; small
+values clear on both. Root cause: `Gc.major`/`full_major`/`compact` routed to
+`memory_manager::handle_user_collection_request(mmtk, tls)`, which calls
+`handle_user_collection_request(tls, false, false)` — **exhaustive=false**. Under a
+generational plan (StickyImmix/GenImmix) a non-exhaustive user GC is a *nursery*
+collection, so mature/LOS objects are never re-traced and weakly-reachable ones
+never get reclaimed. Immix is non-generational (every GC is full) so it was masked
+there. Fix: the binding now calls `mmtk().handle_user_collection_request(tls, true,
+true)` (force + exhaustive) so `Gc.full_major` is a true full-heap collection on
+every plan. Verified: rd.ml LOS-weak CLEARs, distilled + **real pr5233 now print the
+reference output** under StickyImmix. (This is a general StickyImmix correctness fix,
+not weak-specific — `Gc.full_major` now reclaims mature garbage as promised.)
+
+**(2) "M6 fixes only 1/8 targeted tests" was a measurement artifact.** The full
+`make parallel` runs reported most weak/finaliser tests failing, but re-running each
+**in isolation** shows they PASS deterministically — flag-on AND flag-off. The
+parallel-harness failures are `sh: 1: : Permission denied` from ocamltest's
+output-comparison subprocess under load (the tree built with `WITH_OCAMLTEST=` empty),
+not GC/flag effects. So M6 introduces **no regressions** and the real weak/finaliser
+behaviour is correct. Genuine remaining testsuite failures are **non-M6**:
+`statmemprof/*` (Gc.Memprof unsupported), `lib-runtime-events/*` (stock EV_* not
+emitted), `misc/gcwords`+`Gc.stat` accounting (M9 stage-4), `c-api/alloc_async`
+(separate hang), and the flaky multidomain spawn-burn crashes (bug #3, pre-existing,
+crash flag-off too).
+
+**Status:** M6 (weak arrays, ephemerons, `Gc.finalise`/`finalise_last`, custom-block
+finalizers) works under both Immix and StickyImmix with `MMTK_WEAK_REFS=1`. Next:
+flip the default on, then proceed with the M9 stage-3 removal cascade.
+
+---
+
 ## M6 custom-block finalize landed (pr3612 passes); pr5233 over-retention still open
 
 *2026-06-21*
