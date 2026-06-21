@@ -315,36 +315,6 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
   return result;
 }
 
-static void ephe_clean_minor (caml_domain_state* domain)
-{
-  struct caml_ephe_ref_table table =
-    domain->minor_tables->ephe_ref;
-  for (struct caml_ephe_ref_elt* re = table.base; re < table.ptr; re++) {
-    value v = re->locked;
-    if (v == Val_unit)
-      continue;
-    /* This runs after the barrier: any promotion has completed,
-       so we don't need to get_header_val / spin_on_header */
-    header_t hd = Hd_val(v);
-    mlsize_t infix_offset = 0;
-    if (Tag_hd(hd) == Infix_tag) {
-      infix_offset = Infix_offset_hd(hd);
-      v -= infix_offset;
-      hd = Hd_val(v);
-    }
-    CAMLassert(Tag_hd(hd) != Infix_tag);
-    if (hd == 0) {
-      /* promoted */
-      v = Field(v, 0) + infix_offset;
-    } else {
-      /* collected */
-      v = caml_ephe_none;
-      atomic_store_relaxed(Ephe_data_addr(re->ephe), caml_ephe_none);
-    }
-    atomic_store_release(Op_atomic_val(re->ephe) + re->offset, v);
-  }
-}
-
 /* Finalize dead custom blocks and do the accounting for the live
    ones. This must be done right after leaving the barrier. At this
    point, all domains have finished minor GC, but this domain hasn't
@@ -456,15 +426,10 @@ caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
   }
 
   caml_gc_log("running stw empty_minor_heap_promote");
-  promote_result prom =
-    caml_empty_minor_heap_promote(domain, participating_count, participating);
-
-  if (prom.locked_ephemerons) {
-    CAML_EV_BEGIN(EV_MINOR_EPHE_CLEAN);
-    caml_gc_log("cleaning minor ephemerons");
-    ephe_clean_minor(domain);
-    CAML_EV_END(EV_MINOR_EPHE_CLEAN);
-  }
+  /* Under always-on MMTk, promote no longer oldifies, so it never locks
+     ephemerons (locked_ephemerons is always false); the stock minor ephemeron
+     clean is dead. */
+  caml_empty_minor_heap_promote(domain, participating_count, participating);
 
   CAML_EV_BEGIN(EV_MINOR_MEMPROF_CLEAN);
   caml_gc_log("updating memprof");
