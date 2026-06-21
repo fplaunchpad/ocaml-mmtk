@@ -40,10 +40,38 @@ GenImmix/MarkSweep clean.
 
 Suspects for the ~3-slot drift: a `Setup_for_gc`/`Restore_after_gc` (±3) mismatch
 around an allocation-triggered GC, or a `GRAB`/`RESTART` `num_args =
-Wosize_val(env) - 3` miscount if `env`'s closure is briefly wrong. Next: on the
-fresh trace, reverse/forward-track `sp` (r14) across the opcodes preceding the ACC5
-to find where it diverges by ~3 from the frame structure (find the unmatched
-push/pop or the GC Setup/Restore around which sp drifts).
+Wosize_val(env) - 3` miscount if `env`'s closure is briefly wrong.
+
+**Audit complete — every component on the relocation/alloc path is correct, so the
+root is upstream and subtle:**
+- Roots: generalized stale-root check (all of `caml_do_roots` + `caml_scan_global_roots`)
+  CLEAN across crashes. Not a mis-relocated root.
+- Object copy (`common::copy_object`): correct — `get_current_size = (wosize+1)*WORD`,
+  bulk `copy_nonoverlapping` of header + all fields (preserves code/closinfo/infix).
+- `FieldSlot::classify`/`load`/`store`: correct (infix offset applied both sides).
+- Write barrier: shared with GenImmix (which is clean) → not the barrier.
+- Fiber/value stacks: `mmap`/`caml_stat_alloc`'d (fiber.c `alloc_for_stack`), NOT in
+  the MMTk heap → MMTk never relocates them → `sp`/`current_stack` are stable.
+- `Alloc_small` MMTk path (memory.h): balanced — `Setup_for_gc` (−3) /
+  `Restore_after_gc` (+3) with a temp so `accu`/`env` aren't clobbered.
+
+So the bug is neither a stale heap reference nor a missed/mis-relocated root nor an
+unbalanced GC publish — it is a **subtle Immix in-place-defrag interaction** (the
+only thing unique to the crashing plans: StickyImmix collects young *in Immix* with
+opportunistic in-place defrag; GenImmix copies young to a separate space and is
+clean; MarkSweep never moves and is clean; `ALWAYS_DEFRAG` moves everything and is
+clean → the trigger is *partial* in-place moving). It surfaces far downstream as
+`sp`-accounting drift / control-flow corruption (the drift propagates through
+calls, so its origin is upstream of the crashing frame).
+
+**Handoff for the focused next session.** Record a fresh trace with
+`rr record --num-cores=1` (StickyImmix, 64 MB) and drive it *interactively*: from
+the crash, reverse to the function's entry (the APPLY that pushed the return frame
+visible at `sp[2]`) and forward-step tracking `sp` (r14) to find the first opcode
+or GC where `sp` diverges by ~3 from the frame structure; then determine why
+(unmatched push/pop, or a value used for the push/pop count that a partial defrag
+left wrong). The gated `MMTK_DEBUG_STACK_CHECK` tooling + the `--num-cores=1`
+recording method are the enablers.
 
 ## Fix: `is_forwarded` broke non-moving plans; and the CI bug is RELOCATION, not a missed root
 
