@@ -122,7 +122,19 @@ item is in the workstreams / M9 stages below.
    fast paths (`caml_mmtk_alloc_small`, `caml_mmtk_refill_tlab`) don't feed `stat_minor_words`,
    so `Gc.minor_words`/`Gc.counters` under-report (fails `gcwords`/`opaque`/`with_tag`). Fix in
    the alloc paths (accumulate words per allocation).
-8. Header/metadata reconciliation (stock color/mark header bits vs MMTk side metadata).
+8. Header/metadata reconciliation, in two parts:
+   (a) **stock color/mark header bits vs MMTk side metadata** — audit what still reads the
+   stock header colour and reconcile with MMTk's mark state.
+   (b) **retire the `Is_young` address-space reservation** (kept by #6). Finding (2026-06-22):
+   under TLAB nursery-aliasing nothing is ever allocated in `[caml_minor_heaps_start,
+   caml_minor_heaps_end)` (young objects live in MMTk Immix blocks outside it), so
+   **`Is_young(v)` is always false** (already noted at `array.c:240`). The ~8 consumers
+   (`weak.c`, `finalise.c`, `memprof.c`, `globroots.c`, `obj.c`, `intern.c`, `fiber.c`,
+   `minor_gc.c`) therefore run their always-false branch — each must be audited to confirm
+   that is the MMTk-correct behaviour (vs needing MMTk's own nursery notion) before the
+   reservation + macro can go. Entangled with #11 (`weak.c`/`finalise.c` Is_young checks are
+   part of the weak/finaliser-during-collection path), so do alongside it. Needs per-consumer
+   reasoning + sanity-at-small-heap verification — not a mechanical delete.
 
 **Phase 3 — correctness (testsuite-driven)**
 9. Triage the all-plans testsuite CI (all 11) and fix the per-plan failures it surfaces.
