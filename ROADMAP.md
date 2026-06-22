@@ -86,7 +86,28 @@ item is in the workstreams / M9 stages below.
 5. Finish stock-minor-GC remnants (`major_ref`/`ephe_ref` structs, `caml_minor_collection`,
    `caml_alloc_small_dispatch`'s stock path).
 6. Remove the minor-heap arena (`allocate/free_minor_heap_arena` + reservation).
-7. Reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk stats.
+7. Reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk stats — the
+   **prerequisite for deleting `shared_heap.c`**. The stock shared heap is now a
+   permanently *empty* heap (MMTk does all allocation), but its lifecycle + stats are
+   still wired into 7 files: `domain.c` (`caml_{init,free,orphan}_shared_heap`,
+   `caml_adopt_all_orphan_heaps`, `caml_assert_shared_heap_is_empty`, `caml_finalise_heap`,
+   the `d->shared_heap` field), `gc_stats.c` (`caml_collect_heap_stats_sample` /
+   `caml_accum_orphan_heap_stats`), `custom.c`/`major_gc.c`/`sys.c`/`gc_ctrl.h` macros
+   (`caml_heap_size`/`caml_heap_blocks`/`caml_top_heap_words`), `startup_aux.c`
+   (`caml_finalise_freelist`). The empty heap reports size/stats ~0 — which is why
+   `Gc.stat` heap fields and the `subarraystub` test read 0 ("Not enough GC cycles").
+   Plan: (a) rewire those consumers to MMTk (`caml_mmtk_gc_stats` gives heap/live/free
+   words + collection count; no MMTk equivalent for peak/`top_heap` or block count →
+   documented stubs) — this also clears the `subarraystub`-class output-mismatches that
+   keep Immix red; then (b) drop the empty-heap lifecycle from domain create/terminate and
+   delete `shared_heap.c`/`.h` (M9 st.5). NB removing the `caml_domain_state.shared_heap`
+   field shifts struct offsets the native compiler bakes in → regen + full rebuild.
+   Also: the `subarraystub` "0 cycles" failure is deeper than a stat rewire — it expects
+   `Gc.quick_stat().major_collections` to rise after `Gc.full_major ()`, but
+   `Gc.full_major → caml_mmtk_collect → mmtk_ocaml_handle_user_collection_request` is
+   *advisory* (MMTk may decline when the heap has room), so `mmtk_ocaml_gc_count()` doesn't
+   move. #7 must make `Gc.major`/`Gc.full_major` **force** a real MMTk collection and ensure
+   the count increments.
 8. Header/metadata reconciliation (stock color/mark header bits vs MMTk side metadata).
 
 **Phase 3 — correctness (testsuite-driven)**
