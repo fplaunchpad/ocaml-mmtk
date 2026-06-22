@@ -186,9 +186,23 @@ item is in the workstreams / M9 stages below.
       `(* TEST *)` blocks + verify.
 
 **Phase 4 — breadth + platform**
-13. Build-CI: `opam` `test-in-prefix` relocatability — **done** (configure.ac relocatable
-    `-lmmtk_ocaml` + stdlib symlink/install + `--remap-path-prefix` DWARF strip). Remaining:
-    `i386` (32-bit MMTk staticlib won't build; the job is deliberately skipped for now).
+13. **Build + Hygiene CI status (2026-06-23 — honest accounting):**
+    - `opam` `test-in-prefix` relocatability — **fixed**; **CLBG correctness is green**.
+    - **Build debug matrix** (`linux-O0`, `extra debug-s4096`) — **still red**, two causes:
+      (a) a `domain.c:605` debug assert in `unreserve_minor_heaps_reservation_from_stw_single`
+      (asserts a running domain has `young_start/end == NULL`) — another stock-arena invariant
+      invalid under MMTk TLAB (running domains hold an MMTk block); same class as the linux-O0
+      asserts already relaxed → **relax it** (debug-only; tripped by `*_spawn_burn_gc_set` via
+      `Gc.set` → reservation resize). (b) the **bug #3b spawn-burn hangs** (exit -9) — the real
+      remaining blocker; known MMTk hangs (CLAUDE.md) → fix the hang or skip those tests in CI.
+      The release/`normal` + macOS/arm64 jobs were **cancelled by fail-fast**, not failed —
+      set `fail-fast: false` for real visibility.
+    - **Hygiene** (`check-typo` on whole tree) — **red**: flags pre-existing upstream non-ASCII
+      (testsuite `.ml` author names/em-dashes, `.gitignore`) plus new long-line/non-ASCII in
+      `fiber.c`/`configure.ac`/`Makefile.mmtk` comments. Upstream runs check-typo on the *diff*,
+      not the whole tree → scope the job to changed files (or add `.gitattributes typo.*`
+      exemptions), and keep new C/build comments ASCII + ≤80 col.
+    - `i386` Build job — deliberately skipped (32-bit MMTk staticlib won't build).
 14. macOS native linking (always-on native is Linux-only today).
 15. Unwired plans (bytecode-only — none has a native Immix nursery), per CI triage:
     `PageProtect`/`SemiSpace` likely cheap; `MarkCompact`/`Compressor` medium; `GenCopy` ≈
