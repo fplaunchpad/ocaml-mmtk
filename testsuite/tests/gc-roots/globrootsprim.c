@@ -19,7 +19,7 @@
 #include <caml/memory.h>
 #include <caml/alloc.h>
 #include <caml/gc.h>
-#include <caml/shared_heap.h>
+#include <caml/major_gc.h>  /* NOT_MARKABLE (relocated here from the deleted shared_heap.h) */
 #include <caml/callback.h>
 
 struct block { value header; value v; };

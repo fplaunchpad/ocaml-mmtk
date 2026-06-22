@@ -22,7 +22,8 @@
 #include <caml/signals.h>
 #include <caml/gc_stats.h>
 #include <caml/startup.h>
-#include <caml/shared_heap.h>
+/* caml/shared_heap.h removed: the stock shared heap is deleted under always-on MMTk
+   (its still-live colour machinery moved to caml/major_gc.h). */
 #include <caml/codefrag.h>
 #include <caml/asm.h>
 #include <caml/roots.h>
