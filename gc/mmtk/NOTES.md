@@ -5,6 +5,30 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: ocamlrund aborts AT the desync (SWITCH assert) — clean repro point
+
+*2026-06-22*
+
+`ocamlrund` (the *debug* runtime, CAMLasserts on) reproduces the bug and **aborts
+at the desync itself**: `runtime/interp.c:942 ### Assertion failed:
+(uintnat) index < (sizes >> 16)` — the SWITCH bounds assert, i.e. a block/tag-index
+beyond the switch's block-case table (exactly the block-where-int-expected found by
+rr). This is a far cleaner stop than ocamlrun's far-downstream SIGSEGV, and it
+fires at the *first* out-of-range SWITCH → likely at/near the cascade origin.
+Caveats: the debug runtime needs a **bigger heap** (`MMTK_HEAP_SIZE_MB>=128`; at 64
+MB most runs hit `Out of memory` before the bug), and it's slow. Tip (from KC):
+`ocamlrund -t` (repeatable `-t -t …`) traces the interpreter for more detail.
+
+Plan from here:
+1. `rr record --num-cores=1` **ocamlrund** (heap ≥128 MB) → it aborts at interp.c:942;
+   replay → at the assert, examine the SWITCH input + reverse to where that
+   wrong-but-valid value was loaded (the first desync's source).
+2. Extend the mis-forward detector to **heap fields** (snapshot field values in
+   `scan_object`) — catches a heap-field mis-forward, the leading remaining cause
+   (the root-only detector is clean). Storage-heavy but feasible for a debug run.
+3. sanity is expected NOT to catch it (mis-forward/desync is to a *valid* object;
+   sanity only flags dangling/invalid edges) — re-confirm if cheap.
+
 ## CI bug: mis-forward detector is CLEAN — it's a pure control-flow desync
 
 *2026-06-22*
