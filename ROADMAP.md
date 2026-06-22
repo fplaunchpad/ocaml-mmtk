@@ -111,14 +111,17 @@ item is in the workstreams / M9 stages below.
    → `mmtk_ocaml_total_bytes`; peak/blocks stubbed), the empty-heap lifecycle dropped from
    domain.c/startup_aux.c/gc_stats.c, and `shared_heap.c`/`.h` deleted (the
    `caml_domain_state.shared_heap` field kept NULL to avoid the native-codegen struct-offset
-   ripple — remove it later in an ABI-aware pass). 🟡 REMAINING: `Gc.counters`/`quick_stat`
-   collection-count semantics. `subarraystub`'s "0 cycles" is deeper than a stat rewire — it
-   expects `major_collections` to rise after `Gc.full_major ()`, but
-   `Gc.full_major → caml_mmtk_collect → mmtk_ocaml_handle_user_collection_request` is
-   *advisory* (MMTk may decline when the heap has room) AND the test leans on stock
-   custom-block GC pacing (`caml_adjust_gc_speed`) that's inert under MMTk → make
-   `Gc.major`/`Gc.full_major` **force** a collection that increments the count, and treat the
-   custom-pacing tests as disable-or-feature.
+   ripple — remove it later in an ABI-aware pass). ✅ Collection counts: confirmed
+   `Gc.major`/`full_major`/`compact` already FORCE a real MMTk collection and increment
+   `major_collections` (+5/+5/+5, native+bytecode) — `caml_mmtk_collect →
+   handle_user_collection_request(force=true) →` scheduler bumps `GC_COUNT`; no code change
+   needed, just documented the per-field MMTk semantics in gc_ctrl.c. Disabled 3
+   stock-GC-pacing-dependent tests (`subarraystub` custom-block pacing; `test_compact_full`
+   compact=+3major+1compaction; `boundscheck` loops `minor_collections<1000` → would hang).
+   🟡 **REMAINING (new follow-up): `Gc.minor_words` allocation accounting** — the MMTk alloc
+   fast paths (`caml_mmtk_alloc_small`, `caml_mmtk_refill_tlab`) don't feed `stat_minor_words`,
+   so `Gc.minor_words`/`Gc.counters` under-report (fails `gcwords`/`opaque`/`with_tag`). Fix in
+   the alloc paths (accumulate words per allocation).
 8. Header/metadata reconciliation (stock color/mark header bits vs MMTk side metadata).
 
 **Phase 3 — correctness (testsuite-driven)**
