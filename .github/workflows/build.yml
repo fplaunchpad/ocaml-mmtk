@@ -294,6 +294,14 @@ jobs:
           MAKE_ARG=-j OCAMLRUNPARAM=b,v=0 bash -xe tools/ci/actions/runner.sh re-test-in-prefix
 
   i386:
+    # Skipped on the mmtk-ocaml fork: this fork's GC is always-on MMTk, whose staticlib
+    # (gc/mmtk) is built by cargo — absent from the debian:13 linux/i386 container, so the
+    # job died at `Makefile.mmtk:36` with `cargo: No such file or directory`. mmtk-core 0.32
+    # CAN build 32-bit (i686 cross-compiles cleanly), but the fork has never been brought up
+    # or validated on a 32-bit target. Reinstating i386 is a deliberate porting + validation
+    # effort (32-bit cargo in the container + runtime/GC validation), not a CI fix. Flip this
+    # back to enable it.
+    if: false
     runs-on: ubuntu-latest
     needs: config
     container:
