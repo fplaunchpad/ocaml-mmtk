@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI moving-GC bug: ROOT-CAUSED + FIXED — GC triggered mid-`intern_rec`
+
+*2026-06-22*
+
+**The long-hunted CI/ocamldoc moving-GC crash (bug #2) is fixed.** Root cause: the
+**unmarshaller triggers a GC in the middle of `intern_rec`** under MMTk, which vanilla
+OCaml never does.
+
+- Vanilla `intern_alloc_storage` reserves the whole result block up front via
+  `caml_shared_try_alloc` (which never collects — returns NULL→OOM on failure). So no GC
+  runs while `intern_rec` fills the structure through **raw, un-rooted C pointers** (the
+  `dest` recursion cursor and the off-heap `intern_obj_table` back-reference array).
+- The MMTk port (`intern_alloc_obj`, intern.c) instead allocates **each object** via
+  `caml_mmtk_alloc_shr` → `mmtk_ocaml_alloc` → `memory_manager::alloc`, whose slow path
+  **polls and runs a collection** on heap pressure. So a GC fires mid-unmarshal,
+  relocating/collecting the half-built structure; `intern_rec`'s raw pointers then dangle
+  and it writes/links stale references. The damage surfaces later when a StickyImmix GC
+  scans the structure: it follows a stale/dangling reference, reads a field as a header
+  (huge wosize / object-start-used-as-value), and SIGSEGVs in `scan_ocaml_object`.
+
+This explains the entire matrix: **StickyImmix ~25-45%** (frequent in-place GCs, so a
+mid-intern collection is likely and relocates), **Immix rare** (far fewer GCs), **GenImmix
+clean** (`caml_mmtk_alloc_shr` objects are mature; a nursery GC never moves them), **MarkSweep
+/ ALWAYS_DEFRAG clean** (full-heap, non-generational). It is *not* the array.c barrier
+(a separate real bug, fixed earlier) and *not* weak refs (`MMTK_WEAK_REFS=0` A/B still crashed).
+
+**rr path to it:** the crash is a GC worker faulting in `scan_ocaml_object`; the object's
+"header" was a heap pointer (huge wosize). Reverse-watching that header word
+(`watch` + `reverse-continue`, with `set language c` so gdb knows `unsigned long`) led to
+`intern_rec`'s `*dest = v` (intern.c) — i.e. the unmarshaller wrote it. (Pinning the intern
+objects did NOT help — pinning blocks *relocation*, not the *collection* of the unrooted
+in-progress objects, and doesn't stop the GC from running at all.)
+
+**Fix (restores the invariant using MMTk's own hook):** suppress collection for the duration
+of the unmarshal. MMTk's `gc_trigger.rs:110` consults `VMCollection::is_collection_enabled()`;
+the binding now implements it (`collection.rs`) to read a runtime counter
+`caml_mmtk_gc_disabled` (mmtk.c: `caml_mmtk_disable_collection`/`enable_collection`/
+`collection_enabled`, atomic, nestable, cross-domain). `intern_rec` bumps it on entry (flag
+`gc_was_disabled` in the intern state) and `intern_cleanup` drops it on every exit (success +
+error/longjmp). On genuine heap exhaustion mid-unmarshal the new non-raising
+`caml_mmtk_try_alloc_shr` returns NULL, so `intern_alloc_obj` runs `intern_cleanup` (freeing
+state, re-enabling GC) before raising `Out_of_memory` — matching the vanilla
+`caml_shared_try_alloc` path (and fixing a pre-existing cleanup-skip-on-OOM leak there).
+
+**Validation:** `parsing/parser.ml` under **StickyImmix 64 MB ×96: 0 crashes** (was ~45% =
+34/76); **default Immix ×30: 0 crashes** (no regression). All runs reach the expected
+warning-as-error (`exit 2`) — i.e. unmarshalling succeeds and the compile runs through.
+
+Caveats: `is_collection_enabled` is a global VM hook, so this briefly suppresses GC
+process-wide during any unmarshal (fine — unmarshals are short); a huge unmarshal at a tight
+heap can now OOM where a mid-unmarshal GC might have freed space (correct, same as vanilla's
+up-front reservation failing). The `array.c` `Is_young`-barrier fix from earlier stands; the
+remaining `Is_young`-gated elisions (`weak.c`/`finalise.c`) are still worth hardening but are
+not this crash.
+
 ## CI bug: session summary — `Is_young` barrier-elision class (one FIXED), crash still in partial-defrag
 
 *2026-06-22*

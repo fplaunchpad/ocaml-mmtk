@@ -68,6 +68,10 @@ extern "C" {
     /// participation to its backup thread, waits for the MMTk resume epoch, then
     /// re-enters OCaml. Used so MMTk's STW can't deadlock against OCaml's own.
     fn caml_mmtk_park();
+    /// Non-zero iff collection is currently allowed. The runtime drops it to 0
+    /// around critical sections that must not see a GC — notably `intern_rec`
+    /// (the unmarshaller fills a half-built structure through raw C pointers).
+    fn caml_mmtk_collection_enabled() -> i32;
 }
 
 /// Park the calling domain at a safepoint until the current collection finishes.
@@ -114,6 +118,15 @@ pub extern "C" fn mmtk_ocaml_leave_blocking() {
 }
 
 impl Collection<OCamlVM> for VMCollection {
+    /// Consulted by MMTk's gc_trigger before starting a collection. The runtime
+    /// suppresses GC (count > 0) around critical sections that hold raw, un-rooted
+    /// pointers into half-built objects — chiefly `intern_rec` (the unmarshaller).
+    /// Vanilla OCaml upholds this implicitly by reserving the whole block up front;
+    /// under MMTk's per-object allocation we must say so explicitly.
+    fn is_collection_enabled() -> bool {
+        unsafe { caml_mmtk_collection_enabled() != 0 }
+    }
+
     /// GC worker: stop every domain, then visit each so its roots are scanned.
     fn stop_all_mutators<F>(_tls: VMWorkerThread, mut mutator_visitor: F)
     where

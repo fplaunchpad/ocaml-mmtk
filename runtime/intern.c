@@ -99,6 +99,13 @@ struct caml_intern_state {
 
   char compressed;
   /* 1 if the compressed format is in use, 0 otherwise */
+
+  char gc_was_disabled;
+  /* MMTk: 1 if this unmarshal disabled collection (in intern_rec) and still owes
+     a re-enable in intern_cleanup. Restores vanilla's "no GC during intern_rec"
+     invariant — under MMTk the per-object caml_mmtk_alloc_shr would otherwise
+     trigger a moving GC mid-unmarshal, relocating/collecting the partially-built
+     structure that intern_rec is still filling through raw pointers. */
 };
 
 static void init_intern_stack(struct caml_intern_state* s)
@@ -126,6 +133,7 @@ static struct caml_intern_state* init_intern_state (void)
   s->intern_obj_table = NULL;
   s->intern_dest = NULL;
   s->intern_dest_end = NULL;
+  s->gc_was_disabled = 0;
   init_intern_stack(s);
 
   Caml_state->intern_state = s;
@@ -291,6 +299,14 @@ static void intern_free_stack(struct caml_intern_state* s)
 
 static void intern_cleanup(struct caml_intern_state* s)
 {
+  /* MMTk: re-enable collection if this unmarshal disabled it (see intern_rec).
+     intern_cleanup is the single cleanup reached on every exit — normal return
+     (via intern_end) and every error path (intern_cleanup_failwith) before the
+     longjmp — so the disable/enable stays balanced. */
+  if (s->gc_was_disabled) {
+    caml_mmtk_enable_collection();
+    s->gc_was_disabled = 0;
+  }
   if (s->intern_input != NULL) {
      free(s->intern_input);
      s->intern_input = NULL;
@@ -515,7 +531,15 @@ static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
        are dropped by the root-scan pointer filter, and everything reachable
        only through them (e.g. caml_global_data and its globals) is collected. */
     if (caml_mmtk_enabled) {
-      return caml_mmtk_alloc_shr(wosize, tag, 0);
+      /* Non-raising alloc: on exhaustion run intern_cleanup (frees the intern
+         state and re-enables collection, which intern_rec disabled) before
+         raising, mirroring the stock caml_shared_try_alloc path below. */
+      value v = caml_mmtk_try_alloc_shr(wosize, tag);
+      if (v == (value) NULL) {
+        intern_cleanup(s);
+        caml_raise_out_of_memory();
+      }
+      return v;
     }
 #endif
     p = caml_shared_try_alloc(d->shared_heap, wosize, tag,
@@ -549,6 +573,20 @@ static void intern_rec(struct caml_intern_state* s,
   char * codeptr;
   struct intern_item * sp;
   caml_domain_state * d = Caml_state;
+
+  /* MMTk: suppress collection for the duration of the unmarshal. Vanilla OCaml
+     reserves the whole block up front (caml_shared_try_alloc, which never
+     collects), so no GC runs while intern_rec fills the structure through raw
+     [dest]/[intern_obj_table] pointers. Under MMTk each object is allocated
+     individually via caml_mmtk_alloc_shr, whose slow path can trigger a moving
+     GC mid-unmarshal — relocating/collecting the half-built structure and leaving
+     those raw pointers dangling. Disabling collection here restores the invariant;
+     intern_cleanup re-enables it (on every success and error/longjmp exit). On
+     genuine exhaustion the alloc fails -> Out_of_memory, as in vanilla. */
+  if (caml_mmtk_enabled && !s->gc_was_disabled) {
+    caml_mmtk_disable_collection();
+    s->gc_was_disabled = 1;
+  }
 
   sp = s->intern_stack;
 

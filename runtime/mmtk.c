@@ -43,6 +43,28 @@
    process. There is no opt-out. */
 int caml_mmtk_enabled = 0;
 
+/* Collection-suppression counter (see caml/mmtk.h, runtime/intern.c). MMTk's
+   gc_trigger consults caml_mmtk_collection_enabled() via the binding's
+   VMCollection::is_collection_enabled; while the count is non-zero no collection
+   is triggered. Atomic because concurrent domains may bracket their own unmarshals
+   and gc_trigger reads it from other mutator threads. */
+static atomic_uintnat caml_mmtk_gc_disabled;
+
+void caml_mmtk_disable_collection(void)
+{
+  atomic_fetch_add(&caml_mmtk_gc_disabled, 1);
+}
+
+void caml_mmtk_enable_collection(void)
+{
+  atomic_fetch_sub(&caml_mmtk_gc_disabled, 1);
+}
+
+int caml_mmtk_collection_enabled(void)
+{
+  return atomic_load(&caml_mmtk_gc_disabled) == 0;
+}
+
 /* Native TLAB / nursery-aliasing: MMTk owns the nursery too. The inlined native
    fast-path bumps an MMTk Immix block (handed over by mmtk_ocaml_refill_tlab);
    when it is exhausted the runtime refills another block instead of running a
@@ -194,6 +216,17 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
                              caml_mmtk_semantics(wosize));
   if (p == NULL) caml_raise_out_of_memory();
+  return (value)p;
+}
+
+/* Non-raising variant of caml_mmtk_alloc_shr: returns (value)0 on exhaustion
+   instead of raising. The unmarshaller uses it so it can run intern_cleanup
+   (freeing its state and re-enabling collection) before raising Out_of_memory,
+   exactly as the stock caml_shared_try_alloc path does. */
+value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
+{
+  void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
+                             caml_mmtk_semantics(wosize));
   return (value)p;
 }
 

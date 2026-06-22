@@ -59,6 +59,10 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
 extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
                                  reserved_t reserved);
 
+/* Non-raising variant: returns (value)0 on heap exhaustion instead of raising
+ * Out_of_memory, so the unmarshaller can clean up first. See runtime/intern.c. */
+extern value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag);
+
 /* Stop-the-world support. caml_mmtk_stw_poll is called from
  * caml_handle_gc_interrupt: if a collection is in progress it parks this domain
  * at the safepoint. caml_mmtk_interrupt / _uninterrupt poison / reset a domain's
@@ -145,6 +149,14 @@ extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 extern void caml_mmtk_enter_blocking(void);
 extern void caml_mmtk_leave_blocking(void);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
+
+/* Collection-suppression counter. While the count is non-zero MMTk does not
+ * trigger a collection (the binding's VMCollection::is_collection_enabled reads
+ * caml_mmtk_collection_enabled via gc_trigger). Restores vanilla's "no GC during
+ * intern_rec" invariant (runtime/intern.c). Nestable; cross-domain safe. */
+extern void caml_mmtk_disable_collection(void);
+extern void caml_mmtk_enable_collection(void);
+extern int  caml_mmtk_collection_enabled(void);
 
 #endif /* CAML_INTERNALS */
 
