@@ -1,0 +1,89 @@
+name: Testsuite (all GC plans)
+
+# Runs the full OCaml testsuite under EVERY MMTk plan on linux x86-64, including the
+# plans known to be limited — native code needs an Immix nursery (Immix/StickyImmix),
+# and NoGC never reclaims, so MarkSweep/GenImmix/NoGC are expected to fail some tests.
+# The point is to surface *exactly* what breaks under each plan so we know what still
+# needs to work — not just to confirm the known-good ones. Jobs do not fail-fast; read
+# each plan's job summary for the pass/fail counts. (CLBG correctness only validates the
+# known-good plans on a small benchmark set; this is the broader, deliberately-red net.)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'gc/mmtk/**'
+      - 'runtime/**'
+      - '.github/workflows/testsuite-plans.yml'
+
+permissions: {}
+
+jobs:
+  # Build once (default Immix — the binaries are plan-independent; the plan is chosen at
+  # run time via MMTK_PLAN). The testsuite jobs reuse this tree.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Configure tree
+        run: |
+          MAKE_ARG=-j CONFIG_ARG='--enable-flambda --enable-cmm-invariants --enable-codegen-invariants --enable-dependency-generation --enable-native-toplevel --with-relative-libdir --enable-runtime-search --enable-runtime-search-target=fallback' OCAMLRUNPARAM=b,v=0 bash -xe tools/ci/actions/runner.sh configure
+      - name: Build
+        run: |
+          MAKE_ARG=-j bash -xe tools/ci/actions/runner.sh build
+      - name: Prepare Artifact
+        run: tar --zstd -cf /tmp/sources.tar.zstd .
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-plans
+          path: /tmp/sources.tar.zstd
+          retention-days: 1
+
+  testsuite:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plan: [Immix, StickyImmix, GenImmix, MarkSweep, NoGC]
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: compiler-plans
+      - name: Unpack Artifact
+        run: |
+          tar --zstd -xf sources.tar.zstd
+          rm -f sources.tar.zstd
+      # setarch -R disables ASLR (the MMTk fixed-address metadata mmap flake — needed for
+      # every MMTk process). MMTK_PLAN/HEAP are inherited by make and every test process.
+      # TIMEOUT is ocamltest's per-test SIGKILL deadline — several tests hang under MMTk.
+      - name: Run testsuite under ${{ matrix.plan }}
+        env:
+          MMTK_PLAN: ${{ matrix.plan }}
+          MMTK_HEAP_SIZE_MB: 4096
+        run: |
+          set -o pipefail
+          setarch "$(uname -m)" -R make -C testsuite parallel TIMEOUT=120 2>&1 \
+            | tee /tmp/testsuite-${{ matrix.plan }}.log
+      - name: Summary (${{ matrix.plan }})
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.plan }}"
+            echo '```'
+            grep -aE 'tests (succeeded|failed|skipped)|not started|unexpected errors|Something failed|All .* tests' \
+              /tmp/testsuite-${{ matrix.plan }}.log | tail -20 || echo "(no summary line found)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload log (${{ matrix.plan }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testsuite-log-${{ matrix.plan }}
+          path: /tmp/testsuite-${{ matrix.plan }}.log
+          retention-days: 7
