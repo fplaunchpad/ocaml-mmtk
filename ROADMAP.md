@@ -44,7 +44,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then bodies deleted (st.3) ✅, **`shared_heap.c` + `caml/shared_heap.h` deleted entirely** (st.5, −1665 lines; live colour-machinery/`caml_atom`/`caml_compactions_count` relocated to `major_gc.{c,h}`; heap-size/stats consumers rewired to MMTk; a link anchor in mmtk.c keeps `roots.o` linking) ✅, `Gc.stat` heap fields reimplemented on MMTk stats ✅ (collection-count semantics for `Gc.counters` + the custom-block-pacing-driven tests still partial) 🟡. `ocaml-mmtk` is a single-GC runtime. Remaining: minor-heap-arena removal, header/metadata reconciliation | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (5 wired + 6 unwired) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
-| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts MMTk doesn't maintain — mostly fixed (28→~7; see Phase 1 item 1), residual = a memprof domain-reuse assert + incompatible-test disables + known hangs. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
+| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts + a domain-terminate lock-drop race — **fixed** (see Phase 1 item 1); residual `tests/parallel` reds are the pre-existing bug #3 burn crash + harness-contention timeouts, not this. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
 
 ## Next steps (prioritised)
 
@@ -52,17 +52,21 @@ Execution order — correctness before performance; dependencies noted. Detail f
 item is in the workstreams / M9 stages below.
 
 **Phase 1 — flag cleanup**
-1. 🟡 `linux-O0` debug-runtime fix (in progress): the debug runtime (`USE_RUNTIME=d`)
-   asserts stock-GC invariants MMTk doesn't maintain; each fix revealed the next, so
-   verify the full set on turing, not one CI cycle at a time. Removed so far (DEBUG-only;
-   28→~7 fails, gc-roots + weak-ephe-final dirs now clean): `Debug_free_minor` (memory.h),
-   `caml_gc_phase != Phase_sweep_main` (domain.c:2313 + `caml_orphan_ephemerons`
-   major_gc.c:391), `young_ptr == young_end` (minor_gc.c:439 stw empty-minor) + its
-   `Debug_free_minor` poison, and the `Caml_state` vs `Caml_state_opt` bug in
-   `caml_mmtk_enter/leave_blocking` (see item 2). Residual (separate triage):
-   `domain.c:895` `memprof == NULL` on domain-slot reuse (`domain_dls.ml`), the known
-   MMTk hangs (timeouts), and tests asserting stock-GC behavior MMTk lacks
-   (`major_gc_wait_backup`, `signals_alloc`) which need disabling. (Build-CI red 1 of 3.)
+1. 🟢 `linux-O0` debug-runtime fix (essentially done): the debug runtime (`USE_RUNTIME=d`)
+   asserts stock-GC invariants MMTk doesn't maintain. Removed (all DEBUG-only):
+   `Debug_free_minor` (memory.h), `caml_gc_phase != Phase_sweep_main` (domain.c:2313 +
+   `caml_orphan_ephemerons` major_gc.c:391), `young_ptr == young_end` (minor_gc.c:439) +
+   its poison, the `Caml_state` vs `Caml_state_opt` bug in `caml_mmtk_enter/leave_blocking`
+   (see item 2), and the two `check_minor_heap` stock-arena asserts (domain.c:520) that
+   broke every native domain-spawning `tests/parallel` test. **Plus a REAL race fixed:**
+   `caml_domain_terminate`'s MMTk park released `domain_lock`, letting a fresh domain
+   reuse a slot mid-teardown → debug `memprof == NULL` assert, release
+   `bind_mutator … already registered` panic. Fix: `caml_mmtk_park_terminating()` parks
+   without dropping the lock (safe — the domain has left the OCaml STW set). Disabled
+   `major_gc_wait_backup` (needs the stock backup thread). Remaining `tests/parallel`
+   reds are NOT this fix: the GC-burn `domain_*_spawn_burn*` crash is the pre-existing
+   bug #3 (item 10; reproduces under Immix too), and `tak`/`churn` timeouts are harness
+   contention. (Build-CI red 1 of 3 → now just bug #3 + the pre-existing i386/opam reds.)
 2. ✅ **Removed `caml_mmtk_enabled`** (~35 sites collapsed to unconditional MMTk; 153
    lines deleted). No init-reordering was needed — no OCaml *value* allocation happens
    pre-init (the `domain_create` allocs are C/`caml_stat`/mmap), and the region barrier
@@ -112,7 +116,11 @@ item is in the workstreams / M9 stages below.
 
 **Phase 3 — correctness (testsuite-driven)**
 9. Triage the all-plans testsuite CI (all 11) and fix the per-plan failures it surfaces.
-10. bug #3 — `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV (StickyImmix, multidomain+moving).
+10. bug #3 — GC-burn `parallel/domain_*_spawn_burn*` (+ `domain_dls` in release) SIGSEGV
+    with an MMTk tracing panic `cannot trace object 0x11 / 0x1 …` (a stale/bad root during
+    heavy parallel spawn + `Gc.minor`/`major`). Reproduces under **Immix too**, not just
+    StickyImmix (multidomain+moving); confirmed **pre-existing** (the pristine runtime
+    crashes identically). Needs the `sanity`/`rr` workflow.
 11. Weak refs — fix `process_weak_refs` resurrection ordering (`pr5233`) + the orphaned-ephemeron
     gap; **then retire the transitional `MMTK_WEAK_REFS` flag** (make `process_weak_refs`
     unconditional, like `caml_mmtk_enabled`). Until that fix, `MMTK_WEAK_REFS=0` is the safety

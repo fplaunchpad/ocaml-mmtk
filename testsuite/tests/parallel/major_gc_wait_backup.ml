@@ -1,12 +1,18 @@
-(* TEST
- include unix;
- hasunix;
- {
-   native;
- }{
-   bytecode;
- }
-*)
+(* Disabled under MMTk (stock-GC pacing + GC backup thread).
+
+   This test asserts a stock-collector pacing invariant that does not hold under
+   MMTk: it allocates a fixed-depth tree (make 22 / make 24) and then asserts
+   [(Gc.quick_stat ()).major_collections > n] — i.e. that a specific amount of
+   allocation deterministically forces at least one major collection. Under MMTk
+   the major-collection count reported by Gc.stat is MMTk's own collection count,
+   which is driven by MMTk's heap trigger (heap size / Immix occupancy), not by
+   the stock major-slice pacing this assumes; at the testsuite heap size that
+   allocation does not necessarily trigger a collection, so the assertion fails.
+
+   The test is also specifically about the OCaml GC *backup thread* (a domain
+   forced to run a full GC while another domain blocks/waits) — a stock-GC
+   construct MMTk does not have. Re-enable only if MMTk grows stock-compatible
+   major-cycle pacing. *)
 
 type 'a tree = Empty | Node of 'a tree * 'a tree
 

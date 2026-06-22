@@ -516,7 +516,6 @@ CAMLexport uintnat caml_minor_heaps_end;
 
 Caml_inline void check_minor_heap(void) {
   caml_domain_state* domain_state = Caml_state;
-  CAMLassert(domain_state->young_ptr == domain_state->young_end);
 
   caml_gc_log(
       "young_start: %p,"
@@ -529,16 +528,21 @@ Caml_inline void check_minor_heap(void) {
       (value*)domain_self->minor_heap_reservation_start,
       (value*)domain_self->minor_heap_reservation_end,
       domain_state->minor_heap_wsz);
-  CAMLassert(
-    (/* uninitialized minor heap arena */
-      domain_state->young_start == NULL
-      && domain_state->young_end == NULL)
-    ||
-    (/* initialized minor heap arena */
-      domain_state->young_start
-      == (value*)domain_self->minor_heap_reservation_start
-      && domain_state->young_end
-         <= (value*)domain_self->minor_heap_reservation_end));
+
+  /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix nursery),
+     not the stock per-domain minor arena. caml_mmtk_refill_tlab repoints
+     young_start/young_end/young_ptr at the MMTk-owned block, which is unrelated to
+     domain_self->minor_heap_reservation_{start,end} (the stock reservation MMTk
+     never allocates from), and after a minor collection young_ptr is reset to
+     young_start (not young_end). So BOTH stock invariants this DEBUG-only check
+     asserts — "minor heap fully drained" (young_ptr == young_end) and
+     "young_{start,end} lie within the stock reservation" — are stock-GC arena
+     invariants that do not hold here. check_minor_heap is reached from
+     free_minor_heap_arena / allocate_minor_heap_arena on the domain-terminate and
+     Gc.set-resize paths, so every native domain teardown in the parallel tests
+     trips it under the debug runtime. The asserts are skipped under MMTk; the
+     caml_gc_log above is kept for diagnostics. (DEBUG-only; release and all-plans
+     behaviour unchanged.) */
 }
 
 

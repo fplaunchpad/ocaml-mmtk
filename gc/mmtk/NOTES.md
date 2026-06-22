@@ -5,6 +5,52 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## linux-O0 `tests/parallel`: `check_minor_heap` asserts + a real domain-terminate race
+
+*2026-06-22*
+
+The `-O0` job's 28 `tests/parallel` failures were two distinct things (not the memprof
+assert first guessed):
+
+1. **`check_minor_heap` (domain.c) stale stock-arena asserts — 21 tests, DEBUG-only.**
+   Its `young_ptr == young_end` and "`young_{start,end}` within
+   `minor_heap_reservation_{start,end}`" asserts are stock per-domain-arena invariants.
+   Under native TLAB nursery-aliasing `caml_mmtk_refill_tlab` repoints `young_*` at an
+   MMTk Immix block (unrelated to the stock reservation) and resets `young_ptr` to
+   `young_start` after a collection, so neither holds. Reached from
+   `free/allocate_minor_heap_arena` on every domain teardown → every native
+   domain-spawning test tripped it. Dropped both (kept the log). Same class as
+   `minor_gc.c:439`.
+
+2. **A real domain-terminate lock-drop race — RELEASE-affecting, fixed at the source.**
+   `caml_domain_terminate → caml_mmtk_domain_terminate` parked for an in-progress MMTk
+   collection via the regular park, which RELEASES `domain_lock` (handing OCaml-STW duty
+   to the backup thread) to avoid an MMTk-vs-OCaml-STW barrier deadlock. But
+   `caml_domain_terminate` relies on holding `domain_lock` continuously across teardown
+   to stop a fresh domain from REUSING the slot's `caml_domain_state` mid-teardown
+   (`domain_create` blocks on the same `d->domain_lock`). The lock-drop broke that: a
+   reusing domain observed half-torn-down state → debug: `memprof == NULL` assert
+   (domain.c:895); **release: `mmtk_ocaml_bind_mutator: domain … already registered`
+   panic** + double memprof handling. Fix: `caml_mmtk_park_terminating()` (mmtk.c) parks
+   (`mmtk_ocaml_stw_park`: stopped++/wait/stopped--, satisfying MMTk's barrier) WITHOUT
+   releasing `domain_lock`. Safe because by terminate the domain has left the OCaml STW
+   participant set (`stop_active_domain`), so `caml_try_run_on_all_domains` no longer
+   waits for it and the deadlock the lock-handoff prevents cannot arise. `domain_dls`
+   0/8 → 15/15 (debug), no release regression.
+
+Also disabled `major_gc_wait_backup.ml` (asserts stock major-slice pacing forces a
+collection + exercises the GC backup thread MMTk lacks — genuinely incompatible).
+
+**Still failing (pre-existing, NOT these fixes — confirmed against the pristine runtime):**
+the GC-burn tests (`domain_*_spawn_burn*`, and `domain_dls` in release) SIGSEGV with an
+MMTk tracing panic `cannot trace object 0x11 / 0x1 …` — a stale/bad root during heavy
+parallel spawn + `Gc.minor`/`major`. Reproduces under **Immix too** (not just
+StickyImmix) — this is the bug #3 class (needs the `sanity`/`rr` workflow). `tak`/`churn`
+native timeouts are core contention from the crashing burn tests under the parallel
+harness, not real hangs.
+
+---
+
 ## Stock shared heap (`shared_heap.c`) deleted
 
 *2026-06-22*

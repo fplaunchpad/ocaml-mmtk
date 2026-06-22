@@ -567,6 +567,30 @@ void caml_mmtk_stw_poll(void)
   }
 }
 
+/* Park for an in-progress MMTk collection from the *terminate* path, WITHOUT
+   releasing this domain's domain_lock.
+
+   The regular caml_mmtk_park releases domain_lock (and hands OCaml-STW duty to
+   the backup thread) so that OCaml's own multi-domain STW can complete while we
+   are frozen in MMTk's park — otherwise the two barriers deadlock. By the time
+   caml_domain_terminate calls us, however, the domain has already left the OCaml
+   STW participant set (stop_active_domain), so caml_try_run_on_all_domains no
+   longer waits for it and that deadlock cannot arise.
+
+   Crucially we must NOT release domain_lock here: caml_domain_terminate relies on
+   holding domain_lock continuously across its teardown to keep the slot's
+   caml_domain_state from being reused by a fresh domain mid-teardown (domain_create
+   blocks on the same d->domain_lock; see the comment there). The regular park's
+   lock-drop window is exactly what let a reusing domain observe half-torn-down
+   state — a non-NULL memprof (debug assert at domain.c) and, worse, a still-live
+   MMTk mutator registration (mmtk_ocaml_bind_mutator panicking "already
+   registered"). We still bump MMTk's stopped count (mmtk_ocaml_stw_park) so the
+   collection's "all mutators stopped" barrier is satisfied. */
+static void caml_mmtk_park_terminating(void)
+{
+  mmtk_ocaml_stw_park();        /* stopped++, wait for the resume epoch, stopped-- */
+}
+
 /* Poison a domain's young_limit so its next safepoint check
    (Caml_check_gc_interrupt) traps into caml_handle_gc_interrupt. */
 void caml_mmtk_interrupt(uintnat domain_state_addr)
@@ -624,11 +648,17 @@ void caml_mmtk_leave_blocking(void)
 }
 
 /* Called when a domain terminates: park if a collection is in progress (so it
-   participates), then deregister so future collections don't wait for it. */
+   participates), then deregister so future collections don't wait for it.
+
+   Uses the terminate-specific park, which does NOT release domain_lock — the
+   caller (caml_domain_terminate) must keep that lock held across teardown so the
+   slot's caml_domain_state is not reused by a fresh domain before deregistration
+   and the rest of teardown complete. See caml_mmtk_park_terminating. */
 void caml_mmtk_domain_terminate(caml_domain_state *dom)
 {
   if (dom->mmtk_mutator == NULL) return;
-  caml_mmtk_stw_poll();
+  if (mmtk_ocaml_stw_active())
+    caml_mmtk_park_terminating();
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
   dom->mmtk_mutator = NULL;
 }
