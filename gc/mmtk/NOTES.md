@@ -5,6 +5,255 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: session summary — `Is_young` barrier-elision class (one FIXED), crash still in partial-defrag
+
+*2026-06-22*
+
+Long rr + detector + code-review session. Net outcomes:
+
+**FIXED (real latent bug, commit-worthy): missing generational write barrier in
+`caml_uniform_array_make` (`runtime/array.c`).** The large-array branch did
+`Field(res,i) = init` directly, guarded by `CAMLassert(!(Is_block(init) &&
+Is_young(init)))`. **Under always-on MMTk `Is_young` is ALWAYS false** (the stock minor
+heap is gone), so that assert is vacuous and the barrier was wrongly elided — a
+mature/LOS `res` ← (possibly nursery) `init` edge was not recorded in MMTk's remembered
+set. Fixed to use `caml_initialize` (which calls `caml_mmtk_region_barrier`), like every
+other large-alloc fill path. **General insight (credit: code-review agent): every
+`Is_young`-gated barrier-elision in the runtime is suspect under MMTk** — `Is_young` is
+identically false, so "skip the barrier because it isn't young" branches are unsafe for
+generational plans. Other dead-under-MMTk `Is_young` barriers exist (`weak.c`
+`ephe_write_barrier` → `add_to_ephe_ref_table` on the dead stock `ephe_ref`; `finalise.c`)
+— latent, to harden, but NOT this crash (below).
+
+**The array.c fix did NOT fix the StickyImmix crash** (validation: 41/96 runs still
+crashed, 139/132, ~43% — unchanged; the fixed `array.b.o` was confirmed linked into the
+running `ocamlrun`). So the array site is real but separate; the CI crash is elsewhere.
+
+**Refuted this session (so the crash is NONE of these):**
+- *Weak/ephemeron/finaliser forwarding* — `MMTK_WEAK_REFS=0` A/B: bug PERSISTS, more
+  frequent (23/59). With weak-refs off, ephemerons/finalisers are strongly rooted, so the
+  dead `weak.c`/`finalise.c` `Is_young` barriers are covered there → not the crash.
+- *The generational region barrier being a no-op* — over-conservative but SAFE for
+  StickyImmix: `OCamlMemorySlice::object()` is `None`, so MMTk's `memory_region_copy_slow`
+  uses `is_address_in_nursery(slot)`, and StickyImmix's returns **`false`** unconditionally
+  (no separate nursery address range) ⇒ every region-barrier slice is enqueued (no edges
+  lost).
+- *`FieldSlot::store` writing an off-by-8* — `MMTK_DEBUG_OFFBY8` detector saw 121 off-by-8
+  SCAN hits but ZERO STORE hits on a crash run (store-check has false negatives: only fires
+  when the target's `val-8` reads wosize-0).
+
+**Narrowed conclusion: the crash is in the Immix *partial / opportunistic in-place
+evacuation* path** (binding copy/forward/scan under partial defrag). Evidence: MarkSweep
+clean (never moves); `MMTK_IMMIX_ALWAYS_DEFRAG` clean (full moving → it's specifically
+*partial*); GenImmix clean (separate copying nursery); plain **Immix crashes rarely** and
+**StickyImmix ~25-45%** — Immix is **non-generational (no remembered set)**, so its crashes
+cannot be a barrier/remembered-set bug; they scale with GC/defrag frequency (StickyImmix
+does far more GCs). Symptom: a reference one header-word too low (object *start* used as
+*value*) / dangling, created **without** `FieldSlot::store`.
+
+**Concrete next step (fresh session):** rr-record StickyImmix `--num-cores=1`, breakpoint in
+`common::object_model::copy_object` / the Immix evacuation, and watch a slot to an object
+evacuated in a GC where *neighbouring* objects are NOT — catch a partial-defrag GC leaving a
+reference at an un-relocated/old start. Or build a **post-GC all-heap validity sweep** (walk
+live objects; flag any pointer whose target's `target-8` is itself a plausible header ⇒
+pointer one word low) to pin the slot + introducing GC independently of `FieldSlot::load`.
+Already audited correct (do not re-chase): `copy_object`, `get_reference_when_copied_to`,
+`slot.rs` load/store + infix offset, `object_model` offsets, closure `start_env`
+(matches mlvalues.h:322), the region barrier.
+
+## CI bug: detector confirms MANY off-by-8 refs, none via FieldSlot::store; weak refs exonerated
+
+*2026-06-22*
+
+Built a gated **off-by-8 detector** in `common/src/slot.rs` (`MMTK_DEBUG_OFFBY8=1`):
+`is_offby8(v)` = `v` in the heap range and the word at `v-8` (its purported header)
+has **wosize 0** (impossible for a real heap object). Checks fire in `FieldSlot::load`
+(SCAN — a scanned slot holds an off-by-8 value) and `FieldSlot::store` (STORE — a GC
+update writes one, with a verdict: "object already off" vs "info/offset caused"). Cheap
+range check (no `is_in_mmtk_spaces`) — heap reservation is fixed at
+`0x200ffc00000..0x20103c00000` under `setarch -R` + 64 MB. Ran the parser.ml repro in
+parallel workers (StickyImmix 64 MB) until a bug-run.
+
+**Results (a bug-run, exit 139):** **121 `OFFBY8-SCAN` hits — 74 *unique* off-by-8 values
+across 105 slots — and ZERO `OFFBY8-STORE`.** Clean/OOM runs fire **nothing** (no false
+positives). So:
+- The off-by-8 is **real and widespread** (not one value; 74 distinct), and
+- **No GC `FieldSlot::store` ever writes an off-by-8.** Since the bytecode mutator does no
+  pointer arithmetic (it only *copies* references), a *new* off-by-8 value can only be born
+  in a GC forwarding path — but **not** the `FieldSlot::store` edge-update path.
+
+**Weak/ephemeron/finalizer forwarding EXONERATED.** `ephe_forward`/`ephe_retain`
+(`binding/src/scanning.rs`) rewrite weak refs via a C callback path that bypasses
+`FieldSlot::store` — a prime "no-STORE" suspect. A/B test with **`MMTK_WEAK_REFS=0`** (routes
+weak refs through the conservative `FieldSlot` rooting instead): the bug **persists and is
+MORE frequent — 23/59 runs crashed (21×139 + 2×132), 36 OOM**. So `process_weak_refs` is not
+the cause.
+
+**So the off-by-8 is born in a moving-GC path that is neither `FieldSlot::store` nor weak-ref
+forwarding, and only under *partial* in-place Immix defrag (MarkSweep / GenImmix /
+ALWAYS_DEFRAG clean).** Remaining non-`store` reference-bearing paths to scrutinise:
+`common::copy_object` memcpy interaction with scanning, `scan_ocaml_object` field-slot
+address computation (closure/infix), the order of slot-load vs object-forward during the
+trace, and anything in the runtime root/relocation glue (`runtime/mmtk.c`,
+`caml_scan_stack`, `Setup_for_gc`/`Restore_after_gc`). A concurrent static code review is
+running. Detector caveat: it only fires when an off-by-8 slot is *scanned during a GC*;
+weak-refs-off runs usually crash before the next GC, so the detector stays silent there —
+use a long-surviving (weak-refs-on) run to capture slots.
+
+## CI bug: O is mutator-ALLOCATED at 0x…850 (not GC-moved) → stale-pointer hypothesis
+
+*2026-06-22*
+
+Continued the propagation walk and ran the move-vs-realloc experiment (forward, the
+reliable direction).
+
+**Propagation walk (reverse-watch, `/tmp/rr-a`):** the off-by-8 `accu` at MAKEBLOCK1
+(`interp.c:803`) was **already** off-by-8 at MAKEBLOCK1 *entry* (`interp.c:800`) — so the
+`Alloc_small` GC there did NOT corrupt it. One hop further: `accu` was set by **PUSHACC6**
+(`interp.c:431 accu = sp[6]`) — i.e. the bad value is being **copied** stack→accu→stack→heap,
+not computed. It is injected once upstream and then sprayed around (into ≥2 MAKEBLOCK
+blocks' field0 and passed as APPLY2 `arg2`).
+
+**Move-vs-realloc (forward HW watch on header word `0x20100c9e850`):** the location is a
+**hot bump-allocation region, reused constantly by the mutator** — across the run the word
+cycles through headers `0x800`(wo2), `0x400`(wo1), `0xffffffffffffffff` (a
+`caml_uniform_array_make` fill, `array.c:234`), etc. O's own header `0x1400` (wosize 5, tag 0)
+is written by **`mmtk_ocaml_alloc(wosize=5,tag=0)` ← `caml_mmtk_alloc_small` ← MAKEBLOCK
+(`interp.c:785`)** — a **mutator allocation, NOT `copy_object`**. So O was *allocated* at
+`0x…850`, not GC-moved there.
+
+**Implication — leaning to a stale/dangling pointer (missed update under moving GC), not an
+off-by-8 forwarding store:** because (a) O is never GC-moved, a *correct* ref to O
+(`0x…858`) could not be turned into `O-8` by forwarding; and (b) `0x…850` is a hot reused
+young address. The consistent mechanism: a slot held an old value `0x…850` that referenced a
+now-dead/moved object whose start was `0x…848` (value `0x…850`); that slot was **not updated
+when its referent was relocated** (a missed root/field update — but roots check clean, so a
+**heap field** or a scan-coverage gap), the address was reused, and the stale pointer now
+lands on O's header. This fits: MarkSweep clean (never moves ⇒ no dangling), moving plans
+crash. (Off-by-8 forwarding is not fully excluded; the generic copy/forward/store path is
+audited correct, which also argues against a blanket forwarding error.)
+
+**Tooling notes (this session):** interactive `rr` via tmux works, but `tmux send-keys "end"`
+sends the **End key** (not the literal) — closing a gdb `commands` block needs `send-keys -l
+"end"`. A `source`d gdb file's `continue` fails ("program is not being run") in `rr` batch;
+do `break`+first `continue` as top-level `-ex`, then `source` the rest. Forward HW
+watchpoints fire on rr's **mmap/zeroing syscalls** at odd rips (gdb-Python type lookups like
+`long` then throw) — break once past init to map the heap, set the watch after, and use `x`
+or `*(int*)` (not `*(long*)`) when inspecting.
+
+**Next:** find the **ref-creation event** (the missed-update / the GC after which the slot
+went stale). Either (a) continue the reverse stack-walk on `/tmp/rr-a` (PUSHACC6 `sp[6]` →
+who pushed it → … → a GETFIELD from a heap field, then reverse-watch that field for the GC
+that failed to update it), or (b) build the pre-approved **all-heap + roots validity-sweep
+detector** (after each GC, flag any pointer whose target header is malformed — e.g. wosize 0,
+or target-8 is itself a header so the pointer is one word low) — robust, independent of
+`FieldSlot::load`, and pinpoints the slot + the introducing GC.
+
+## CI bug: tracing the off-by-8 value back — propagation chain (rr interactive)
+
+*2026-06-22*
+
+Drove `/tmp/rr-a` interactively (tmux-held `rr replay`, so the ~3-min replay-to-trap
+happens once; then iterate). Recovered the register map (debug build): `pc=rbp`,
+`accu=r14`, `sp=r15`, `sizes=rbx`. Confirmed `sp=r15` via `sp[1]==accu`. Reverse
+watchpoints on **recent** writes work reliably on this `--num-cores=1` trace; on
+**far-back** writes they trip the known "runs to trace start" rr/gdb bug (see below).
+
+**The off-by-8 value `0x20100c9e850` lives in the heap.** `find /g` over the real
+heap mapping (`info proc mappings` → **`0x200ffc00000`–`0x20103c00000`**, the 64 MB
+MMTk reservation — NB heap addresses are 11 hex digits; an earlier `find` used a
+12-digit `0x201000000000` base, entirely above the heap, hence false "not found"):
+- `0x20100c9e850` (off-by-8 ref to O) is stored at **two** heap fields:
+  `0x20103b01c68` and `0x20103b04758`.
+- `0x20100c9e858` (the *correct* value of O) is stored at one heap field,
+  `0x20100c9e8a0` (a sibling record's field) — so O is referenced both correctly and
+  off-by-8.
+
+**Propagation chain (reverse-watch, all reliable/recent):**
+1. Failing SWITCH: `accu = sp[1] = 0x20100c9e850`, written to `sp[1]` by **APPLY2**
+   (`interp.c:563 sp[1]=arg2`) — F is a 2-arg function; `arg2` is the bad value.
+2. The same bad value was stored into heap field `0x20103b04758` by **MAKEBLOCK1**
+   (`interp.c:803 Field(block,0)=accu`) — i.e. `accu` was *already* off-by-8 and got
+   written into a freshly-allocated 1-field block O2. **Propagation, not origin.**
+3. MAKEBLOCK1's `Alloc_small(...,Enter_gc)` (`interp.c:802`) can GC. Tracking `accu`'s
+   origin via `watch $r14` is unreliable: once execution leaves
+   `caml_bytecode_interpreter` into the Rust allocator/GC, `r14` is just a scratch
+   register (the watch stopped on incidental churn at `api.rs:152`, the alloc return).
+
+**Reverse-watch of O's *header* word `0x20100c9e850` (to learn whether O was
+GC-*moved* there or mutator-*allocated* there) ran to the trace start** — the far-back
+limitation. So the move-vs-realloc question (and thus: off-by-8 *forwarding store* vs
+*stale/dangling* pointer to a freed object reused under O's header) is **still open**
+and is the fix-critical crux.
+
+**Next (forward, reliable):** restart `rr replay`, break once at `caml_mmtk_alloc_small`
+(heap now mapped), set a HW watch on header `0x20100c9e850`, delete the breakpoint, and
+`continue` *forward* logging every write — the sequence of objects that occupy that
+word tells move-vs-realloc directly. If only O ever lives there (one `0x1400` write by
+`copy_object`) → off-by-8 forwarding store; if a prior object X lived at value
+`0x...850` then was freed/reused → stale-pointer (missed update). Then forward-watch a
+field (`0x20103b01c68`) for the first write of `0x...850` to catch the creating store.
+The generic moving path is audited correct, so suspicion remains on partial-defrag /
+absent-VO-bit object-boundary handling.
+
+## CI bug: SMOKING GUN — the bad value is a pointer ONE WORD (8 bytes) TOO LOW
+
+*2026-06-22*
+
+**The desync is not abstract "control flow corruption" — it is a concrete
+off-by-`HEADER_SIZE` pointer.** Drove the `/tmp/rr-a` ocamlrund assert trace
+(StickyImmix 64 MB, `rr record --num-cores=1`; aborts `interp.c:942`). Recovered the
+live register map for the *debug* build (DWARF marks `sp`/`env`/`accu` "optimized
+out" even at the SWITCH — read them from registers):
+
+- **`pc` = `rbp`**, **`accu` = `r14`**, **`sizes` = `rbx`**, **`sp` = `r15`**
+  (found by disassembling the SWITCH at `interp.c:942` and the frame-build block,
+  which writes the return record to `-0x8(%r15)`/`-0x10(%r15)`). Verified
+  `sp[1] == accu` (`ACC1` ran just before the SWITCH).
+
+At the failing SWITCH: `accu = 0x20100c9e850`, `index = Tag_val(accu) = 5`,
+`sizes = 0x50000` (5 block-cases, tags 0-4). **`sp` is NOT drifted**: the return
+frame `[retpc, env, extra_args]` sits exactly at `sp[2..4]`, i.e. F is a 2-arg
+function (APPLY2 layout `[arg1, arg2, retpc, env, extra]`) reading its own in-frame
+local `arg2 = sp[1]`. So the value is wrong, not the stack pointer.
+
+**Decoding the heap around `accu` is decisive.** The neighbourhood is a contiguous
+run of tag-0 wosize-5 records (header `0x1400`, stride `0x30`), headers at
+`…820/…850/…880/…8b0`. The array's own internal pointers use the correct
+header+8 (`value`) convention (e.g. a field holds `…858`, `…828`). But
+`accu = …850` points **at a header word**, not at the value `…858`:
+
+- `Hd_val(accu)` reads `accu-8 = …848`, which is actually the *previous record's
+  last field* (`0x5` = `Val_int 2`) → spurious "tag 5".
+- The correct value is `accu+8 = …858` (header `0x1400` at `…850` ⇒ tag 0,
+  wosize 5) → SWITCH tag 0, in range, no crash.
+
+So **`accu` is exactly one word (8 bytes) too low — it points to an object's
+header instead of its first field (the OCaml `value`).** `arg1` (`sp[0]`) is a
+valid tag-0 wosize-2 block; only `arg2`/`accu` is off-by-8 → a *single localized*
+bad pointer carried through the APPLY2 cascade, not a systematic forwarding error
+(which reconciles with `MMTK_IMMIX_ALWAYS_DEFRAG` being clean — if every forwarded
+ref were off-by-8 the whole heap would break instantly).
+
+**Audited correct (so the bug is NOT in the generic moving path):** `copy_object`
+and `get_reference_when_copied_to` return `to_start + OBJECT_REF_OFFSET` (value);
+`slot.rs` `load`/`store` apply the infix offset symmetrically; `object_model.rs`
+`ref_to_object_start`/`ref_to_header` subtract one word consistently;
+`OBJECT_REF_OFFSET = WORD_SIZE = 8`. All header↔value conversions are self-consistent.
+
+**So the off-by-8 enters somewhere partial-defrag-specific** — the prime suspect
+remains object-boundary identification during Immix *in-place* evacuation with **no
+VO bit** (a reference resolved to an object *start* instead of its `value`, or a
+metadata-granularity mismatch). Next, decisive: find the GC that first writes an
+off-by-8 pointer and the field it lands in. Two routes (both reuse `/tmp/rr-a`, no
+rebuild): (a) forward conditional breakpoint in the copy path when the destination
+start `== 0x20100c9e850` → see who is copied + which slot is then mis-updated;
+(b) an **all-heap validity sweep** detector in the binding (after each GC, walk live
+objects; flag any pointer field whose target's header is malformed — e.g. wosize 0,
+or target-8 is itself a valid header so the target is one word low). The validity
+sweep is robust (independent of `FieldSlot::load`, which `sanity` and the root
+mis-forward detector both effectively trust) and pinpoints the introducing GC.
+
 ## CI bug: driving the ocamlrund assert trace — at the first bad SWITCH
 
 *2026-06-22*

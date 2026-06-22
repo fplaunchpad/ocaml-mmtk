@@ -235,15 +235,19 @@ CAMLprim value caml_uniform_array_make(value len, value init)
   }
   else if (size > Max_wosize) caml_invalid_argument("Array.make");
   else {
-    /* Under always-on MMTk the stock minor heap is unused, so [init] is never a
-       stock-young block — no minor collection is needed to move it to the major
-       heap before storing it into a shared-heap array. (Stock OCaml ran a minor GC
-       here to avoid many major->minor refs.) */
-    CAMLassert(!(Is_block(init) && Is_young(init)));
+    /* Large array: [res] is a mature/LOS block while [init] may be an MMTk-nursery
+       object, so [res[i] = init] creates a mature->nursery edge. Under always-on
+       MMTk [Is_young] is always false (the stock minor heap is gone), so we cannot
+       use it to argue the barrier away — we must record the edge in MMTk's
+       remembered set for generational plans. Use [caml_initialize] (a plain store
+       plus [caml_mmtk_region_barrier], a no-op for non-generational plans), exactly
+       as the other large-allocation fill paths do (caml_array_concat, caml_obj_dup).
+       (This was a latent missing-barrier bug under always-on MMTk; it is NOT the
+       open StickyImmix moving-GC crash, which persists with this fixed — see
+       gc/mmtk/NOTES.md.) */
     res = caml_alloc_shr(size, 0);
-    /* We now know that [init] is not in the minor heap, so there is
-       no need to call [caml_initialize]. */
-    for (mlsize_t i = 0; i < size; i++) Field(res, i) = init;
+    for (mlsize_t i = 0; i < size; i++)
+      caml_initialize(&Field(res, i), init);
   }
   /* Give the GC a chance to run, and run memprof callbacks */
   caml_process_pending_actions ();
