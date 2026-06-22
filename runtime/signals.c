@@ -181,14 +181,19 @@ CAMLexport void caml_enter_blocking_section(void)
     if (atomic_load_relaxed(&domain->young_limit) != CAML_UINTNAT_MAX) break;
     caml_leave_blocking_section_hook ();
   }
-  /* Now committed to the blocking section: safe for MMTk STW. */
-  caml_mmtk_enter_blocking();
+  /* Now committed to the blocking section: safe for MMTk STW. Pass the domain
+     identity captured above — the hook released the domain lock, so Caml_state
+     is NULL here and must not be read (see caml/mmtk.h: a NULL read here skipped
+     the safe-stopped accounting, desyncing MMTk's stop barrier). */
+  caml_mmtk_enter_blocking((uintnat) domain);
 }
 
 CAMLexport void caml_enter_blocking_section_no_pending(void)
 {
+  /* Capture the domain before the hook releases the lock and nulls Caml_state. */
+  uintnat domain = (uintnat) Caml_state;
   caml_enter_blocking_section_hook ();
-  caml_mmtk_enter_blocking();
+  caml_mmtk_enter_blocking(domain);
 }
 
 CAMLexport void caml_leave_blocking_section(void)
@@ -198,8 +203,9 @@ CAMLexport void caml_leave_blocking_section(void)
   saved_errno = errno;
   caml_leave_blocking_section_hook ();
   /* Leaving the blocking section: wait out any in-progress MMTk collection
-     before running OCaml again, then stop counting as safe-stopped. */
-  caml_mmtk_leave_blocking();
+     before running OCaml again, then stop counting as safe-stopped. The hook
+     re-acquired the domain lock, so Caml_state is valid again. */
+  caml_mmtk_leave_blocking((uintnat) Caml_state);
   Caml_check_caml_state();
 
   /* Some other thread may have switched [Caml_state->action_pending]

@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Bug #3: MMTk STW stop barrier was a no-op (blocking-section counter underflow)
+
+*2026-06-22*
+
+**The multidomain moving-GC crash** (`parallel/domain_*_spawn_burn*`: MMTk panic
+`cannot trace object 0x1 / 0x11 … does not belong to any MMTk space`, where `0x1`/`0x11`
+are `Val_int(0)`/`Val_int(8)`) was the GC **scanning a domain that had not actually
+stopped** — tracing its live, mutating fiber stack / `gc_regs`, where a slot held a tagged
+immediate at trace time. Deterministic under Immix at a small heap (5/5); pre-existing
+(pristine HEAD crashes too — not introduced by the shared-heap / linux-O0 work).
+
+**Root cause.** `stop_all_mutators` (binding `collection.rs`) waits for a `stopped` counter
+to reach `number_of_mutators()`. That counter is `+1` by `caml_mmtk_enter_blocking` and `-1`
+by `caml_mmtk_leave_blocking` (called from `caml_enter/leave_blocking_section`, signals.c).
+But the blocking-section hooks release/re-acquire `domain_lock` **asymmetrically around those
+calls**: `enter` runs AFTER `caml_enter_blocking_section_hook` → `caml_release_domain_lock`
+set `caml_state = NULL`, so the old guard (`if Caml_state[_opt] != NULL`) skipped the `+1`;
+`leave` runs AFTER the hook re-acquired the lock (`Caml_state` valid) → still did the `-1`.
+Each blocking round therefore netted `stopped` **down by one** → as a `usize` it
+**underflowed to ~UINTPTR_MAX** → `stopped >= n` was always true → the stop barrier became a
+**no-op**: the GC never waited for running domains and scanned their live roots. (Light
+multidomain with no blocking sections mostly escaped; heavy concurrent spawn+alloc+GC
+reliably tripped it — which is why earlier lighter multidomain checks passed.)
+
+**Fix** (`runtime/signals.c`, `runtime/mmtk.c`, `runtime/caml/mmtk.h`): capture the domain's
+`caml_domain_state*` in `caml_enter/leave_blocking_section` **while `Caml_state` is still
+bound** and pass it to `caml_mmtk_enter_blocking(dom)` / `caml_mmtk_leave_blocking(dom)`,
+which test the passed `dom` (not the now-NULL `Caml_state`). enter/leave are balanced, the
+count is accurate, the barrier waits. 3 C files; no binding/Rust change. (Supersedes the
+linux-O0 `Caml_state_opt` guard in those two functions.) Verified on turing: 0
+immediate-as-root crashes across ~90 runs (was 5/5); multidomain + canonical `parser.ml`
+regress clean.
+
+**Still open — separate, pre-existing issues, NOT this bug and NOT caused by the fix:**
+- A **~20–35% hang** in the spawn-burn tests — a deadlock in OCaml's own domain spawn/STW
+  machinery (`caml_try_run_on_all_domains` / `all_domains_lock` / backup thread), outside
+  MMTk's collection path (rr on a captured hang hit no `caml_mmtk_*`). CLAUDE.md already
+  lists these GC-burn tests as known hangs under MMTk.
+- A **deterministic SIGSEGV on native `ocamlopt` compiles** (e.g. `parser.ml` → `.cmx`);
+  reproduces 3/3 on pristine HEAD — a separate native-code GC crash.
+- A **rare residual** (~1/30) `cannot trace` panic with a **wild garbage value** (not the
+  `0x1`/`0x11` immediate) — a different, rarer stale-root-slot race (freed fiber stack /
+  reused `gc_regs` bucket / a terminating domain's torn-down finaliser/ephemeron structures;
+  one instrumented hit had root source 0 = globals/finalisers). An attempted stronger
+  identity-set stop barrier did not reduce it and added deadlock surface (reverted). Needs a
+  fresh rr capture targeting a wild-pointer (not immediate) crash. Tracked as **bug #3b**.
+
+---
+
 ## Minor-heap arena removed (+ a shared_heap.h-include fallout)
 
 *2026-06-22*

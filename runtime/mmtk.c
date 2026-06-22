@@ -668,23 +668,33 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
 }
 
 /* A domain is entering / leaving a C blocking section. While blocking it is
-   safe for GC; on leaving it must wait out any in-progress collection. */
-void caml_mmtk_enter_blocking(void)
+   safe for GC; on leaving it must wait out any in-progress collection.
+
+   `dom` is the domain's caml_domain_state address, captured by the caller
+   (runtime/signals.c) while Caml_state was still bound — it must NOT be read
+   from Caml_state here. The blocking-section hooks release/re-acquire the domain
+   lock around these calls, which clears/restores Caml_state asymmetrically:
+   `caml_enter_blocking_section` calls enter AFTER the hook released the lock
+   (Caml_state is NULL), while `caml_leave_blocking_section` calls leave AFTER
+   the hook re-acquired it (Caml_state is valid). The previous code read
+   Caml_state_opt directly, so the enter found it NULL and skipped the
+   `stopped` increment while leave still decremented it — underflowing the usize
+   count to a huge value, making `stop_all_mutators`'s `stopped >= n` barrier
+   always true. The GC then never waited for running domains to reach a
+   safepoint and scanned the live, mutating roots of a still-running domain,
+   handing an immediate/foreign value to trace_object: the `cannot trace object
+   0x1` (Val_int 0) panic in the parallel spawn-burn tests. `dom == 0` (no domain
+   bound, e.g. caml_open_descriptor_in during early startup) is a no-op, and the
+   `mmtk_mutator != NULL` guard keeps enter/leave balanced across binding. */
+void caml_mmtk_enter_blocking(uintnat dom)
 {
-  /* Caml_state may be NULL and the mutator unbound during early startup (e.g.
-     caml_open_descriptor_in before the domain is created); there is no collection
-     to coordinate with until this domain is MMTk-bound. Test the raw Caml_state_opt:
-     the Caml_state macro is (CAMLassert(Caml_state_opt != NULL), Caml_state_opt), so
-     reading it to compare against NULL would itself trip the debug-runtime assert in
-     exactly the NULL case we are guarding against. */
-  if (Caml_state_opt != NULL && Caml_state_opt->mmtk_mutator != NULL)
+  if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
     mmtk_ocaml_enter_blocking();
 }
 
-void caml_mmtk_leave_blocking(void)
+void caml_mmtk_leave_blocking(uintnat dom)
 {
-  /* Raw Caml_state_opt, not the Caml_state macro — see caml_mmtk_enter_blocking. */
-  if (Caml_state_opt != NULL && Caml_state_opt->mmtk_mutator != NULL)
+  if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
     mmtk_ocaml_leave_blocking();
 }
 

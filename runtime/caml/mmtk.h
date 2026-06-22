@@ -143,10 +143,14 @@ extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 
 /* Blocking-section participation: a domain in a C blocking section is safe for
  * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking are called
- * from caml_enter/leave_blocking_section. caml_mmtk_domain_terminate
- * deregisters a terminating domain. */
-extern void caml_mmtk_enter_blocking(void);
-extern void caml_mmtk_leave_blocking(void);
+ * from caml_enter/leave_blocking_section with the domain's caml_domain_state
+ * address, captured by the caller while Caml_state is still bound — these must
+ * NOT read Caml_state themselves, as the blocking-section hooks release/re-acquire
+ * the domain lock asymmetrically around the calls (enter sees Caml_state NULL,
+ * leave sees it valid), which would unbalance MMTk's safe-stopped accounting.
+ * caml_mmtk_domain_terminate deregisters a terminating domain. */
+extern void caml_mmtk_enter_blocking(uintnat dom);
+extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
 
 /* Collection-suppression counter. While the count is non-zero MMTk does not

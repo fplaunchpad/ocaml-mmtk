@@ -39,12 +39,12 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix` — the plans with an Immix nursery allocator), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Cross-domain finaliser handover fixed**: orphaned finalisers from a terminated domain are now adopted into a live domain (`caml_mmtk_adopt_orphaned_finalisers`) at the start of `process_weak_refs` — the stock `adopt_orphaned_work` was deleted in M9 stage 3. (Orphaned *ephemerons* have the same gap — tracked TODO.) | 🟢 done (default-on) |
-| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — ROOT-CAUSED + FIXED (2026-06-22).** Native unmarshalling allocated unmarshalled objects **outside MMTk spaces**: in `intern.c` the MMTk allocation path (per-object `caml_mmtk_try_alloc_shr` + the bulk `Alloc_small` skip) was wrapped in `#ifndef NATIVE_CODE` (bytecode-only), so native `intern_alloc_obj` fell through to the stock `caml_shared_try_alloc(d->shared_heap, …)`, which under M9 allocates in a non-MMTk `caml_stat`/malloc region. MMTk's root-scan/`scan_object` pointer filter drops those objects, so their fields are never traced and anything reachable only through the unmarshalled graph (the loaded ocamldoc module/info records) is collected → dangling pointer → SIGSEGV in `odoc_man.ml` walking the doc tree. **Fix:** remove the `#ifndef NATIVE_CODE` guards so native intern allocates via MMTk too (+ `CAMLassert(!caml_mmtk_enabled)` on the now-dead stock branch). **Verified:** from-scratch `make clean && make -j world.opt` (incl. the `ocamldoc Stdlib.3o` manpage step) succeeds; manpage repro **0/12** (was 12/12) under default Immix. The earlier bytecode-only fixes — GC-mid-`intern_rec` suppression (`is_collection_enabled`, fixed the `parser.ml` repro) and the `array.c` barrier — stand but were different/`#ifndef NATIVE_CODE` bugs. Full details: `gc/mmtk/NOTES.md`. | 🟢 |
+| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 multidomain regression (`parallel/domain_parallel_spawn_burn_gc_set`, bug #3) — **FIXED 2026-06-22** (the MMTk stop-the-world barrier counter underflowed; see Phase 3 #10). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — ROOT-CAUSED + FIXED (2026-06-22).** Native unmarshalling allocated unmarshalled objects **outside MMTk spaces**: in `intern.c` the MMTk allocation path (per-object `caml_mmtk_try_alloc_shr` + the bulk `Alloc_small` skip) was wrapped in `#ifndef NATIVE_CODE` (bytecode-only), so native `intern_alloc_obj` fell through to the stock `caml_shared_try_alloc(d->shared_heap, …)`, which under M9 allocates in a non-MMTk `caml_stat`/malloc region. MMTk's root-scan/`scan_object` pointer filter drops those objects, so their fields are never traced and anything reachable only through the unmarshalled graph (the loaded ocamldoc module/info records) is collected → dangling pointer → SIGSEGV in `odoc_man.ml` walking the doc tree. **Fix:** remove the `#ifndef NATIVE_CODE` guards so native intern allocates via MMTk too (+ `CAMLassert(!caml_mmtk_enabled)` on the now-dead stock branch). **Verified:** from-scratch `make clean && make -j world.opt` (incl. the `ocamldoc Stdlib.3o` manpage step) succeeds; manpage repro **0/12** (was 12/12) under default Immix. The earlier bytecode-only fixes — GC-mid-`intern_rec` suppression (`is_collection_enabled`, fixed the `parser.ml` repro) and the `array.c` barrier — stand but were different/`#ifndef NATIVE_CODE` bugs. Full details: `gc/mmtk/NOTES.md`. | 🟢 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then bodies deleted (st.3) ✅, **`shared_heap.c` + `caml/shared_heap.h` deleted entirely** (st.5, −1665 lines; live colour-machinery/`caml_atom`/`caml_compactions_count` relocated to `major_gc.{c,h}`; heap-size/stats consumers rewired to MMTk; a link anchor in mmtk.c keeps `roots.o` linking) ✅, `Gc.stat` heap fields reimplemented on MMTk stats ✅ (collection-count semantics for `Gc.counters` + the custom-block-pacing-driven tests still partial) 🟡, **per-domain minor-heap arena removed** (domain create/terminate bootstrap `young_*` from MMTk via `caml_mmtk_refill_tlab`; `allocate/free/reallocate_minor_heap_arena` deleted; the address-space reservation is KEPT only because it still bounds `Is_young`) ✅. `ocaml-mmtk` is a single-GC runtime. Remaining: header/metadata reconciliation (incl. retiring the `Is_young` reservation) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (5 wired + 6 unwired) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
-| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts + a domain-terminate lock-drop race — **fixed** (see Phase 1 item 1); residual `tests/parallel` reds are the pre-existing bug #3 burn crash + harness-contention timeouts, not this. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
+| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts + a domain-terminate lock-drop race — **fixed** (see Phase 1 item 1); the bug #3 STW-barrier crash behind the residual `tests/parallel` reds is now **fixed** too (Phase 3 #10), leaving the pre-existing spawn-burn hang/harness-contention timeouts (bug #3b). (c) **opam installation**: `test-in-prefix` fails (agent fixing). The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
 
 ## Next steps (prioritised)
 
@@ -64,9 +64,9 @@ item is in the workstreams / M9 stages below.
    `bind_mutator … already registered` panic. Fix: `caml_mmtk_park_terminating()` parks
    without dropping the lock (safe — the domain has left the OCaml STW set). Disabled
    `major_gc_wait_backup` (needs the stock backup thread). Remaining `tests/parallel`
-   reds are NOT this fix: the GC-burn `domain_*_spawn_burn*` crash is the pre-existing
-   bug #3 (item 10; reproduces under Immix too), and `tak`/`churn` timeouts are harness
-   contention. (Build-CI red 1 of 3 → now just bug #3 + the pre-existing i386/opam reds.)
+   reds are NOT this fix: the GC-burn `domain_*_spawn_burn*` crash is bug #3 (item 10,
+   now **fixed**; the remaining spawn-burn hang is bug #3b), and `tak`/`churn` timeouts are
+   harness contention. (Build-CI red 1 of 3 → now just the i386 + opam reds.)
 2. ✅ **Removed `caml_mmtk_enabled`** (~35 sites collapsed to unconditional MMTk; 153
    lines deleted). No init-reordering was needed — no OCaml *value* allocation happens
    pre-init (the `domain_create` allocs are C/`caml_stat`/mmap), and the region barrier
@@ -126,11 +126,21 @@ item is in the workstreams / M9 stages below.
 
 **Phase 3 — correctness (testsuite-driven)**
 9. Triage the all-plans testsuite CI (all 11) and fix the per-plan failures it surfaces.
-10. bug #3 — GC-burn `parallel/domain_*_spawn_burn*` (+ `domain_dls` in release) SIGSEGV
-    with an MMTk tracing panic `cannot trace object 0x11 / 0x1 …` (a stale/bad root during
-    heavy parallel spawn + `Gc.minor`/`major`). Reproduces under **Immix too**, not just
-    StickyImmix (multidomain+moving); confirmed **pre-existing** (the pristine runtime
-    crashes identically). Needs the `sanity`/`rr` workflow.
+10. bug #3 — GC-burn `parallel/domain_*_spawn_burn*` SIGSEGV / MMTk panic
+    `cannot trace object 0x1 / 0x11 …`. **ROOT-CAUSED + FIXED (2026-06-22).** The MMTk
+    **stop-the-world barrier was a no-op**: `caml_mmtk_enter_blocking` (called after the
+    blocking-section hook nulled `Caml_state`) skipped its `+1` while `leave` still did the
+    `-1`, so the safe-stopped counter **underflowed** (`usize`; `stopped >= n` always true)
+    and the GC scanned domains that had not stopped — tracing their live, mutating stacks
+    where a slot held a tagged immediate. Fix: capture the domain in
+    `caml_enter/leave_blocking_section` and pass it to `caml_mmtk_enter/leave_blocking(dom)`
+    so the count balances (`signals.c`, `mmtk.c`, `mmtk.h`; no binding change). Verified on
+    turing: 0 immediate crashes / 20 runs (pristine 100%), bytecode + native regress clean.
+    **bug #3b (residuals — separate, pre-existing, NOT this bug):** a rare (~1/30) `cannot
+    trace` with a *wild* (non-immediate) value = a stale-root-slot race (freed fiber stack /
+    reused `gc_regs` / terminating-domain teardown); a ~30% spawn-burn **hang** in OCaml's own
+    domain-spawn/STW machinery (not MMTk's path); and a deterministic SIGSEGV on native
+    `ocamlopt` compiles of heavy sources. See `gc/mmtk/NOTES.md`.
 11. Weak refs — fix `process_weak_refs` resurrection ordering (`pr5233`) + the orphaned-ephemeron
     gap; **then retire the transitional `MMTK_WEAK_REFS` flag** (make `process_weak_refs`
     unconditional, like `caml_mmtk_enabled`). Until that fix, `MMTK_WEAK_REFS=0` is the safety
@@ -419,9 +429,9 @@ fastest way to flush out bugs our ad-hoc programs miss. Plan:
   bytecode run set `native_compiler=false`/`native_dynlink=false` in
   `ocamltest/ocamltest_config.ml` and use a per-dir timeout cap.
 - **Definitive result — full bytecode suite under StickyImmix (2026-06-21): 1476/1524
-  pass.** All core dirs pass. The 48 non-pass: 1 real regression (bug #3,
-  `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only — see
-  `gc/mmtk/NOTES.md`) + 47 unsupported-feature failures (weak/finaliser, now fixed by
+  pass.** All core dirs pass. The 48 non-pass: 1 multidomain regression (bug #3,
+  `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV — **fixed 2026-06-22**, the MMTk STW
+  barrier counter underflowed; see `gc/mmtk/NOTES.md`) + 47 unsupported-feature failures (weak/finaliser, now fixed by
   `MMTK_WEAK_REFS=1`; `Gc.stat`/memprof/runtime-events). The earlier narrow run
   (95/96 across 14 `basic*`/`callback` dirs under TLAB Immix) is superseded.
   One benign known diff: `callback/signals_alloc.ml` **bytecode** variant delivers a
