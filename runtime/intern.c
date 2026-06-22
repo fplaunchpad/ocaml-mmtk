@@ -473,13 +473,14 @@ static void intern_alloc_storage(struct caml_intern_state* s, mlsize_t whsize,
   wosize = Wosize_whsize(whsize);
 
   if (wosize <= Max_young_wosize && wosize != 0
-#ifndef NATIVE_CODE
       /* Under MMTk, never use the bulk minor-heap pre-allocation: it packs many
          sub-objects into one no-scan String_tag block, which MMTk would not
          trace into. Instead leave intern_dest NULL so each object is allocated
-         individually via MMTk (see intern_alloc_obj). */
+         individually via MMTk (see intern_alloc_obj). This MUST apply in NATIVE
+         code too: native unmarshalling otherwise allocates outside MMTk spaces,
+         which the root-scan pointer filter drops -> referents collected ->
+         dangling refs (the CI ocamldoc Stdlib.3o SIGSEGV). */
       && !caml_mmtk_enabled
-#endif
      ) {
     /* don't track bulk allocation in minor heap with statmemprof;
      * individual block allocations are tracked instead */
@@ -525,7 +526,6 @@ static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
                               CAML_MEMPROF_SRC_MARSHAL);
     s->intern_dest += 1 + wosize;
   } else {
-#ifndef NATIVE_CODE
     /* Under MMTk, unmarshalled objects must be MMTk-allocated and traceable;
        otherwise (as with caml_shared_try_alloc) they live outside MMTk spaces,
        are dropped by the root-scan pointer filter, and everything reachable
@@ -541,7 +541,11 @@ static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
       }
       return v;
     }
-#endif
+    /* Under MMTk this stock shared-heap path must never run: it allocates outside
+       MMTk spaces, which the root-scan pointer filter drops -> referents collected
+       -> dangling refs (the CI ocamldoc crash). The caml_mmtk_enabled branch above
+       returns first; this is reachable only in the brief pre-init window. */
+    CAMLassert(!caml_mmtk_enabled);
     p = caml_shared_try_alloc(d->shared_heap, wosize, tag,
                               0 /* no reserved bits */);
     if (p == NULL) {

@@ -36,7 +36,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M4 | **Generational plans (GenImmix / StickyImmix)** — mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans, auto-selected), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Cross-domain finaliser handover fixed**: orphaned finalisers from a terminated domain are now adopted into a live domain (`caml_mmtk_adopt_orphaned_finalisers`) at the start of `process_weak_refs` — the stock `adopt_orphaned_work` was deleted in M9 stage 3. (Orphaned *ephemerons* have the same gap — tracked TODO.) | 🟢 done (default-on) |
-| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — STILL OPEN (reopened 2026-06-22).** CI Build still SIGSEGVs at `ocamldoc build/man/Stdlib.3o` (Error 139, x86-64 **and** arm64); reproduced 12/12 on turing under the **default Immix** plan with the exact pushed code, clean-built. The crash is a **mutator** deref in native ocamldoc (`ocamldoc/odoc_man.ml:307`) — a relocated object whose reference was never updated (likely a **missed native-stack root**), *not* a mid-intern GC. Two real fixes landed but addressed *other* manifestations, **not** this crash: (a) **GC mid-`intern_rec`** — the unmarshaller allocated each object via the collecting `caml_mmtk_alloc_shr` (vs vanilla's never-collecting up-front `caml_shared_try_alloc`), so a GC relocated the half-built structure; fixed by suppressing collection across `intern_rec` via MMTk's `VMCollection::is_collection_enabled()` hook (`gc_trigger.rs:110`) + a runtime counter, OOM-clean via `caml_mmtk_try_alloc_shr`. This fixed the **bytecode** `parser.ml` repro (StickyImmix 64 MB ×96: 0 crashes, was ~45%) but the **native** ocamldoc crash persists. (b) an `Is_young`-gated missing barrier in `caml_uniform_array_make`/`array.c`. Full details: `gc/mmtk/NOTES.md`. | 🟡 |
+| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — ROOT-CAUSED + FIXED (2026-06-22).** Native unmarshalling allocated unmarshalled objects **outside MMTk spaces**: in `intern.c` the MMTk allocation path (per-object `caml_mmtk_try_alloc_shr` + the bulk `Alloc_small` skip) was wrapped in `#ifndef NATIVE_CODE` (bytecode-only), so native `intern_alloc_obj` fell through to the stock `caml_shared_try_alloc(d->shared_heap, …)`, which under M9 allocates in a non-MMTk `caml_stat`/malloc region. MMTk's root-scan/`scan_object` pointer filter drops those objects, so their fields are never traced and anything reachable only through the unmarshalled graph (the loaded ocamldoc module/info records) is collected → dangling pointer → SIGSEGV in `odoc_man.ml` walking the doc tree. **Fix:** remove the `#ifndef NATIVE_CODE` guards so native intern allocates via MMTk too (+ `CAMLassert(!caml_mmtk_enabled)` on the now-dead stock branch). **Verified:** from-scratch `make clean && make -j world.opt` (incl. the `ocamldoc Stdlib.3o` manpage step) succeeds; manpage repro **0/12** (was 12/12) under default Immix. The earlier bytecode-only fixes — GC-mid-`intern_rec` suppression (`is_collection_enabled`, fixed the `parser.ml` repro) and the `array.c` barrier — stand but were different/`#ifndef NATIVE_CODE` bugs. Full details: `gc/mmtk/NOTES.md`. | 🟢 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `mmtk-ocaml` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
@@ -355,7 +355,7 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    0.32's grow heuristic ramps too slowly. So a small-min dynamic heap is worse,
    not better, for large-live-set programs. Reverted to `FixedHeapSize`. Future:
    either a much larger/auto min, or investigate mmtk's MemBalancer trigger.
-2. **Generational plan (StickyImmix) — faster; a StickyImmix bootstrap SEGV is fixed (CI bug #2 still open).**
+2. **Generational plan (StickyImmix) — faster; StickyImmix bootstrap SEGV + CI bug #2 both fixed.**
    `gcbench` 5.4 s vs Immix 7.0 s (≈1.4× stock), TLAB-compatible. The
    deterministic `parsing/parser.cmo` bootstrap SEGV was **root-caused and fixed**
    (`gc/mmtk/common/src/slot.rs`, `FieldSlot::classify`): a forwarding pointer
@@ -365,14 +365,13 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
    metadata before trusting the header (mirrors vanilla `oldify_one` checking
    "already forwarded" before `Infix_tag`; the binding injects the one spec at init)
    — see `gc/mmtk/NOTES.md`. A from-scratch **bytecode** `make all` under
-   StickyImmix builds the compiler (843 compile steps, 0 crashes). **But this did NOT
-   resolve CI bug #2:** the native `world.opt` `ocamldoc.opt` manpage step (`Stdlib.3o`)
-   **still SIGSEGVs** under the default Immix plan — CI-confirmed (x86-64 + arm64) and
-   12/12 on turing with the exact pushed code, clean-built (2026-06-22). It is a
-   *separate* moving-GC bug: a **mutator** deref in native ocamldoc (`odoc_man.ml:307`),
-   a relocated object whose reference was never updated — likely a missed **native**-stack
-   root (the bytecode `parser.ml`/`make all` paths never exercise native root scanning,
-   which is why they pass). Bug #2 is **reopened**; Immix stays the default. See
+   StickyImmix builds the compiler (843 compile steps, 0 crashes). **CI bug #2 (the
+   native `ocamldoc Stdlib.3o` SIGSEGV under default Immix) is now also fixed (2026-06-22):**
+   it was a *separate* bug — native `intern.c` allocated unmarshalled objects off-heap via
+   the stock `caml_shared_try_alloc` (the MMTk path was `#ifndef NATIVE_CODE`), so they were
+   untraced and their referents collected → dangling → SIGSEGV in `odoc_man.ml`. Fixed by
+   making native intern allocate via MMTk; verified by a from-scratch `make clean && make -j
+   world.opt` (incl. manpages) + manpage repro 0/12. Immix stays the default. See
    `gc/mmtk/NOTES.md`.
 3. **Inline the bytecode allocation fast path** — bytecode all-MMTk calls
    `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
@@ -387,13 +386,12 @@ single-GC runtime — no `MMTK_ENABLED` opt-in, no dual code paths, no stock
 minor/major GC. This deletes the per-allocation `caml_mmtk_enabled` branch and the
 maintenance tax of keeping two GCs correct side by side.
 
-**Gate (prerequisite): a self-hosting build must run on MMTk — MET (bytecode).** A
-from-scratch **bytecode** `make all` runs clean under MMTk on both the default Immix and
-(after the `slot.rs` forwarding-pointer/`Infix_tag` fix, see `gc/mmtk/NOTES.md`)
-StickyImmix — 843 compile steps, 0 crashes. **Caveat (CI bug #2, reopened 2026-06-22):**
-the native `world.opt` `ocamldoc.opt` manpage step (`Stdlib.3o`) still SIGSEGVs under
-default Immix — a separate native moving-GC bug (`odoc_man.ml:307`), see `gc/mmtk/NOTES.md`.
-Stdlib rebuilds clean; the M7 testsuite runs the compiler under MMTk. (`make bootstrap` to a strict fixpoint is
+**Gate (prerequisite): a full self-hosting build must run on MMTk — MET.** A from-scratch
+`make clean && make -j world.opt` (the CI build, including the native `ocamldoc Stdlib.3o`
+manpage step) runs clean under MMTk on the default Immix (and bytecode `make all` on Immix +
+StickyImmix — 843 compile steps, 0 crashes). The CI bug #2 that SIGSEGV'd the native ocamldoc
+manpage step is fixed (native `intern.c` off-heap allocation, 2026-06-22 — see
+`gc/mmtk/NOTES.md`). Stdlib rebuilds clean; the M7 testsuite runs the compiler under MMTk. (`make bootstrap` to a strict fixpoint is
 still fiddly for build-system / tree-state reasons — an aborted run leaves `ocamlc`
 missing — not GC correctness.)
 

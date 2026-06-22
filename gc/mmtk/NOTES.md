@@ -5,9 +5,47 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## CI moving-GC bug (#2) is STILL OPEN — the intern fix was a *different* bug
+## CI moving-GC bug (#2) FIXED — native unmarshalling allocated OFF-HEAP
 
-*2026-06-22 (later — correction to the entry below)*
+*2026-06-22 (resolves the "STILL OPEN" entry below)*
+
+**Root-caused and fixed.** The native (`ocamldoc.opt`) crash was the unmarshaller allocating
+unmarshalled objects **outside MMTk spaces**. In `intern.c`, the MMTk-aware allocation — both
+the "skip the bulk `Alloc_small` String_tag pre-allocation" guard (`intern_alloc_storage`) and
+the per-object `caml_mmtk_try_alloc_shr` path (`intern_alloc_obj`) — was wrapped in
+`#ifndef NATIVE_CODE`, so it applied to **bytecode only**. In native, `intern_alloc_obj` fell
+through to the stock `caml_shared_try_alloc(d->shared_heap, …)`. Under M9 (stock heap excised)
+that allocates in a non-MMTk region (a `caml_stat`/malloc area, observed ~`0x7913…`); MMTk's
+root-scan / `scan_object` pointer filter (`is_in_mmtk_spaces`) drops those objects, so their
+fields are never traced and anything reachable only through the unmarshalled graph (the loaded
+ocamldoc module/info records and their sub-objects) is collected → dangling pointer → SIGSEGV
+when ocamldoc later walks the doc tree (`odoc_man.ml`).
+
+This is exactly why the bytecode `parser.ml` proxy + the earlier `is_collection_enabled` intern
+fix passed while native ocamldoc kept crashing: **both that fix and this allocation path are
+`#ifndef NATIVE_CODE`** (bytecode-only).
+
+**Fix (`intern.c`):** remove the two `#ifndef NATIVE_CODE` guards so the MMTk allocation path
+applies in native too — native unmarshalling now allocates each object via
+`caml_mmtk_try_alloc_shr` (MMTk heap, traceable). Added `CAMLassert(!caml_mmtk_enabled)` on the
+now-dead stock `caml_shared_try_alloc` branch (reachable only in the pre-init window, where no
+unmarshalling occurs) to catch any regression.
+
+**Verified:** from-scratch `make clean && make -j world.opt` (the CI build, including the
+`ocamldoc Stdlib.3o` manpage step) succeeds, and the manpage repro runs **0/12 crashes** under
+default Immix (was **12/12**). Diagnosis via the saved rr trace: `is_in_mmtk_spaces` of the
+crashing record = 0 (off-heap) vs its referent = 1 (heap, reclaimed-and-zeroed); plan-sensitivity
+Immix 5/5 vs GenImmix 0/5 (only a full-heap trace reclaims the un-rooted object).
+
+**M9 cleanup (follow-up):** since MMTk is the only GC, `caml_mmtk_enabled` is always true
+post-init and the stock `caml_shared_try_alloc` / bulk paths are dead code — removing the
+`caml_mmtk_enabled` branch entirely is tracked M9 cleanup (ROADMAP).
+
+---
+
+## CI moving-GC bug (#2) — was STILL OPEN, now RESOLVED (see entry above)
+
+*2026-06-22 (correction to the entry below — superseded by the fix above)*
 
 **The "GC-mid-`intern_rec`" fix below is real and good, but it does NOT fix the CI/ocamldoc
 crash.** After pushing it to `5.5+mmtk`, the **Build CI still SIGSEGVs** at

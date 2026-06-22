@@ -1,162 +1,92 @@
 # OCaml + MMTk (`mmtk-ocaml`)
 
 A fork of [OCaml](https://github.com/ocaml/ocaml) whose garbage collector is
-provided by [MMTk](https://www.mmtk.io), the Memory Management Toolkit. The goal
-is for **normal OCaml programs to run on a normally-built compiler whose heap is
-managed by MMTk**, eventually distributable as an `ocaml-variants.5.x+mmtk` opam
-switch.
+[MMTk](https://www.mmtk.io), the Memory Management Toolkit. A normally-built
+compiler runs ordinary OCaml programs on an MMTk-managed heap. The eventual goal
+is to ship this as an `ocaml-variants.5.x+mmtk` opam switch.
 
-- **Base:** OCaml `5.5.0-rc1` (branch `5.5+mmtk`).
-- **MMTk binding:** in-tree at [`gc/mmtk/`](gc/mmtk), depending on
-  [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io
-  (not vendored).
-- The upstream OCaml README is preserved at
-  [`README.upstream.adoc`](README.upstream.adoc).
-- **Plan & status: [`ROADMAP.md`](ROADMAP.md)** — milestones, GC-plan tiers, and
-  the full workstream list (start here to continue the project).
-- Design background and rationale: [`fork-handoff.md`](fork-handoff.md).
-- Design notes & deferred investigations: [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md).
+- **Base:** OCaml `5.5.0-rc1`.
+- **Garbage collector:** MMTk is the **only** collector and is on by default —
+  there is no opt-out, and OCaml's stock GC has been removed. The default plan is
+  **Immix**.
+- **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
+  [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
 
-> **Status: MMTk is the GC.** As of M9 it is **on by default** for both the
-> **bytecode** and **native** runtimes — a normal `./configure && make` builds and
-> self-hosts (the compiler bootstrap reaches its fixpoint) entirely on MMTk. The
-> stock GC has been excised — both the minor GC and the major GC (mark/sweep/slice)
-> are deleted; MMTk is the only collector, no opt-out (benchmark against stock via a
-> separate vanilla OCaml 5.5 opam switch). `NoGC`,
-> `MarkSweep`, `Immix`,
-> `GenImmix`, `StickyImmix` all work — collecting plans collect single- **and**
-> multi-domain (`Domain.spawn`), moving plans relocate, generational plans use a
-> write barrier, collection is parallel. **Native** uses TLAB nursery aliasing
-> (MMTk owns the nursery; no OCaml minor GC), so the native fast-path is unchanged
-> and there are no code-generator changes (validated on x86-64 Linux; macOS not yet
-> exercised). The default plan is **Immix**.
->
-> Known limitations (see `ROADMAP.md`): the **moving-GC bug** that SEGVs the
-> CI build at the native `ocamldoc` `Stdlib.3o` manpage step (x86-64 + arm64) is
-> **still open** (reopened 2026-06-22) — it's a mutator deref in `odoc_man.ml:307`,
-> a relocated object whose reference was never updated, likely a missed **native**-stack
-> root. A *separate* moving-GC bug — the unmarshaller triggering a GC mid-`intern_rec`
-> — was fixed (collection is suppressed for the duration of an unmarshal), but that
-> fixed only the **bytecode** `parser.ml` crash, not this native one (see
-> `gc/mmtk/NOTES.md`). Weak arrays / ephemerons / finalisers (incl.
-> cross-domain handover) / lazy work (M6, default-on) and their testsuite dirs pass
-> on Immix; a handful of tests (5) are re-tabled as incompatible-by-design (no
-> stock minor heap under MMTk). Performance is ~1.4–1.8× of the stock GC on
-> GC-heavy workloads today (tuning in progress).
+A normal `./configure && make` builds the world and self-hosts — the compiler
+bootstraps and the documentation builds — entirely on MMTk, for both the
+**bytecode** and **native** runtimes. Native code uses TLAB nursery-aliasing (MMTk
+owns the nursery), so there are no code-generator changes. Collection is parallel
+and stop-the-world; moving plans relocate objects, generational plans use a write
+barrier, and single- and multi-domain (`Domain.spawn`) programs are supported.
 
-## Why bytecode first?
+> Developed and tested on **x86-64 Linux**; native code on macOS is not yet
+> exercised. On GC-heavy workloads MMTk is currently ~1.4–1.8× the stock GC, with
+> tuning ongoing.
 
-OCaml's native code *inlines* a bump-pointer allocation sequence at every
-allocation site, so the GC cannot be swapped by replacing a C function. The
-bytecode interpreter, by contrast, allocates through ordinary C entry points
-(`Alloc_small`, `caml_alloc_shr`), which *can* be redirected. Targeting bytecode
-first lets us bring up the whole MMTk integration (init, allocation, and later
-root scanning + stop-the-world) without touching code generation. Native
-integration comes later.
-
-## Roadmap
-
-| Milestone | Description | Status |
-|-----------|-------------|--------|
-| M0 | Build skeleton: in-tree binding links into the bytecode runtime | ✅ done |
-| M1 | MMTk **NoGC** backs every bytecode allocation | ✅ done |
-| M2 | **MarkSweep**: precise root scanning + stop-the-world, incl. multi-domain (`Domain.spawn`) | ✅ done |
-| M3 | **Immix** (moving): infix-pointer fixup, clean `Out_of_memory` | ✅ done |
-| M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
-| M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans), single- **and** multi-domain; staticlib auto-linked | ✅ done |
-| M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **custom-block finalizers**, and **cross-domain finaliser handover** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` + the re-enabled weak/ephemeron/finaliser/lazy dirs pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
-| M7 | Pass the OCaml testsuite — full bytecode suite: **Immix 1366 / MarkSweep 1367 pass** (of 1551; 140 skipped). Remaining failures are unsupported features (`Gc.stat`/memprof/runtime-events); weak/finaliser dirs now pass (M6). The moving-GC bug that SEGVs the CI `ocamldoc` `Stdlib.3o` step (x86-64 + arm64) is **still open** (reopened 2026-06-22; native deref in `odoc_man.ml:307`, likely a missed native-stack root). A *separate* mid-`intern_rec` GC bug (unmarshaller) was fixed, but only for the bytecode `parser.ml` crash — see Known limitations / `gc/mmtk/NOTES.md`. | 🟡 |
-| M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
-| M9 | **MMTk-only: excise the stock GC** — always-on ✅, stock **minor** GC deleted ✅, stock **major** GC (mark/sweep/slice, ~1750 lines) deleted ✅, `Gc.stat` on MMTk stats (partial) 🟡. Single-GC runtime. Remaining: minor-heap-arena + header/metadata cleanup | 🟢 mostly done |
-| — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | ✅ |
-
-GC-plan bring-up ladder: `NoGC` → `MarkSweep` → `Immix`. Collections are parallel
-and stop-the-world. **See [`ROADMAP.md`](ROADMAP.md) for the full plan, GC-plan
-tiers, and current workstreams.**
-
-## Dependencies
-
-- A working C toolchain and the usual prerequisites to build OCaml (see
-  [`INSTALL.adoc`](INSTALL.adoc)).
-- **Rust + Cargo** (stable; tested with 1.96). The build invokes `cargo` to
-  compile the MMTk binding into a static library.
-- macOS: the binding's static library transitively needs
-  `-lobjc -framework IOKit -framework CoreFoundation -liconv` (wired up
-  automatically in [`Makefile.mmtk`](Makefile.mmtk)).
+**Learn more:** the plan and current status live in [`ROADMAP.md`](ROADMAP.md);
+design notes and investigations in [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md); project
+background in [`fork-handoff.md`](fork-handoff.md). The upstream OCaml README is
+preserved at [`README.upstream.adoc`](README.upstream.adoc).
 
 ## Building
 
-Exactly like upstream OCaml — the MMTk static library is built and linked
-automatically:
+Exactly like upstream OCaml — the MMTk static library is compiled with `cargo` and
+linked in automatically:
 
 ```sh
 ./configure
-make            # builds the world; the gc/mmtk staticlib is built via cargo
+make            # builds the world; gc/mmtk is built and linked for you
 ```
 
-This produces an OCaml toolchain whose runtime is managed by MMTk (the default).
+Beyond the usual OCaml build prerequisites (see [`INSTALL.adoc`](INSTALL.adoc)) you
+need:
 
-## Running a program
+- **Rust + Cargo** (stable) — the build runs `cargo` to produce the binding.
+- On macOS the binding links `-lobjc -framework IOKit -framework CoreFoundation
+  -liconv` (wired up for you in [`Makefile.mmtk`](Makefile.mmtk)).
 
-MMTk is on by default — just build and run as usual:
+## Running
+
+MMTk is on by default — build and run as usual:
 
 ```sh
 OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun ./ocamlc myprog.ml -o myprog.byte
-OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte          # runs on MMTk (Immix)
+OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 ```
 
-> On Linux, run under `setarch "$(uname -m)" -R` (disables ASLR) to avoid an
-> occasional MMTk start-up abort (`failed to mmap meta memory`) — a known
-> fixed-address-metadata interaction, see `ROADMAP.md`.
+> **Linux:** run under `setarch "$(uname -m)" -R` (disables ASLR) to avoid an
+> occasional start-up abort (`failed to mmap meta memory`).
 
-### Environment knobs
+### Configuration
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MMTK_PLAN` | `Immix` | MMTk plan: `Immix`, `StickyImmix`, `MarkSweep`, `NoGC`, … (native requires an Immix-family plan). |
+| `MMTK_PLAN` | `Immix` | MMTk plan: `Immix`, `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
-| `MMTK_VERBOSE` | unset | Print MMTk init + a GC/objects-copied summary at exit. |
+| `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
-mmtk-core's own `MMTK_*` options also work (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
-`MMTK_IMMIX_ALWAYS_DEFRAG`, …). For **native** code, MMTk owns the nursery via TLAB
-nursery-aliasing (no OCaml minor GC), which requires an Immix-family plan
-(`Immix`/`StickyImmix`/`GenImmix`) — a non-Immix plan is a fatal error for native.
-Bytecode allocates through C entry points and works with any plan.
+mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
 
-> MMTk's own options are also read from the environment, e.g.
-> `MMTK_IMMIX_ALWAYS_DEFRAG=true MMTK_IMMIX_DEFRAG_EVERY_BLOCK=true` forces Immix
-> to relocate objects (useful for exercising the moving path).
-
-> `MarkSweep` and `Immix` collect (single- and multi-domain); `Immix` also
-> relocates objects. Under `NoGC`, memory is never reclaimed — long-running or
-> allocation-heavy programs (including the OCaml compiler) will exhaust the heap;
-> that is expected — build or bootstrap the compiler under a collecting plan (the
-> default `Immix`), not `NoGC`.
+**Choosing a plan.** Native code requires an Immix-family plan
+(`Immix`/`StickyImmix`/`GenImmix`), since MMTk owns the nursery via TLAB aliasing;
+bytecode works with any plan. `NoGC` never reclaims memory, so use it only for
+short programs. To compare against the stock GC, build a separate vanilla OCaml 5.5
+opam switch.
 
 ## Repository layout
 
 ```
-gc/mmtk/                in-tree MMTk binding (a self-contained Cargo workspace)
-├── common/             version-independent OCaml value layout (header, slot,
-│                       scanning, object model)
-├── binding/            VMBinding impl + C ABI (libmmtk_ocaml.a)
-└── include/            mmtk_ocaml.h — the C ABI consumed by the runtime
-runtime/mmtk.c          C glue between the bytecode runtime and the binding
-runtime/caml/mmtk.h     glue declarations
-Makefile.mmtk           build glue (cargo + link flags)
-_references/            external repos kept for study only (git-ignored)
+gc/mmtk/            in-tree MMTk binding (a self-contained Cargo workspace)
+├── common/         OCaml value layout: header, slot, scanning, object model
+├── binding/        VMBinding impl + C ABI  ->  libmmtk_ocaml.a
+└── include/        mmtk_ocaml.h, the C ABI consumed by the runtime
+runtime/mmtk.c      C glue between the runtime and the binding
+Makefile.mmtk       build glue (cargo invocation + link flags)
 ```
 
-The runtime patches are concentrated in `runtime/` (`memory.h`, `memory.c`,
-`minor_gc.c`, `interp.c`, `domain.c`, `domain_state.tbl`, `signals.c`, `intern.c`).
-`mmtk.c`/`mmtk.h` is the glue, compiled into both runtimes. As of M9 **MMTk is
-always-on**: allocation, the write barrier, and domain init go unconditionally to
-MMTk (the old `caml_mmtk_vanilla_minor` native mode has been removed — native
-always uses TLAB nursery-aliasing). MMTk is the only collector — there is no
-opt-out; the stock minor and major GC code has been deleted (M9). Benchmark against
-stock via a separate vanilla OCaml 5.5 opam switch.
+Runtime changes are concentrated in `runtime/` (allocation, the write barrier, root
+scanning, and domain init), all routed unconditionally to MMTk.
 
 ## License
 
-Same as OCaml — see [`LICENSE`](LICENSE). MMTk is licensed separately under its
-own terms.
+Same as OCaml — see [`LICENSE`](LICENSE). MMTk is licensed under its own terms.
