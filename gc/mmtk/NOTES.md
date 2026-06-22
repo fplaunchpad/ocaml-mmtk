@@ -5,6 +5,38 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: driving the ocamlrund assert trace — at the first bad SWITCH
+
+*2026-06-22*
+
+**Reproduction (clean, deterministic).** `MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=64
+rr record --num-cores=1 -o /tmp/rr-a ./runtime/ocamlrund ./boot/ocamlc <boot flags>
+-c parsing/parser.ml` → exit 132, aborts at `interp.c:942 CAMLassert((uintnat)index
+< (sizes >> 16))`. ~1 in N runs (others compile clean / SIGSEGV / OOM — all the same
+timing-sensitive bug). **Must record+replay back-to-back with NO rebuild between** —
+rr flags "metadata changed: replay divergence" if `runtime/ocamlrund` is rebuilt,
+giving garbage state. (KC: ocamlrund doesn't use more memory than ocamlrun; the 64
+MB "Out of memory" runs are the bug's timing, not a heap-size issue. So stay at 64
+MB — 96 MB suppresses it.)
+
+**State at the assert** (read via C locals; the debug build is unoptimized so
+`accu`/`pc` are NOT in the same registers as ocamlrun — use `p accu`, not `$r13`):
+`accu = 0x20100c9e850`, header `0x5` → **tag 5, wosize 0**; `index = 5`;
+`sizes = 0x50000` → **5 block-cases (tags 0-4), 0 int-cases**. So `accu`'s tag (5) is
+exactly one past the switch table → the desync. This is the *first* out-of-range
+SWITCH (ocamlrund aborts on the first), so it is at/near the cascade origin.
+
+**Reverse-trace (debug build uses a C `switch(curr_instr)` at interp.c:393/396, with
+a verbose per-op header 377-396 — trace checks + sp CAMLasserts).** The opcode
+immediately before the SWITCH loaded `accu = 0x20100c9e850` (tag 5) from a prior
+`accu = 0x20100e3f7e8` (a **tag-0 wosize-2** block) — i.e. `GETFIELD(0x20100e3f7e8,
+n)` or an `ACC`. So a tag-0 block's field (or a stack slot) holds the tag-5 block,
+and the SWITCH on it expects tags 0-4. Next: identify that opcode exactly, decide
+whether the tag-0 *parent* is the wrong object or its *field* is the wrong value,
+and reverse to that value's source (the GC event that produced it). Reverse via
+*breakpoints* + reverse-stepi (reverse-continue needs 2× to clear the SIGILL;
+reverse SW-watchpoints run to the trace start — unreliable).
+
 ## CI bug: ocamlrund aborts AT the desync (SWITCH assert) — clean repro point
 
 *2026-06-22*
