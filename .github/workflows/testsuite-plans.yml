@@ -68,22 +68,108 @@ jobs:
       # setarch -R disables ASLR (the MMTk fixed-address metadata mmap flake — needed for
       # every MMTk process). MMTK_PLAN/HEAP are inherited by make and every test process.
       # TIMEOUT is ocamltest's per-test SIGKILL deadline — several tests hang under MMTk.
+      # Capture the run to a log. We deliberately do NOT trust make's exit code:
+      # `make -C testsuite parallel` runs the `report` target (summarize.awk) whose
+      # non-zero exit only fires when summarize.awk counts failed/unexpected tests.
+      # When a plan aborts *before any test runs* (native code on a non-Immix plan,
+      # or a Rust panic in an unwired plan), the testsuite never executes a single
+      # test, summarize.awk sees "0 considered / 0 failed", and the whole pipeline
+      # exits 0 — green CI despite hundreds of "Aborted (core dumped)" lines. So we
+      # always succeed this step (|| true) and let the dedicated Gate step below
+      # decide pass/fail by parsing the log. `set +e` so a crashing make can't abort
+      # the step before we've written the log.
       - name: Run testsuite under ${{ matrix.plan }}
         env:
           MMTK_PLAN: ${{ matrix.plan }}
           MMTK_HEAP_SIZE_MB: 4096
         run: |
-          set -o pipefail
+          set +e
           setarch "$(uname -m)" -R make -C testsuite parallel TIMEOUT=120 2>&1 \
-            | tee /tmp/testsuite-${{ matrix.plan }}.log
+            | tee "/tmp/testsuite-${{ matrix.plan }}.log"
+          echo "make pipeline exit (untrusted): ${PIPESTATUS[0]}"
+          exit 0
+      # Gate: decide the job's pass/fail purely from the log. A plan is GREEN only if
+      # ALL of the following hold; otherwise we fail the job (this matrix exists to
+      # surface broken plans, so being conservative is the point):
+      #   1. No MMTk/Rust-specific abort markers in the log (these appear even when
+      #      summarize.awk reports 0 failures, because the crash happens before tests
+      #      run — e.g. an MMTk "requires an Immix-family plan" fatal, or a Rust
+      #      "panicked at". Generic crash strings are deliberately NOT matched here —
+      #      see step 1 below for why.
+      #   2. summarize.awk's own counters report 0 failed AND 0 unexpected errors.
+      #      (ocamltest timeouts surface as failed/unexpected tests, so they are
+      #      counted here as failures, which is what we want.)
+      #   3. The run actually reached a recognizable summary AND ran a non-zero number
+      #      of tests ("N tests considered" with N > 0). A plan that aborts before any
+      #      test runs prints "0 tests considered" — that must FAIL, not pass as
+      #      "nothing failed". This also covers a plan that produces no output at all.
+      # Legitimately skipped/na tests are NOT failures: summarize.awk tracks them in
+      # separate counters and they don't contribute to failed/unexpected.
+      - name: Gate (${{ matrix.plan }})
+        if: always()
+        run: |
+          log="/tmp/testsuite-${{ matrix.plan }}.log"
+          if [ ! -s "$log" ]; then
+            echo "RESULT: FAIL — no log produced (run never started or crashed silently)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # 1. MMTk/Rust-specific abort markers — present even when the test counters
+          #    read 0 (the crash happens before/around tests, not as an ocamltest
+          #    verdict). Key ONLY on strings that can never appear in a legitimate
+          #    OCaml test's expected output. Generic crash text ("Fatal error",
+          #    "Segmentation fault", "core dumped", "Assertion failed") DOES occur in
+          #    normal test output (error-handling/runtime-error tests) — ocamltest
+          #    already scores those correctly via the counters in step 2, so matching
+          #    them here would false-positive the good plans. MMTk's own fatal message
+          #    and Rust panic text cannot occur in OCaml test output, so they are safe.
+          fatal=$(grep -acE \
+            'thread .* panicked|panicked at|RUST_BACKTRACE|fatal runtime error|requires an Immix-family plan|no Immix Default allocator|requires a unified object reference' \
+            "$log")
+
+          # 2. Pull summarize.awk's own counters from the trailing "Summary:" block.
+          #    Format is fixed-width: "  %4d tests failed" / "  %4d unexpected errors"
+          #    / "  %4d tests considered" (see testsuite/summarize.awk END block).
+          num() { grep -aE "^[[:space:]]*[0-9]+ $1" "$log" | tail -1 | grep -aoE '[0-9]+' | head -1; }
+          failed=$(num 'tests failed')
+          unexp=$(num 'unexpected errors')
+          considered=$(num 'tests considered')
+          # Also catch summarize.awk's explicit fatal verdict (errored => exit 3).
+          something_failed=$(grep -acE 'Something failed|fatal error occurred during testing' "$log")
+          : "${failed:=}" "${unexp:=}" "${considered:=}"
+
+          reasons=""
+          [ "$fatal" -gt 0 ] 2>/dev/null && reasons="$reasons; $fatal fatal/abort/panic marker(s)"
+          [ "$something_failed" -gt 0 ] 2>/dev/null && reasons="$reasons; testsuite reported a fatal error"
+          [ -n "$failed" ] && [ "$failed" -gt 0 ] 2>/dev/null && reasons="$reasons; $failed failed"
+          [ -n "$unexp" ] && [ "$unexp" -gt 0 ] 2>/dev/null && reasons="$reasons; $unexp unexpected error(s)"
+          # No summary at all, or a summary that ran zero tests => the plan never got
+          # off the ground. Treat as failure (do NOT let "nothing failed" pass).
+          if [ -z "$considered" ]; then
+            reasons="$reasons; no summary found (aborted before completion)"
+          elif [ "$considered" -le 0 ] 2>/dev/null; then
+            reasons="$reasons; 0 tests considered (aborted before any test ran)"
+          fi
+
+          if [ -n "$reasons" ]; then
+            verdict="RESULT: FAIL — ${reasons#; }"
+            echo "$verdict" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          else
+            echo "RESULT: PASS — ${considered} tests considered, 0 failed, 0 unexpected, no aborts" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      # Human-readable per-plan breakdown. Runs regardless of the gate's verdict so a
+      # red plan still shows its counts (or the abort that prevented any counts).
       - name: Summary (${{ matrix.plan }})
         if: always()
         run: |
           {
             echo "## ${{ matrix.plan }}"
             echo '```'
-            grep -aE 'tests (succeeded|failed|skipped)|not started|unexpected errors|Something failed|All .* tests' \
-              /tmp/testsuite-${{ matrix.plan }}.log | tail -20 || echo "(no summary line found)"
+            grep -aE 'tests (passed|succeeded|failed|skipped)|not started|unexpected errors|tests considered|Something failed|Fatal error|Aborted \(core dumped\)|panicked' \
+              "/tmp/testsuite-${{ matrix.plan }}.log" | tail -20 || echo "(no summary line found)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload log (${{ matrix.plan }})
