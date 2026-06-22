@@ -190,21 +190,14 @@ Caml_inline void write_barrier(
 
   /* MMTk owns the heap, so OCaml's stock write barrier (the minor remembered-set
      update and the major SATB deletion barrier caml_darken) is gone — its GC state
-     is bypassed. The bytecode runtime records the modified slot via MMTk's region
-     barrier instead: needed by the generational plans (GenImmix/StickyImmix), a
-     no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address (for
-     caml_modify, field is 0). The barrier itself no-ops for non-generational plans
-     and before init (it checks caml_mmtk_generational, 0 until a generational plan
-     binds the mutator). */
-#ifndef NATIVE_CODE
+     is bypassed. Both the bytecode and native runtimes record the modified slot via
+     MMTk's region barrier instead: needed by the generational plans
+     (GenImmix/StickyImmix), a no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is
+     the slot address (for caml_modify, field is 0). The barrier itself no-ops for
+     non-generational plans and before init (it checks caml_mmtk_generational, 0
+     until a generational plan binds the mutator), so on the default native Immix
+     fast path the cost is a single predictable branch. */
   caml_mmtk_region_barrier(Op_val(obj) + field, 1);
-#else
-  /* Native caml_modify does not (yet) call the MMTk region barrier — fine for the
-     default non-generational Immix; a gap for native StickyImmix's old->young
-     remembering (see gc/mmtk/NOTES.md). Keeping it a no-op avoids per-write barrier
-     overhead on the default native fast path. */
-  (void)obj; (void)field;
-#endif
 }
 
 CAMLno_tsan /* We remove the ThreadSanitizer instrumentation of memory accesses
@@ -318,13 +311,11 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
              || *fp == 0);
 #endif
   *fp = val;
-#ifndef NATIVE_CODE
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
      generational plans (no-op otherwise). Replaces the stock minor remembered-set
      update, which is dead under always-on MMTk (major_ref is never consumed).
-     Native is a no-op here too (see write_barrier / gc/mmtk/NOTES.md). */
+     Both the bytecode and native runtimes record it (see write_barrier). */
   caml_mmtk_region_barrier(fp, 1);
-#endif
 }
 
 CAMLprim value caml_atomic_load_field (value obj, value vfield)

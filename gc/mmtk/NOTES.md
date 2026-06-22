@@ -5,6 +5,25 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native write barrier wired (`caml_modify` / `caml_initialize`)
+
+*2026-06-22*
+
+Native `caml_modify`/`caml_initialize` were `#ifdef NATIVE_CODE` no-ops — native code under
+a generational plan never recorded old→young refs. Correct for non-generational Immix,
+silently wrong for StickyImmix: an old (mature) object mutated to point at a young object
+wasn't remembered, so the young object was reclaimed at the next nursery collection →
+dangling. Now unconditional (both runtimes); self-gates on `caml_mmtk_generational` so
+non-gen plans pay one predictable branch. A/B repro (`old_young.ml`: a mature array
+reachable only via a global ref — never a live stack local — so its young element tuples
+are found only via the remembered set; compiled native, then churn to force nursery GCs):
+without the barrier native StickyImmix returns 511500, with it 1000000; native Immix 1000000
+either way; the testsuite `gc-roots` dir passes both (its roots are scanned regardless, so
+it does NOT exercise the pattern — the bespoke test is required). Unblocks native GenImmix
+copy-nursery TLAB aliasing (M8).
+
+---
+
 ## linux-O0: debug-runtime stock-GC asserts under MMTk
 
 *2026-06-22*

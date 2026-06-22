@@ -76,8 +76,12 @@ item is in the workstreams / M9 stages below.
    Immix/StickyImmix runs.
 
 **Phase 2 — native generational correctness + finish the stock-GC excision (M9 st.2–5)**
-3. Native `caml_modify` MMTk write barrier (currently a no-op on native) — prerequisite
-   for correct native generational: StickyImmix now, GenImmix in M8.
+3. ✅ Native `caml_modify`/`caml_initialize` MMTk write barrier wired (was a no-op under
+   `#ifdef NATIVE_CODE`). Self-gates on `caml_mmtk_generational`, so non-generational plans
+   pay only a branch. Verified A/B on turing with a targeted old→young test (mature array
+   reachable only via a global): native StickyImmix returned 511500 (wrong — young tuples
+   reclaimed) without it, 1000000 (correct) with it; native Immix 1000000 either way.
+   Unblocks correct native generational (StickyImmix now; GenImmix TLAB aliasing in M8).
 4. Land the stock-major-GC body deletion (merge `m9-stage3-delete`).
 5. Finish stock-minor-GC remnants (`major_ref`/`ephe_ref` structs, `caml_minor_collection`,
    `caml_alloc_small_dispatch`'s stock path).
