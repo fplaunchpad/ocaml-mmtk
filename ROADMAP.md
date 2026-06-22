@@ -43,8 +43,56 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `ocaml-mmtk` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
-| — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 5 plans on x86-64 to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
+| — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (5 wired + 6 unwired) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
 | — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): parallel tests assert stock-GC invariants MMTk doesn't maintain — `caml_gc_phase != Phase_sweep_main` (domain.c), `Field == Debug_free_minor` (memory.h); related to bug #3 + the debug-runtime/MMTk assertion mismatch. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
+
+## Next steps (prioritised)
+
+Execution order — correctness before performance; dependencies noted. Detail for each
+item is in the workstreams / M9 stages below.
+
+**Phase 1 — flag cleanup**
+1. `linux-O0` debug-runtime fix: delete the two stock-GC asserts that are invalid under
+   MMTk-only — `DEBUG_clear`'s `Debug_free_minor` (memory.h) and `caml_gc_phase !=
+   Phase_sweep_main` (domain.c). (Build-CI red 1 of 3.)
+2. **Remove `caml_mmtk_enabled`** (~35 sites): move MMTk init ahead of the first
+   allocation, collapse the branches to unconditional MMTk, delete the now-dead stock
+   alloc/barrier paths + the flag. (Verify the stock `else` paths are never taken first —
+   instrument with a trap.)
+
+**Phase 2 — native generational correctness + finish the stock-GC excision (M9 st.2–5)**
+3. Native `caml_modify` MMTk write barrier (currently a no-op on native) — prerequisite
+   for correct native generational: StickyImmix now, GenImmix in M8.
+4. Land the stock-major-GC body deletion (merge `m9-stage3-delete`).
+5. Finish stock-minor-GC remnants (`major_ref`/`ephe_ref` structs, `caml_minor_collection`,
+   `caml_alloc_small_dispatch`'s stock path).
+6. Remove the minor-heap arena (`allocate/free_minor_heap_arena` + reservation).
+7. Reimplement `Gc.stat`/`quick_stat`/counters/`allocated_bytes` on MMTk stats.
+8. Header/metadata reconciliation (stock color/mark header bits vs MMTk side metadata).
+
+**Phase 3 — correctness (testsuite-driven)**
+9. Triage the all-plans testsuite CI (all 11) and fix the per-plan failures it surfaces.
+10. bug #3 — `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV (StickyImmix, multidomain+moving).
+11. Weak refs — `process_weak_refs` resurrection ordering (`pr5233`) + orphaned-ephemeron gap.
+12. Evacuation-time OOM — graceful `Out_of_memory` in `copy_object` instead of asserting.
+
+**Phase 4 — breadth + platform**
+13. Other Build-CI reds: `i386` (32-bit MMTk staticlib won't build) and `opam` `test-in-prefix`.
+14. macOS native linking (always-on native is Linux-only today).
+15. Unwired plans (bytecode-only — none has a native Immix nursery), per CI triage:
+    `PageProtect`/`SemiSpace` likely cheap; `MarkCompact`/`Compressor` medium; `GenCopy` ≈
+    GenImmix; `ConcurrentImmix` = a SATB write barrier (high-effort, the only high-value one).
+
+**Phase 5 — performance (M8)**
+16. **Native GenImmix — copy-nursery TLAB aliasing**: the stock-faithful native generational
+    model (vanilla OCaml's minor heap *is* a bump-allocated copying nursery). Point
+    `refill_tlab` at the CopySpace nursery bump allocator and let nursery-full drive MMTk's
+    nursery GC; reuse the moving-root + post-GC `young`-reset machinery. Depends on #3.
+    Candidate native default.
+17. Benchmark native configs — GenImmix vs StickyImmix vs Immix → choose the native default;
+    plus dynamic heap sizing, inline the bytecode alloc fast-path, GC-thread-count + LOS tuning.
+
+---
 
 **Architecture decision (2026-06-20): MMTk owns the ENTIRE heap (all-MMTk); the
 minor↔MMTk coordination fix is SUPERSEDED, not just deferred.**
