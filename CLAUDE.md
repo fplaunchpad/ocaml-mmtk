@@ -22,10 +22,12 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   - **`benchmarks`** is an **orphan branch** (no mainline history) holding the CLBG
     benchmark suite (`benchmarks/clbg/` — the Domain.spawn-ported Benchmarks Game
     programs + golden outputs). Kept off the mainline so the OCaml tree carries no
-    benchmark/external code; `.github/workflows/clbg.yml` checks it out (`ref:
-    benchmarks` into `_clbg/`) to run the cross-plan correctness gate. Edit the suite
-    on this branch; it does NOT carry the workflows, so suite-only changes don't
-    auto-trigger CI (runtime/gc changes on the mainline still do).
+    benchmark/external code. The suite sits at the branch **root**;
+    `.github/workflows/clbg.yml` checks it out (`ref: benchmarks`) into
+    `benchmarks/clbg/` (its pre-move path, which the suite Makefile's
+    `ROOT := $(abspath ../..)` assumes) to run the cross-plan correctness gate. Edit
+    the suite on this branch; it does NOT carry the workflows, so suite-only changes
+    don't auto-trigger CI (runtime/gc changes on the mainline still do).
   - **`trunk`** is **upstream OCaml's** dev branch (a leftover in the local clone) —
     NOT ours; never build/push it. (There is no `main` here.) Never push to upstream
     `ocaml/ocaml` regardless — only `mmtk` is ours.
