@@ -19,7 +19,8 @@ stop-the-world; moving plans relocate objects, generational plans use a write
 barrier, and both single- and multi-domain (`Domain.spawn`) programs run.
 
 > Supported on **x86-64 Linux**; native code on macOS is untested. On GC-heavy
-> workloads MMTk runs at ~1.4–1.8× the stock GC (tuning ongoing).
+> workloads MMTk runs at ~1.4–1.8× the stock GC, with tuning ongoing — benchmark
+> against a vanilla OCaml 5.5 opam switch.
 
 **Learn more:** the plan and current status live in [`ROADMAP.md`](ROADMAP.md);
 design notes and investigations in [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md); project
@@ -59,17 +60,27 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MMTK_PLAN` | `Immix` | MMTk plan: `Immix`, `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. |
+| `MMTK_PLAN` | `Immix` | GC plan — see **GC plans** below. |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
 mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
 
-**Choosing a plan.** Native code requires an Immix-family plan
-(`Immix`/`StickyImmix`/`GenImmix`), since MMTk owns the nursery via TLAB aliasing;
-bytecode works with any plan. `NoGC` never reclaims memory, so use it only for
-short programs. To compare against the stock GC, build a separate vanilla OCaml 5.5
-opam switch.
+### GC plans
+
+`MMTK_PLAN` selects the collector:
+
+| Plan | Description | Runtimes |
+|------|-------------|----------|
+| `Immix` *(default)* | mark-region, moving (defragments) | bytecode + native |
+| `StickyImmix` | generational, in-place nursery | bytecode + native |
+| `GenImmix` | generational, copying nursery | bytecode |
+| `MarkSweep` | non-moving | bytecode |
+| `NoGC` | bump-only; never reclaims memory (short programs only) | bytecode |
+
+**Native** code allocates from a TLAB aliased to an MMTk Immix block, so it needs a
+plan with an Immix nursery — `Immix` or `StickyImmix`. Bytecode runs under any of the
+five.
 
 ## Repository layout
 
