@@ -5,6 +5,36 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: mis-forward detector is CLEAN — it's a pure control-flow desync
+
+*2026-06-22*
+
+Built + ran a **mis-forward detector** (`MMTK_DEBUG_STACK_CHECK`): snapshot each
+root (FieldSlot + its pre-GC object) in `collect_root_slot`, then after the closure
+verify `root.load() == get_forwarded_object(old)`. A root resolving to a *different
+valid* object would be a mis-forward. **Result across 16 StickyImmix runs (incl. 2
+crashes): ZERO mis-forwards.** So roots/values are forwarded **perfectly**.
+
+Combined with everything else this means the bug is a **pure control-flow desync**:
+the interpreter runs one function's bytecode against another's stack/args, and
+*correct* values are consumed where a different type/value was expected. Verified
+*not* the cause: stale roots (clean), mis-forwarded roots (clean), object copy,
+classify/load/store, the write barrier, `Alloc_small` Setup/Restore, stack
+relocation (`check_stacks` reloads `sp`; no realloc in the window), and `sp` is
+consistent across the checked APPLY2→GRAB window. Yet control flow diverges — so
+*something* feeding control flow is wrong despite all values/roots/`sp` checking
+out. The two remaining candidates:
+1. a **heap-field mis-forward** (an object field updated to a valid-but-wrong
+   object) — the detector covers roots only, not the millions of heap fields, and
+   `sanity` can't catch a mis-forward-to-a-valid-object (it follows the edge);
+2. an `sp` drift in an **ancestor** frame (the detector doesn't check `sp`).
+
+The cascade is deep (each frame got a wrong-but-valid closure/arg from its caller),
+so the origin is many levels up. Pinning it needs either all-heap-field snapshot
+mis-forward detection (storage-heavy) or a long reverse walk to the first wrong
+control transfer. Trace preserved at `~/rr-sticky-fresh` (`rr replay`); record fresh
+with `rr record --num-cores=1`.
+
 ## CI bug: cascade traced — root is a *control-flow* desync (likely a mis-forward)
 
 *2026-06-22*
