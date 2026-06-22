@@ -166,6 +166,24 @@ item is in the workstreams / M9 stages below.
     pushes the in-use bucket back before the raise. Verified 25/25→0/25 at Immix 64 MB
     (+20/20 re-run), `world.opt` clean, multidomain OK. (The earlier "corruption" read was a
     stale-binary instrumentation artifact — see `gc/mmtk/NOTES.md`.)
+12c. Testsuite triage follow-ups (2026-06-23 full Immix run: **1450/1547 pass**; the rest are
+    mostly known-unsupported — statmemprof, runtime-events, Gc.stat-pacing — or bug #3b
+    intermittent multidomain hangs). Remaining real (non-crashing) gaps:
+    - `c-api/aligned_alloc` (bytecode 4/4 fail): `caml_atomic_make_contended` (alloc.c) relies on
+      `caml_alloc_shr` returning a `Cache_line_bsize`-aligned block; MMTk's bytecode bump
+      allocator doesn't — false-sharing avoidance silently broken in bytecode (native lands
+      aligned via TLAB). Fix: route it through an alignment-aware MMTk alloc (mmtk-core `alloc`
+      takes align/offset).
+    - `lib-marshal/fuzzy` (byte+native timeout): unmarshalling pathologically slow — per-object
+      `caml_mmtk_try_alloc_shr` with GC disabled across each unmarshal (the bug #2 intern path).
+      Profile; confirm it's slowdown, not a loop.
+    - `output-complete-obj/test`: `-output-complete-obj` + `${mkexe}` manual link omits
+      `mmtk_c_libraries` → `undefined reference to mmtk_ocaml_*`. Real gap for hand-linked
+      complete objects.
+    - Re-enable candidates (disabled with now-stale "finaliser not supported" reasons —
+      finalisers work under `MMTK_WEAK_REFS=1`): `callback/test_finaliser_gc.ml`,
+      `callback/test_gc_alarm.ml`, `basic-more/simplif_under_lambda.ml` — restore their
+      `(* TEST *)` blocks + verify.
 
 **Phase 4 — breadth + platform**
 13. Build-CI: `opam` `test-in-prefix` relocatability — **done** (configure.ac relocatable
