@@ -203,7 +203,9 @@ CAMLextern wchar_t* caml_stat_wcsconcat(int n, ...);
 #ifdef DEBUG
 Caml_inline void DEBUG_clear(value result, mlsize_t wosize) {
   for (mlsize_t i=0; i<wosize; ++i) {
-    CAMLassert(Field(result, i) == Debug_free_minor);
+    /* No Debug_free_minor assert: MMTk owns the heap (the stock minor heap is gone),
+       so freshly-handed-out blocks are not stock-poisoned. Just poison the slot as
+       uninitialised for the use-before-init debug check. */
     Field(result, i) = Debug_uninit_minor;
   }
 }

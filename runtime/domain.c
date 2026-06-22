@@ -2309,8 +2309,8 @@ void caml_domain_terminate(bool last)
 
     caml_finish_marking();
 
-    /* Orphaning does not happen in [Phase_sweep_main]. */
-    CAMLassert (caml_gc_phase != Phase_sweep_main);
+    /* (Dropped the stock `caml_gc_phase != Phase_sweep_main` assert: MMTk is the only
+       collector and does not drive caml_gc_phase, so that invariant no longer applies.) */
     caml_orphan_ephemerons(domain_state);
     caml_orphan_finalisers(domain_state);
 
