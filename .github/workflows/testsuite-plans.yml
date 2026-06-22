@@ -49,7 +49,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plan: [Immix, StickyImmix, GenImmix, MarkSweep, NoGC]
+        # All 11 mmtk-core 0.32 plans. Five are wired up in our binding (Immix,
+        # StickyImmix, GenImmix, MarkSweep, NoGC); the other six (SemiSpace, GenCopy,
+        # PageProtect, MarkCompact, Compressor, ConcurrentImmix) are not yet — they
+        # are included so the CI surfaces exactly that (expected to fail at startup),
+        # and flags immediately if any starts working.
+        plan: [Immix, StickyImmix, GenImmix, MarkSweep, NoGC,
+               SemiSpace, GenCopy, PageProtect, MarkCompact, Compressor, ConcurrentImmix]
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4

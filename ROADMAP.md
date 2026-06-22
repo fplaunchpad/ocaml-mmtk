@@ -108,7 +108,26 @@ defrag). Heap exhaustion raises a catchable `Out_of_memory`. Collections are
 
 The binding is *moving-ready* (forwarding-pointer spec, pinning bit, updatable
 slots, `copy`/`copy_to`), so plans differ in mutator-side machinery, not trait code.
-The supported plans, all implemented and validated:
+
+mmtk-core 0.32 offers 11 plans; **5 are wired up in our binding**, the other 6 are not
+(yet). The `Testsuite (all GC plans)` CI workflow (`.github/workflows/testsuite-plans.yml`)
+runs the testsuite under all 11 to surface exactly that.
+
+| Plan | Kind | Moving | Wired up? |
+|------|------|:------:|:---------:|
+| `NoGC` | bump-pointer, no collection | no | ✅ |
+| `MarkSweep` | free-list mark-sweep | no | ✅ |
+| `Immix` | mark-region w/ opportunistic defrag | yes | ✅ (default) |
+| `StickyImmix` | Immix + sticky mark-bit (generational, no copying nursery) | yes | ✅ |
+| `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ |
+| `SemiSpace` | classic copying (two spaces) | yes | ❌ |
+| `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ❌ |
+| `MarkCompact` | Lisp-2 mark-compact | yes | ❌ |
+| `Compressor` | Compressor-style bitmap mark-compact | yes | ❌ |
+| `PageProtect` | debug — page-granularity alloc, protects dead pages | no | ❌ |
+| `ConcurrentImmix` | concurrent non-moving Immix using SATB | no | ❌ |
+
+The five wired-up plans, all implemented and validated:
 
 - **Non-moving:** `MarkSweep` (collects, single- and multi-domain) and `NoGC`
   (bump-only, never reclaims — short programs / bring-up only).
