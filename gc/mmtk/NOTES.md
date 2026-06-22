@@ -5,6 +5,36 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: driving the fresh trace — desync is a SWITCH cascade from upstream
+
+*2026-06-22*
+
+Drove `~/rr-sticky-fresh` interactively. The crash (GETFIELD3 on `accu=0x3`) is the
+tail of a **control-flow desync cascade**, mechanism now pinned:
+- The crashing function entered via **GRAB** (arity OK) → **ACC0** (`accu=sp[0]`) →
+  **SWITCH** (`interp.c:938`). At the SWITCH, `accu = sp[0] = 0x20100e3f7e8` is a
+  **tag-0 block** (hdr `0x800`), but `sizes = 0x112a` ⇒ `sizes>>16 = 0` block-cases
+  (only int-cases). So this SWITCH expects an **int**; given a block it takes the
+  block branch and indexes `pc[(sizes&0xFFFF)+0] = pc[0x112a]` — *past* the int
+  jump-table → a garbage offset → wild `pc` → (a few wild opcodes later) the
+  GETFIELD3 crash.
+- So `sp[0]` (the function's first arg) has the **wrong type** — a valid block
+  where an int is required. It was already a block at the GRAB. Reversing to the
+  caller's **APPLY2** (`interp.c:505`): it passed `arg1 = 0x20103b07980`, which a GC
+  during the call's `check_stacks` then forwarded to `0x20100e3f7e8` — i.e. `arg1`
+  was a **block before and after** that GC (not type-flipped by it; the slot was
+  correctly updated). So the caller genuinely passed a block to an int-expecting
+  function: a **type error → the caller is itself desynced**.
+
+So the crash is the *downstream* end of a cascade of desyncs (each frame runs one
+function's code against another's stack/args). No missed/stale root is involved
+(roots clean, values forward correctly, MarkSweep clean) — it's pure control-flow
+divergence that began upstream, after some GC, and propagated through calls. The
+remaining work is to find the **first** desync (walk back through the cascade /
+bisect on GC count to the GC after which control flow first diverges). Tooling: the
+preserved trace + `--num-cores=1` recording; reverse to control-transfer opcodes
+(APPLY/RETURN/GRAB/do_return) is reliable, reverse-watchpoints are not.
+
 ## CI bug: fresh StickyImmix rr trace + it's an `sp` (stack-pointer) misalignment
 
 *2026-06-21*
