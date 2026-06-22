@@ -55,10 +55,14 @@ item is in the workstreams / M9 stages below.
 1. `linux-O0` debug-runtime fix: delete the two stock-GC asserts that are invalid under
    MMTk-only — `DEBUG_clear`'s `Debug_free_minor` (memory.h) and `caml_gc_phase !=
    Phase_sweep_main` (domain.c). (Build-CI red 1 of 3.)
-2. **Remove `caml_mmtk_enabled`** (~35 sites): move MMTk init ahead of the first
-   allocation, collapse the branches to unconditional MMTk, delete the now-dead stock
-   alloc/barrier paths + the flag. (Verify the stock `else` paths are never taken first —
-   instrument with a trap.)
+2. ✅ **Removed `caml_mmtk_enabled`** (~35 sites collapsed to unconditional MMTk; 153
+   lines deleted). No init-reordering was needed — no OCaml *value* allocation happens
+   pre-init (the `domain_create` allocs are C/`caml_stat`/mmap), and the region barrier
+   self-gates on `caml_mmtk_generational`. The one real pre-init hazard the build+run
+   caught: `caml_mmtk_enter/leave_blocking` (reached via `caml_open_descriptor_in` at
+   startup with `Caml_state` still NULL) now guards `Caml_state != NULL`. Verified: clean
+   `make world.opt` (bytecode + native self-host) + bug-#2 ocamldoc repro + native
+   Immix/StickyImmix runs.
 
 **Phase 2 — native generational correctness + finish the stock-GC excision (M9 st.2–5)**
 3. Native `caml_modify` MMTk write barrier (currently a no-op on native) — prerequisite
@@ -73,7 +77,10 @@ item is in the workstreams / M9 stages below.
 **Phase 3 — correctness (testsuite-driven)**
 9. Triage the all-plans testsuite CI (all 11) and fix the per-plan failures it surfaces.
 10. bug #3 — `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV (StickyImmix, multidomain+moving).
-11. Weak refs — `process_weak_refs` resurrection ordering (`pr5233`) + orphaned-ephemeron gap.
+11. Weak refs — fix `process_weak_refs` resurrection ordering (`pr5233`) + the orphaned-ephemeron
+    gap; **then retire the transitional `MMTK_WEAK_REFS` flag** (make `process_weak_refs`
+    unconditional, like `caml_mmtk_enabled`). Until that fix, `MMTK_WEAK_REFS=0` is the safety
+    fallback (conservative never-clear), so it stays.
 12. Evacuation-time OOM — graceful `Out_of_memory` in `copy_object` instead of asserting.
 
 **Phase 4 — breadth + platform**
@@ -443,9 +450,11 @@ Stages (each independently buildable + testable):
 1. **Always-on — ✅ done.** Dropped `MMTK_ENABLED`/`caml_mmtk_wanted`; MMTk inits
    unconditionally at startup; default plan is Immix (a collecting plan — NoGC can't
    sustain the runtime); the `caml_mmtk_vanilla_minor` native mode is removed.
-   `caml_mmtk_enabled` is retained only as the pre-init readiness guard for the brief
-   startup window (removing it needs MMTk-init-before-first-alloc, a separate perf
-   step). The stock-GC code paths are now dead — they are deleted in the stages below.
+   `caml_mmtk_enabled` has been **removed** (2026-06-22): no OCaml *value* allocation
+   happens pre-init, so the alloc/barrier paths are unconditional MMTk; only the
+   blocking-section notify (`caml_mmtk_enter/leave_blocking`) guards `Caml_state != NULL`
+   for the early-startup window. The stock-GC code paths are dead — deleted in the stages
+   below.
 2. **Delete the stock minor GC** (`minor_gc.c`) — 🟡 mostly done. Removed: the
    `MMTK_DISABLE` escape (MMTk is the only collector); the oldify/promotion machinery
    (`oldify_one`, `oldify_mopup`, `oldify_scanning_flags`, `alloc_shared`,

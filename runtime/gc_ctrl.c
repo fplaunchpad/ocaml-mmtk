@@ -71,11 +71,9 @@ CAMLprim value caml_gc_quick_stat(value v)
      Gc.stat reports the real heap instead of a near-empty one. */
   uintnat mmtk_heap_words = 0, mmtk_live_words = 0, mmtk_free_words = 0,
           mmtk_collections = 0;
-  if (caml_mmtk_enabled) {
-    caml_mmtk_gc_stats(&mmtk_heap_words, &mmtk_live_words, &mmtk_free_words,
-                       &mmtk_collections);
-    majcoll = mmtk_collections;
-  }
+  caml_mmtk_gc_stats(&mmtk_heap_words, &mmtk_live_words, &mmtk_free_words,
+                     &mmtk_collections);
+  majcoll = mmtk_collections;
 
   res = caml_alloc_tuple (18);
   Store_field (res, 0, caml_copy_double ((double)s.alloc_stats.minor_words));
@@ -83,22 +81,17 @@ CAMLprim value caml_gc_quick_stat(value v)
   Store_field (res, 2, caml_copy_double ((double)s.alloc_stats.major_words));
   Store_field (res, 3, Val_long (mincoll));
   Store_field (res, 4, Val_long (majcoll));
-  Store_field (res, 5, Val_long (caml_mmtk_enabled ? mmtk_heap_words :
-    s.heap_stats.pool_words + s.heap_stats.large_words));
+  Store_field (res, 5, Val_long (mmtk_heap_words));
   Store_field (res, 6, Val_long (0));
-  Store_field (res, 7, Val_long (caml_mmtk_enabled ? mmtk_live_words :
-    s.heap_stats.pool_live_words + s.heap_stats.large_words));
+  Store_field (res, 7, Val_long (mmtk_live_words));
   Store_field (res, 8, Val_long (
     s.heap_stats.pool_live_blocks + s.heap_stats.large_blocks));
-  Store_field (res, 9, Val_long (caml_mmtk_enabled ? mmtk_free_words :
-    s.heap_stats.pool_words - s.heap_stats.pool_live_words
-    - s.heap_stats.pool_frag_words));
+  Store_field (res, 9, Val_long (mmtk_free_words));
   Store_field (res, 10, Val_long (0));
   Store_field (res, 11, Val_long (0));
   Store_field (res, 12, Val_long (s.heap_stats.pool_frag_words));
   Store_field (res, 13, Val_long (compactions));
-  Store_field (res, 14, Val_long (caml_mmtk_enabled ? mmtk_heap_words :
-    s.heap_stats.pool_max_words + s.heap_stats.large_max_words));
+  Store_field (res, 14, Val_long (mmtk_heap_words));
   Store_field (res, 15, Val_long (caml_current_stack_size()));
   Store_field (res, 16, Val_long (s.alloc_stats.forced_major_collections));
   Store_field (res, 17, Val_long (caml_live_stacks_memory()));
@@ -258,15 +251,9 @@ static caml_result gc_major_res(int force_compaction)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MAJOR);
   caml_gc_log ("Major GC cycle requested");
-  if (caml_mmtk_enabled) {
-    /* MMTk owns the heap: run a real MMTk collection, not the stock major cycle
-       (which would corrupt the bypassed stock heap state). */
-    caml_mmtk_collect();
-  } else {
-    caml_empty_minor_heaps_once();
-    caml_finish_major_cycle(force_compaction);
-    caml_reset_major_pacing(false);
-  }
+  /* MMTk owns the heap: run a real MMTk collection (the stock major cycle is gone). */
+  (void)force_compaction;
+  caml_mmtk_collect();
   caml_result result = caml_process_pending_actions_res();
   CAML_EV_END(EV_EXPLICIT_GC_MAJOR);
   return result;
@@ -283,21 +270,10 @@ static caml_result gc_full_major_res(void)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_FULL_MAJOR);
   caml_gc_log ("Full Major GC requested");
-  if (caml_mmtk_enabled) {
-    /* MMTk: trigger a real collection instead of the stock major cycle. */
-    caml_mmtk_collect();
-    caml_result res = caml_process_pending_actions_res();
-    if (caml_result_is_exception(res)) return res;
-  } else {
-  /* In general, it can require up to 3 GC cycles for a
-     currently-unreachable object to be collected. */
-  for (int i = 0; i < 3; i++) {
-    caml_finish_major_cycle(0);
-    caml_reset_major_pacing(i == 2);
-    caml_result res = caml_process_pending_actions_res();
-    if (caml_result_is_exception(res)) return res;
-  }
-  }
+  /* MMTk: trigger a real collection (the stock major cycle is gone). */
+  caml_mmtk_collect();
+  caml_result res = caml_process_pending_actions_res();
+  if (caml_result_is_exception(res)) return res;
   ++ Caml_state->stat_forced_major_collections;
   CAML_EV_END(EV_EXPLICIT_GC_FULL_MAJOR);
   return Result_unit;
@@ -314,10 +290,8 @@ CAMLprim value caml_gc_major_slice (value v)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MAJOR_SLICE);
   CAMLassert (Is_long (v));
-  /* MMTk does whole-heap STW collections, not incremental slices: skip the stock
-     slice (reclamation happens at the next MMTk collection). */
-  if (!caml_mmtk_enabled)
-    caml_major_collection_slice(Long_val(v));
+  /* MMTk does whole-heap STW collections, not incremental slices: nothing to do
+     here (reclamation happens at the next MMTk collection). */
   caml_result result = caml_process_pending_actions_res();
   CAML_EV_END(EV_EXPLICIT_GC_MAJOR_SLICE);
   return caml_get_value_or_raise(result);
@@ -329,20 +303,9 @@ CAMLprim value caml_gc_compaction(value v)
   CAML_EV_BEGIN(EV_EXPLICIT_GC_COMPACT);
   CAMLassert (v == Val_unit);
   caml_result result = Result_unit;
-  if (caml_mmtk_enabled) {
-    /* MMTk: a collection (Immix may defrag) stands in for stock compaction. */
-    caml_mmtk_collect();
-    result = caml_process_pending_actions_res();
-  } else {
-  /* We do a full major before this compaction. See [caml_full_major_res] for
-     why this needs three iterations. */
-  for (int i = 0; i < 3; i++) {
-    caml_finish_major_cycle(i == 2);
-    caml_reset_major_pacing(i == 2);
-    result = caml_process_pending_actions_res();
-    if (caml_result_is_exception(result)) break;
-  }
-  }
+  /* MMTk: a collection (Immix may defrag) stands in for stock compaction. */
+  caml_mmtk_collect();
+  result = caml_process_pending_actions_res();
   ++ Caml_state->stat_forced_major_collections;
   CAML_EV_END(EV_EXPLICIT_GC_COMPACT);
   return caml_get_value_or_raise(result);

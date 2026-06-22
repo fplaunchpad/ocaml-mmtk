@@ -88,9 +88,9 @@ sp is a local copy of the global variable Caml_state->current_stack->sp. */
 #define CAML_MMTK_RESTORE_ROOTS Restore_after_gc
 /* Unlike the stock runtime (where caml_alloc_shr never triggers a GC), an MMTk
    caml_alloc_shr can stop-the-world. Wrap the interpreter's direct shr calls so
-   accu/env and the stack pointer are published around them when MMTk is on. */
-#define Mmtk_shr_enter do { if (caml_mmtk_enabled) Setup_for_gc; } while (0)
-#define Mmtk_shr_leave do { if (caml_mmtk_enabled) Restore_after_gc; } while (0)
+   accu/env and the stack pointer are published around them (MMTk owns the heap). */
+#define Mmtk_shr_enter do { Setup_for_gc; } while (0)
+#define Mmtk_shr_leave do { Restore_after_gc; } while (0)
 /* Do call asynchronous callbacks from allocation functions */
 #define Enter_gc(dom_st, wosize) do {                            \
     Setup_for_gc;                                                \

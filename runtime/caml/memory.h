@@ -247,10 +247,7 @@ enum caml_alloc_small_flags {
   Alloc_small_with_reserved(result, wosize, tag, GC, (uintnat)0)
 
 #ifndef NATIVE_CODE
-/* MMTk bytecode bring-up: route small allocations through MMTk once enabled.
-   Until caml_mmtk_enabled is set (early runtime bootstrap), fall back to the
-   stock minor-heap bump path. See runtime/mmtk.c. */
-extern int caml_mmtk_enabled;
+/* Bytecode small allocations go through MMTk — it owns the heap. See runtime/mmtk.c. */
 extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                    reserved_t reserved);
 /* An MMTk allocation may stop-the-world and scan roots at any point. In
@@ -268,29 +265,15 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                                 CAMLassert ((wosize) >= 1); \
                                           CAMLassert ((tag_t) (tag) < 256); \
                                  CAMLassert ((wosize) <= Max_young_wosize); \
-  if (caml_mmtk_enabled) {                                                  \
-    /* Publish interp roots, allocate into a temp (the allocation may GC),   \
-       restore roots, THEN assign result. The temp is essential: when result \
-       is `accu`/`env`, Restore_after_gc would otherwise clobber it. */      \
-    value caml_mmtk_blk;                                                     \
-    CAML_MMTK_SETUP_ROOTS;                                                   \
-    caml_mmtk_blk = caml_mmtk_alloc_small((wosize), (tag), (reserved));      \
-    CAML_MMTK_RESTORE_ROOTS;                                                 \
-    (result) = caml_mmtk_blk;                                               \
-  } else {                                                                  \
-    caml_domain_state* dom_st = Caml_state;                                 \
-    dom_st->young_ptr -=  Whsize_wosize(wosize);                            \
-    if (Caml_check_gc_interrupt(dom_st)) {                                  \
-      GC(dom_st, wosize);                                                   \
-    }                                                                       \
-    Hd_hp (dom_st->young_ptr) =                                             \
-      Make_header_with_reserved((wosize), (tag), 0, (reserved));            \
-    (result) = Val_hp (dom_st->young_ptr);                                  \
-    /* DEBUG_clear asserts the fresh cell holds the minor-heap poison       \
-       (Debug_free_minor); only the stock minor heap maintains that. MMTk   \
-       cells are not poisoned, so DEBUG_clear is stock-path only. */         \
-    DEBUG_clear ((result), (wosize));                                       \
-  }                                                                         \
+  /* MMTk owns the heap; there is no stock minor slow path (the GC arg is        \
+     unused). Publish interp roots, allocate into a temp (the allocation may GC), \
+     restore roots, THEN assign result. The temp matters: when result is          \
+     `accu`/`env`, Restore_after_gc would otherwise clobber it. */                \
+  value caml_mmtk_blk;                                                       \
+  CAML_MMTK_SETUP_ROOTS;                                                     \
+  caml_mmtk_blk = caml_mmtk_alloc_small((wosize), (tag), (reserved));        \
+  CAML_MMTK_RESTORE_ROOTS;                                                   \
+  (result) = caml_mmtk_blk;                                                 \
 }while(0)
 #endif /* NATIVE_CODE */
 

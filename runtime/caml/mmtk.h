@@ -18,11 +18,6 @@
 #include "mlvalues.h"
 #include "roots.h"
 
-/* Set to 1 once MMTk is initialised and the current domain's mutator is bound.
- * The allocation macros consult this to decide MMTk vs. the stock minor heap;
- * it stays 0 during early runtime bootstrap (before MMTk is ready). */
-extern int caml_mmtk_enabled;
-
 /* TLAB / nursery-aliasing mode (MMTK_TLAB=1): MMTk owns the nursery; the native
  * fast-path bumps an MMTk Immix block and the runtime refills a new block
  * instead of running a minor GC. No OCaml minor GC, no promotion. Read on the

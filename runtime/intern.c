@@ -463,33 +463,16 @@ static struct intern_item * intern_resize_stack(struct caml_intern_state* s,
 static void intern_alloc_storage(struct caml_intern_state* s, mlsize_t whsize,
                                  mlsize_t num_objects)
 {
-  mlsize_t wosize;
-  value v;
-
   if (whsize == 0) {
     CAMLassert (s->intern_obj_table == NULL);
     return;
   }
-  wosize = Wosize_whsize(whsize);
 
-  if (wosize <= Max_young_wosize && wosize != 0
-      /* Under MMTk, never use the bulk minor-heap pre-allocation: it packs many
-         sub-objects into one no-scan String_tag block, which MMTk would not
-         trace into. Instead leave intern_dest NULL so each object is allocated
-         individually via MMTk (see intern_alloc_obj). This MUST apply in NATIVE
-         code too: native unmarshalling otherwise allocates outside MMTk spaces,
-         which the root-scan pointer filter drops -> referents collected ->
-         dangling refs (the CI ocamldoc Stdlib.3o SIGSEGV). */
-      && !caml_mmtk_enabled
-     ) {
-    /* don't track bulk allocation in minor heap with statmemprof;
-     * individual block allocations are tracked instead */
-    Alloc_small(v, wosize, String_tag, Alloc_small_enter_GC_no_track);
-    s->intern_dest = (header_t *) Hp_val(v);
-    s->intern_dest_end = s->intern_dest + whsize;
-  } else {
-    CAMLassert (s->intern_dest == NULL);
-  }
+  /* MMTk owns the heap: never use the stock bulk minor-heap pre-allocation (it
+     packs sub-objects into one no-scan String_tag block MMTk would not trace
+     into). intern_dest stays NULL; each object is allocated individually and
+     traceably in intern_alloc_obj. */
+  CAMLassert (s->intern_dest == NULL);
   s->intern_num_objects = num_objects;
   s->obj_counter = 0;
   if (num_objects > 0) {
@@ -509,57 +492,20 @@ static void intern_alloc_storage(struct caml_intern_state* s, mlsize_t whsize,
 static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
                               mlsize_t wosize, tag_t tag)
 {
-  void* p;
-
+  (void)d;
   if (CAMLunlikely(wosize > Max_wosize)) {
     intern_cleanup_failwith(s, "input_value: block size too large");
   }
-  if (s->intern_dest) {
-    CAMLassert ((value*)s->intern_dest >= d->young_start &&
-                (value*)s->intern_dest < d->young_end);
-    if (CAMLunlikely(wosize >= s->intern_dest_end - s->intern_dest)) {
-      intern_cleanup_failwith(s, "input_value: invalid allocation");
-    }
-    p = s->intern_dest;
-    *s->intern_dest = Make_header (wosize, tag, 0);
-    caml_memprof_sample_block(Val_hp(p), wosize, 1 + wosize,
-                              CAML_MEMPROF_SRC_MARSHAL);
-    s->intern_dest += 1 + wosize;
-  } else {
-    /* Under MMTk, unmarshalled objects must be MMTk-allocated and traceable;
-       otherwise (as with caml_shared_try_alloc) they live outside MMTk spaces,
-       are dropped by the root-scan pointer filter, and everything reachable
-       only through them (e.g. caml_global_data and its globals) is collected. */
-    if (caml_mmtk_enabled) {
-      /* Non-raising alloc: on exhaustion run intern_cleanup (frees the intern
-         state and re-enables collection, which intern_rec disabled) before
-         raising, mirroring the stock caml_shared_try_alloc path below. */
-      value v = caml_mmtk_try_alloc_shr(wosize, tag);
-      if (v == (value) NULL) {
-        intern_cleanup(s);
-        caml_raise_out_of_memory();
-      }
-      return v;
-    }
-    /* Under MMTk this stock shared-heap path must never run: it allocates outside
-       MMTk spaces, which the root-scan pointer filter drops -> referents collected
-       -> dangling refs (the CI ocamldoc crash). The caml_mmtk_enabled branch above
-       returns first; this is reachable only in the brief pre-init window. */
-    CAMLassert(!caml_mmtk_enabled);
-    p = caml_shared_try_alloc(d->shared_heap, wosize, tag,
-                              0 /* no reserved bits */);
-    if (p == NULL) {
-      intern_cleanup (s);
-      caml_raise_out_of_memory();
-    }
-    caml_update_major_allocated_words(
-      d, Whsize_wosize(wosize), 1 /* direct */);
-    Hd_hp(p) = Make_header (wosize, tag, caml_allocation_status());
-    caml_memprof_sample_block(Val_hp(p), wosize,
-                              Whsize_wosize(wosize),
-                              CAML_MEMPROF_SRC_MARSHAL);
+  /* MMTk owns the heap: allocate each unmarshalled object individually and
+     traceably. Non-raising alloc so that on exhaustion we run intern_cleanup
+     (freeing the intern state and re-enabling collection, which intern_rec
+     disabled) before raising Out_of_memory. */
+  value v = caml_mmtk_try_alloc_shr(wosize, tag);
+  if (v == (value) NULL) {
+    intern_cleanup(s);
+    caml_raise_out_of_memory();
   }
-  return Val_hp(p);
+  return v;
 }
 
 static void intern_rec(struct caml_intern_state* s,
@@ -587,7 +533,7 @@ static void intern_rec(struct caml_intern_state* s,
      those raw pointers dangling. Disabling collection here restores the invariant;
      intern_cleanup re-enables it (on every success and error/longjmp exit). On
      genuine exhaustion the alloc fails -> Out_of_memory, as in vanilla. */
-  if (caml_mmtk_enabled && !s->gc_was_disabled) {
+  if (!s->gc_was_disabled) {
     caml_mmtk_disable_collection();
     s->gc_was_disabled = 1;
   }

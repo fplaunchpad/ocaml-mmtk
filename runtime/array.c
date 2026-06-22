@@ -760,9 +760,7 @@ CAMLprim value caml_uniform_array_fill(
      write_barrier — a gap for native StickyImmix, fine for the default Immix). */
   for (intnat i = 0; i < len; i++) fp[i] = val;
 #ifndef NATIVE_CODE
-  if (caml_mmtk_enabled) {
-    caml_mmtk_region_barrier(fp, len);
-  }
+  caml_mmtk_region_barrier(fp, len);
 #endif
   return Val_unit;
 }

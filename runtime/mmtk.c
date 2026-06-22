@@ -36,13 +36,6 @@
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 
-/* MMTk is the garbage collector for this fork — the only one. The flag is 0 only
-   during the brief early-startup window before MMTk is initialised and the first
-   domain's mutator is bound (a handful of pre-init allocations take the stock
-   path); it is set to 1 in caml_mmtk_domain_init and stays 1 for the rest of the
-   process. There is no opt-out. */
-int caml_mmtk_enabled = 0;
-
 /* Collection-suppression counter (see caml/mmtk.h, runtime/intern.c). MMTk's
    gc_trigger consults caml_mmtk_collection_enabled() via the binding's
    VMCollection::is_collection_enabled; while the count is non-zero no collection
@@ -165,7 +158,6 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
     mmtk_ocaml_initialize_collection((uintptr_t)dom);
     caml_mmtk_collection_started = 1;
   }
-  caml_mmtk_enabled = 1;
 
 #ifdef NATIVE_CODE
   /* Native code inlines a bump allocator over the young region, so MMTk owns the
@@ -508,7 +500,7 @@ void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
    for NoGC (cannot collect) and when MMTk is disabled. */
 void caml_mmtk_collect(void)
 {
-  if (caml_mmtk_enabled && caml_mmtk_collects)
+  if (caml_mmtk_collects)
     mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
 }
 
@@ -519,7 +511,7 @@ void caml_mmtk_collect(void)
    blits. Self-gated: a no-op unless an MMTk generational plan is active. */
 void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
 {
-  if (caml_mmtk_enabled && caml_mmtk_generational)
+  if (caml_mmtk_generational)
     mmtk_ocaml_region_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                               (size_t) count);
 }
@@ -551,7 +543,7 @@ void caml_mmtk_park(void)
    safepoint, e.g. Setup_for_event) until the collection finishes. */
 void caml_mmtk_stw_poll(void)
 {
-  if (caml_mmtk_enabled && mmtk_ocaml_stw_active()) {
+  if (mmtk_ocaml_stw_active()) {
     caml_mmtk_park();
   }
 }
@@ -595,19 +587,24 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
    safe for GC; on leaving it must wait out any in-progress collection. */
 void caml_mmtk_enter_blocking(void)
 {
-  if (caml_mmtk_enabled) mmtk_ocaml_enter_blocking();
+  /* Caml_state may be NULL and the mutator unbound during early startup (e.g.
+     caml_open_descriptor_in before the domain is created); there is no collection
+     to coordinate with until this domain is MMTk-bound. */
+  if (Caml_state != NULL && Caml_state->mmtk_mutator != NULL)
+    mmtk_ocaml_enter_blocking();
 }
 
 void caml_mmtk_leave_blocking(void)
 {
-  if (caml_mmtk_enabled) mmtk_ocaml_leave_blocking();
+  if (Caml_state != NULL && Caml_state->mmtk_mutator != NULL)
+    mmtk_ocaml_leave_blocking();
 }
 
 /* Called when a domain terminates: park if a collection is in progress (so it
    participates), then deregister so future collections don't wait for it. */
 void caml_mmtk_domain_terminate(caml_domain_state *dom)
 {
-  if (!caml_mmtk_enabled || dom->mmtk_mutator == NULL) return;
+  if (dom->mmtk_mutator == NULL) return;
   caml_mmtk_stw_poll();
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
   dom->mmtk_mutator = NULL;

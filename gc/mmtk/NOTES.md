@@ -5,6 +5,40 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 cleanup: `caml_mmtk_enabled` removed — MMTk is unconditional
+
+*2026-06-22*
+
+MMTk is the only GC, so the per-site `caml_mmtk_enabled` dual-path branch is gone (~35 sites
+across memory.{c,h}, mmtk.{c,h}, array.c, intern.c, interp.c, gc_ctrl.c; 153 net lines
+deleted). Allocation (`Alloc_small` macro, `caml_alloc_shr`), the write barriers
+(`caml_modify`/`caml_initialize`/array fill), `Gc.stat`/major/compact, and the unmarshaller
+now go unconditionally through MMTk; the dead stock minor-bump and `caml_shared_try_alloc`
+fallbacks are deleted.
+
+**The one real pre-init subtlety** (the rest was vestigial): `caml_mmtk_enabled` doubled as the
+"MMTk ready?" guard for the brief early-startup window. That collapses safely almost
+everywhere — no OCaml *value* allocation happens pre-init (`domain_create`'s allocations are
+C/`caml_stat`/mmap; the global-data intern runs after the mutator is bound), and the region
+barrier self-gates on `caml_mmtk_generational` (0 pre-init) before any `Caml_state` deref. The
+exception: `caml_mmtk_enter/leave_blocking` is reached via `caml_open_descriptor_in` during
+startup while `Caml_state` is still NULL, so those now guard
+`if (Caml_state != NULL && Caml_state->mmtk_mutator != NULL)`. The build+run caught this as a
+NULL-deref SIGSEGV at the first compile — reading alone would have missed it.
+
+Also fixed in passing: `alloc_shr`'s `noexc` path now routes to the non-raising
+`caml_mmtk_try_alloc_shr` (the old MMTk branch ignored `noexc` and always raised — a latent
+contract bug).
+
+Verified on turing: clean `make world.opt` (bytecode + native self-host), bug-#2 ocamldoc
+manpage repro clean (0 segfaults), native programs correct under Immix + StickyImmix.
+
+Next transitional flag of the same shape: **`MMTK_WEAK_REFS`** — retire it after the weak-ref
+`pr5233` resurrection-ordering fix (the default `process_weak_refs` still has that bug, so
+`=0` stays as the safety fallback for now). See ROADMAP.
+
+---
+
 ## CI moving-GC bug (#2) FIXED — native unmarshalling allocated OFF-HEAP
 
 *2026-06-22 (resolves the "STILL OPEN" entry below)*

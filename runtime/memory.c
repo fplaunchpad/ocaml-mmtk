@@ -193,12 +193,11 @@ Caml_inline void write_barrier(
      is bypassed. The bytecode runtime records the modified slot via MMTk's region
      barrier instead: needed by the generational plans (GenImmix/StickyImmix), a
      no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address (for
-     caml_modify, field is 0). caml_mmtk_enabled is false only in the brief pre-init
-     window, where there are no young objects to remember. */
+     caml_modify, field is 0). The barrier itself no-ops for non-generational plans
+     and before init (it checks caml_mmtk_generational, 0 until a generational plan
+     binds the mutator). */
 #ifndef NATIVE_CODE
-  if (caml_mmtk_enabled) {
-    caml_mmtk_region_barrier(Op_val(obj) + field, 1);
-  }
+  caml_mmtk_region_barrier(Op_val(obj) + field, 1);
 #else
   /* Native caml_modify does not (yet) call the MMTk region barrier — fine for the
      default non-generational Immix; a gap for native StickyImmix's old->young
@@ -316,18 +315,15 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
      so the field may legitimately be 0 here. */
   CAMLassert(Is_long(*fp) || *fp == Debug_uninit_major
              || *fp == Debug_uninit_minor
-             || (caml_mmtk_enabled && *fp == 0));
+             || *fp == 0);
 #endif
   *fp = val;
 #ifndef NATIVE_CODE
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
      generational plans (no-op otherwise). Replaces the stock minor remembered-set
      update, which is dead under always-on MMTk (major_ref is never consumed).
-     caml_mmtk_enabled is false only in the brief pre-init window (no young objects).
      Native is a no-op here too (see write_barrier / gc/mmtk/NOTES.md). */
-  if (caml_mmtk_enabled) {
-    caml_mmtk_region_barrier(fp, 1);
-  }
+  caml_mmtk_region_barrier(fp, 1);
 #endif
 }
 
@@ -436,39 +432,11 @@ Caml_inline value alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved,
                             int noexc)
 {
   Caml_check_caml_state();
-  /* MMTk owns the major heap: route shared (large/old) allocations through MMTk
-     once enabled (bytecode and native). See runtime/mmtk.c. */
-  if (caml_mmtk_enabled) {
-    return caml_mmtk_alloc_shr(wosize, tag, reserved);
-  }
-  caml_domain_state *dom_st = Caml_state;
-  value *v = caml_shared_try_alloc(dom_st->shared_heap,
-                                   wosize, tag, reserved);
-  if (v == NULL) {
-    if (!noexc)
-      caml_raise_out_of_memory();
-    else
-      return (value)NULL;
-  }
-
-  caml_update_major_allocated_words(
-    dom_st, Whsize_wosize(wosize), 1 /* direct */);
-  if (dom_st->allocated_words_direct > dom_st->minor_heap_wsz / 5) {
-    CAML_EV_COUNTER (EV_C_REQUEST_MAJOR_ALLOC_SHR, 1);
-    caml_request_major_slice(1);
-  }
-
-#ifdef DEBUG
-  if (tag < No_scan_tag) {
-    for (mlsize_t i = 0; i < wosize; i++)
-      Op_hp(v)[i] = Debug_uninit_major;
-  }
-#endif
-  caml_memprof_sample_block(Val_hp(v), wosize,
-                            Whsize_wosize(wosize),
-                            CAML_MEMPROF_SRC_NORMAL);
-
-  return Val_hp(v);
+  /* MMTk owns the heap: all shared (large/old) allocations go through MMTk. The
+     non-raising variant backs noexc callers; the raising one is the default. */
+  if (noexc)
+    return caml_mmtk_try_alloc_shr(wosize, tag);
+  return caml_mmtk_alloc_shr(wosize, tag, reserved);
 }
 
 CAMLexport value caml_alloc_shr(mlsize_t wosize, tag_t tag)
