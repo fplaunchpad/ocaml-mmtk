@@ -266,6 +266,10 @@ CAMLextern void caml_free_stack(struct stack_info* stk);
 /* gc_regs_buckets is allocated on-demand by [maybe_expand_stack]. */
 CAMLextern void caml_free_gc_regs_buckets(value *gc_regs_buckets);
 
+/* MMTk bug #4: recycle the in-use gc_regs bucket back to the free-list before
+   raising from inside caml_call_gc (see fiber.c). */
+void caml_mmtk_recycle_gc_regs_bucket(void);
+
 #ifdef NATIVE_CODE
 void caml_get_stack_sp_pc (struct stack_info* stack,
                            char** sp /* out */, uintnat* pc /* out */);

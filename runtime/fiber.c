@@ -433,6 +433,37 @@ void caml_scan_stack(
 
 #endif /* end BYTE_CODE */
 
+/* MMTk bug #4: re-establish the gc_regs-bucket free-list invariant before an
+   exception is raised from *inside* caml_call_gc's saved-registers window.
+
+   caml_call_gc (amd64.S) does SAVE_ALL_REGS, which POPS a bucket from
+   Caml_state->gc_regs_buckets (the free-list head) into Caml_state->gc_regs, and
+   relies on RESTORE_ALL_REGS pushing it back on return. Under MMTk's TLAB nursery
+   the allocation slow path (caml_alloc_small_dispatch) can fail to refill and call
+   caml_raise_out_of_memory() from *within* this window: the raise (caml_raise ->
+   caml_raise_exception) longjmps straight to the OCaml exception handler, never
+   returning to caml_call_gc, so RESTORE_ALL_REGS never runs and the popped bucket
+   is never pushed back. With a single bucket on the free-list (the steady state for
+   a single-domain native program), gc_regs_buckets is then left NULL while OCaml
+   code runs again (if Out_of_memory is caught) -- violating the fiber.h invariant
+   "at least one free bucket whenever running OCaml". The next allocation's
+   caml_call_gc SAVE then dereferences a NULL free-list head and SIGSEGVs.
+
+   Recycle the in-use bucket (Caml_state->gc_regs) back onto the free-list, exactly
+   as RESTORE_ALL_REGS would have. The saved register values in it are discarded --
+   correct, since the exception abandons that computation. Idempotent and cheap; a
+   no-op if a free bucket already exists or no bucket is in use. */
+void caml_mmtk_recycle_gc_regs_bucket(void)
+{
+  caml_domain_state *dom = Caml_state;
+  if (dom->gc_regs_buckets == NULL && dom->gc_regs != NULL) {
+    value *bucket = dom->gc_regs;
+    bucket[0] = (value)NULL;            /* sole free bucket: no next */
+    dom->gc_regs_buckets = bucket;
+    dom->gc_regs = NULL;                /* no bucket is in use any more */
+  }
+}
+
 /*
   Stack management.
 

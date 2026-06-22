@@ -541,8 +541,15 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
        minor GC; otherwise we empty the minor heap. */
     CAML_EV_COUNTER(EV_C_FORCE_MINOR_ALLOC_SMALL, 1);
     if (caml_mmtk_tlab) {
-      if (!caml_mmtk_refill_tlab(dom_st, whsize))
+      if (!caml_mmtk_refill_tlab(dom_st, whsize)) {
+        /* MMTk bug #4: this raise happens from inside caml_call_gc's saved-regs
+           window (caml_garbage_collection -> here). Recycle the popped gc_regs
+           bucket back to the free-list first, so the raise (which bypasses
+           caml_call_gc's RESTORE_ALL_REGS) does not leave gc_regs_buckets NULL and
+           crash the next caml_call_gc. See caml_mmtk_recycle_gc_regs_bucket. */
+        caml_mmtk_recycle_gc_regs_bucket();
         caml_raise_out_of_memory();
+      }
     } else {
       caml_poll_gc_work();
     }

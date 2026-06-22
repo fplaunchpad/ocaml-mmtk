@@ -151,20 +151,21 @@ item is in the workstreams / M9 stages below.
     **bug #3b (residuals — separate, pre-existing, NOT this bug):** a rare (~1/30) `cannot
     trace` with a *wild* (non-immediate) value = a stale-root-slot race (freed fiber stack /
     reused `gc_regs` / terminating-domain teardown); and a ~30% spawn-burn **hang** in OCaml's
-    own domain-spawn/STW machinery (not MMTk's path). The native-`ocamlopt` SIGSEGV is now
-    split out as **bug #4** (item 12b). See `gc/mmtk/NOTES.md`.
+    own domain-spawn/STW machinery (not MMTk's path). The native-`ocamlopt` SIGSEGV was split
+    out as **bug #4** (item 12b) and is now **fixed**. See `gc/mmtk/NOTES.md`.
 11. Weak refs — fix `process_weak_refs` resurrection ordering (`pr5233`) + the orphaned-ephemeron
     gap; **then retire the transitional `MMTK_WEAK_REFS` flag** (make `process_weak_refs`
     unconditional, like `caml_mmtk_enabled`). Until that fix, `MMTK_WEAK_REFS=0` is the safety
     fallback (conservative never-clear), so it stays.
 12. Evacuation-time OOM — graceful `Out_of_memory` in `copy_object` instead of asserting.
-12b. bug #4 — native `ocamlopt` SIGSEGV under a **tight Immix heap** (deterministic:
-    `MMTK_HEAP_SIZE_MB=64 ./ocamlopt.opt -c typing/typecore.ml`; clean ≥96 MB; Immix-only).
-    `caml_call_gc` finds `Caml_state->gc_regs_buckets == NULL`. **Not** a free-list protocol
-    leak — the OOM-raise-leak and re-entrant-GC hypotheses were instrumented and refuted, and
-    forcing a spare bucket didn't help — so it is **corruption of the gc_regs machinery in
-    Caml_state** by the full-heap moving collector. Needs an rr software-watchpoint hunt
-    (see `gc/mmtk/NOTES.md`). Workaround: larger heap or StickyImmix for native compiles.
+12b. bug #4 — native `ocamlopt` SIGSEGV under a tight Immix heap — **FIXED 2026-06-23**
+    (rr-confirmed). The `Out_of_memory` raised from `caml_alloc_small_dispatch` on a failed
+    TLAB refill unwinds *through* `caml_call_gc` (skipping RESTORE_ALL_REGS), leaking the
+    single gc_regs bucket; the compiler's `try_finally` catches the OOM and the next
+    `caml_call_gc` faults on the now-NULL free-list. Fix: `caml_mmtk_recycle_gc_regs_bucket()`
+    pushes the in-use bucket back before the raise. Verified 25/25→0/25 at Immix 64 MB
+    (+20/20 re-run), `world.opt` clean, multidomain OK. (The earlier "corruption" read was a
+    stale-binary instrumentation artifact — see `gc/mmtk/NOTES.md`.)
 
 **Phase 4 — breadth + platform**
 13. Build-CI: `opam` `test-in-prefix` relocatability — **done** (configure.ac relocatable
