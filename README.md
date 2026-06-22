@@ -28,14 +28,19 @@ switch.
 > multi-domain (`Domain.spawn`), moving plans relocate, generational plans use a
 > write barrier, collection is parallel. **Native** uses TLAB nursery aliasing
 > (MMTk owns the nursery; no OCaml minor GC), so the native fast-path is unchanged
-> and there are no code-generator changes (validated on x86-64 Linux; arm64/macOS
-> not yet exercised). The default plan is **Immix**.
+> and there are no code-generator changes (validated on x86-64 Linux; the
+> linux-arm64 CI build currently hits the open moving-GC bug at the `ocamldoc`
+> step; macOS not yet exercised). The default plan is **Immix**.
 >
-> Known limitations (see `ROADMAP.md`): weak arrays / ephemerons / finalisers
-> (incl. cross-domain handover) / lazy now work (M6, default-on) and their
-> testsuite dirs pass on Immix — except two minor-heap-specific tests re-tabled
-> as incompatible-by-design (no stock minor heap under MMTk). Performance is
-> ~1.4–1.8× of the stock GC on GC-heavy workloads today (tuning in progress).
+> Known limitations (see `ROADMAP.md`): there is an **open moving-GC bug** — a
+> control-flow desync triggered by *partial* Immix defragmentation — that SIGSEGVs
+> StickyImmix deterministically (~25%) and Immix rarely; it is the linux-arm64 CI
+> `ocamldoc` crash, and it is under active investigation (MarkSweep / GenImmix /
+> non-moving are unaffected). Weak arrays / ephemerons / finalisers (incl.
+> cross-domain handover) / lazy work (M6, default-on) and their testsuite dirs pass
+> on Immix; a handful of tests (5) are re-tabled as incompatible-by-design (no
+> stock minor heap under MMTk). Performance is ~1.4–1.8× of the stock GC on
+> GC-heavy workloads today (tuning in progress).
 
 ## Why bytecode first?
 
@@ -58,7 +63,7 @@ integration comes later.
 | M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans), single- **and** multi-domain; staticlib auto-linked | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **custom-block finalizers**, and **cross-domain finaliser handover** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` + the re-enabled weak/ephemeron/finaliser/lazy dirs pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
-| M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass**; failures are unsupported features (weak/finaliser — fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) + 1 multidomain-StickyImmix SIGSEGV (bug #3). Default Immix clean | 🟡 |
+| M7 | Pass the OCaml testsuite — full bytecode suite: **Immix 1366 / MarkSweep 1367 pass** (of 1551; 140 skipped). Remaining failures are unsupported features (`Gc.stat`/memprof/runtime-events); weak/finaliser dirs now pass (M6). Not yet fully clean: the open moving-GC bug (see Known limitations) SIGSEGVs StickyImmix and rarely Immix. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
 | M9 | **MMTk-only: excise the stock GC** — always-on ✅, stock **minor** GC deleted ✅, stock **major** GC (mark/sweep/slice, ~1750 lines) deleted ✅, `Gc.stat` on MMTk stats (partial) 🟡. Single-GC runtime. Remaining: minor-heap-arena + header/metadata cleanup | 🟢 mostly done |
 | — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | ✅ |
