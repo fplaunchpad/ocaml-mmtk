@@ -44,7 +44,7 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `ocaml-mmtk` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (5 wired + 6 unwired) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
-| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): parallel tests assert stock-GC invariants MMTk doesn't maintain — `caml_gc_phase != Phase_sweep_main` (domain.c), `Field == Debug_free_minor` (memory.h); related to bug #3 + the debug-runtime/MMTk assertion mismatch. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
+| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts MMTk doesn't maintain — mostly fixed (28→~7; see Phase 1 item 1), residual = a memprof domain-reuse assert + incompatible-test disables + known hangs. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
 
 ## Next steps (prioritised)
 
@@ -52,15 +52,26 @@ Execution order — correctness before performance; dependencies noted. Detail f
 item is in the workstreams / M9 stages below.
 
 **Phase 1 — flag cleanup**
-1. `linux-O0` debug-runtime fix: delete the two stock-GC asserts that are invalid under
-   MMTk-only — `DEBUG_clear`'s `Debug_free_minor` (memory.h) and `caml_gc_phase !=
-   Phase_sweep_main` (domain.c). (Build-CI red 1 of 3.)
+1. 🟡 `linux-O0` debug-runtime fix (in progress): the debug runtime (`USE_RUNTIME=d`)
+   asserts stock-GC invariants MMTk doesn't maintain; each fix revealed the next, so
+   verify the full set on turing, not one CI cycle at a time. Removed so far (DEBUG-only;
+   28→~7 fails, gc-roots + weak-ephe-final dirs now clean): `Debug_free_minor` (memory.h),
+   `caml_gc_phase != Phase_sweep_main` (domain.c:2313 + `caml_orphan_ephemerons`
+   major_gc.c:391), `young_ptr == young_end` (minor_gc.c:439 stw empty-minor) + its
+   `Debug_free_minor` poison, and the `Caml_state` vs `Caml_state_opt` bug in
+   `caml_mmtk_enter/leave_blocking` (see item 2). Residual (separate triage):
+   `domain.c:895` `memprof == NULL` on domain-slot reuse (`domain_dls.ml`), the known
+   MMTk hangs (timeouts), and tests asserting stock-GC behavior MMTk lacks
+   (`major_gc_wait_backup`, `signals_alloc`) which need disabling. (Build-CI red 1 of 3.)
 2. ✅ **Removed `caml_mmtk_enabled`** (~35 sites collapsed to unconditional MMTk; 153
    lines deleted). No init-reordering was needed — no OCaml *value* allocation happens
    pre-init (the `domain_create` allocs are C/`caml_stat`/mmap), and the region barrier
    self-gates on `caml_mmtk_generational`. The one real pre-init hazard the build+run
    caught: `caml_mmtk_enter/leave_blocking` (reached via `caml_open_descriptor_in` at
-   startup with `Caml_state` still NULL) now guards `Caml_state != NULL`. Verified: clean
+   startup with `Caml_state` still NULL) now guards `Caml_state_opt != NULL` — the raw
+   thread-local, NOT the `Caml_state` macro, which is
+   `(CAMLassert(Caml_state_opt != NULL), Caml_state_opt)` and would trip its own assert
+   in the debug runtime in exactly the NULL case being guarded (see item 1). Verified: clean
    `make world.opt` (bytecode + native self-host) + bug-#2 ocamldoc repro + native
    Immix/StickyImmix runs.
 

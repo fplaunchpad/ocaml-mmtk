@@ -388,7 +388,10 @@ static caml_plat_mutex orphaned_lock = CAML_PLAT_MUTEX_INITIALIZER;
 
 void caml_orphan_ephemerons (caml_domain_state* domain_state)
 {
-  CAMLassert (caml_gc_phase != Phase_sweep_main);
+  /* Stock-GC phase invariant: under always-on MMTk the stock major collector no
+     longer drives caml_gc_phase (it stays at its initial Phase_sweep_main), so
+     the "not mid-sweep" assert does not hold. The ephemeron lists are empty under
+     MMTk weak processing, so the body below is a no-op early return. */
 
   struct caml_ephe_info* ephe_info = domain_state->ephe_info;
   if (ephe_info->todo == 0 &&

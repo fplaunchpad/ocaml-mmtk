@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## linux-O0: debug-runtime stock-GC asserts under MMTk
+
+*2026-06-22*
+
+The `-O0` CI job runs the testsuite with `USE_RUNTIME=d` (the debug runtime, where
+`CAMLassert` is live). Several asserts encode stock-GC invariants MMTk doesn't maintain,
+and each fix revealed the next — verify the full set on turing (`USE_RUNTIME=d` over
+`parallel callback gc-roots weak-ephe-final`, the CI's dirs) rather than one CI cycle at a
+time. Removed (all DEBUG-only; release/all-plans unaffected): `minor_gc.c:439`
+`young_ptr == young_end` + its `Debug_free_minor` poison in the STW empty-minor path
+(under TLAB the "minor heap" is an MMTk Immix block; `young_ptr` stays mid-block after
+clear), and `major_gc.c:391` `caml_gc_phase != Phase_sweep_main` in `caml_orphan_ephemerons`
+(MMTk never drives `caml_gc_phase`; it stays at its initial `Phase_sweep_main`, and the
+ephemeron lists are empty so the body is a no-op early return).
+
+**The subtle one — `Caml_state` vs `Caml_state_opt`.** `caml_mmtk_enter/leave_blocking`
+guarded `if (Caml_state != NULL ...)`, which works in release but aborts 57× in the debug
+runtime: `#define Caml_state (CAMLassert(Caml_state_opt != NULL), Caml_state_opt)`, so
+reading the `Caml_state` macro to compare it against NULL trips its own assert in exactly
+the early-startup NULL case (`caml_open_descriptor_in` before the domain is created) the
+guard exists to handle. Fix: test the raw `Caml_state_opt`. **Any "might be NULL" guard in
+the runtime must use `Caml_state_opt`, never the `Caml_state` macro.**
+
+Residual linux-O0 fails (separate triage, NOT stock-GC asserts): `domain.c:895`
+`domain_state->memprof == NULL` on domain-slot reuse (`domain_dls.ml`); the known MMTk
+hangs (`signal 9` timeouts); and tests asserting stock-GC behaviour MMTk lacks
+(`major_gc_wait_backup` — GC backup thread; `signals_alloc` — GC-stat output) which should
+be disabled like the other stock-GC-specific tests.
+
+---
+
 ## M9 cleanup: `caml_mmtk_enabled` removed — MMTk is unconditional
 
 *2026-06-22*

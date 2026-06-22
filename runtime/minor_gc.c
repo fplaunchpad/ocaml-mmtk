@@ -388,7 +388,6 @@ caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
                                          caml_domain_state** participating)
 {
 #ifdef DEBUG
-  uintnat* initial_young_ptr = (uintnat*)domain->young_ptr;
   CAMLassert(caml_domain_is_in_stw());
 #endif
 
@@ -427,16 +426,13 @@ caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
   caml_gc_log("running stw empty_minor_heap_domain_clear");
   caml_empty_minor_heap_domain_clear(domain);
 
-#ifdef DEBUG
-  {
-    for (uintnat *p = initial_young_ptr; p < (uintnat*)domain->young_end; ++p)
-      *p = Debug_free_minor;
-  }
-#endif
+  /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix nursery),
+     not the stock minor arena: after the clear, young_ptr stays mid-block rather
+     than being reset to young_end, so neither the stock empty-minor-heap poison
+     write nor the young_ptr==young_end invariant applies here. */
 
   CAML_EV_END(EV_MINOR_CLEAR);
   caml_gc_log("finished stw empty_minor_heap");
-  CAMLassert(domain->young_ptr == domain->young_end);
 }
 
 static void caml_stw_empty_minor_heap (caml_domain_state* domain,

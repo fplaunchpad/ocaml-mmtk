@@ -589,14 +589,18 @@ void caml_mmtk_enter_blocking(void)
 {
   /* Caml_state may be NULL and the mutator unbound during early startup (e.g.
      caml_open_descriptor_in before the domain is created); there is no collection
-     to coordinate with until this domain is MMTk-bound. */
-  if (Caml_state != NULL && Caml_state->mmtk_mutator != NULL)
+     to coordinate with until this domain is MMTk-bound. Test the raw Caml_state_opt:
+     the Caml_state macro is (CAMLassert(Caml_state_opt != NULL), Caml_state_opt), so
+     reading it to compare against NULL would itself trip the debug-runtime assert in
+     exactly the NULL case we are guarding against. */
+  if (Caml_state_opt != NULL && Caml_state_opt->mmtk_mutator != NULL)
     mmtk_ocaml_enter_blocking();
 }
 
 void caml_mmtk_leave_blocking(void)
 {
-  if (Caml_state != NULL && Caml_state->mmtk_mutator != NULL)
+  /* Raw Caml_state_opt, not the Caml_state macro — see caml_mmtk_enter_blocking. */
+  if (Caml_state_opt != NULL && Caml_state_opt->mmtk_mutator != NULL)
     mmtk_ocaml_leave_blocking();
 }
 
