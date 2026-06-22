@@ -10,6 +10,7 @@
 //! hand the batch to MMTk via `create_process_roots_work`.
 
 use std::ffi::c_void;
+use std::sync::{Mutex, OnceLock};
 
 use mmtk::memory_manager;
 use mmtk::scheduler::GCWorker;
@@ -98,6 +99,19 @@ fn weak_refs_enabled() -> bool {
     unsafe { caml_mmtk_weak_refs != 0 }
 }
 
+/// DEBUG flag (MMTK_DEBUG_STACK_CHECK), cached — gates the mis-forward detector.
+#[inline]
+fn debug_check_enabled() -> bool {
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("MMTK_DEBUG_STACK_CHECK").is_some())
+}
+
+/// DEBUG (MMTK_DEBUG_STACK_CHECK): snapshot of (root slot, its pre-GC object),
+/// taken during root scanning and checked after the closure to catch a MIS-FORWARD
+/// — a root updated to a valid-but-WRONG object (`new != forward(old)`), the
+/// suspected control-flow-desync root cause. Empty/untouched unless the flag is on.
+static ROOT_SNAPSHOT: Mutex<Vec<(FieldSlot, ObjectReference)>> = Mutex::new(Vec::new());
+
 /// Map an OCaml `value` (a block's field-0 pointer == its ObjectReference raw
 /// address) to a managed ObjectReference, or None if it is an immediate, null, or
 /// a pointer outside any MMTk space (atom / pre-init / foreign — never collected).
@@ -135,7 +149,15 @@ extern "C" fn ephe_retain(ctx: *mut c_void, v: usize) -> usize {
 /// the `Vec<FieldSlot>` being filled; `slot` is the address of a root value.
 extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) {
     let buf = unsafe { &mut *(data as *mut Vec<FieldSlot>) };
-    buf.push(FieldSlot::from_address(Address::from_mut_ptr(slot)));
+    let fs = FieldSlot::from_address(Address::from_mut_ptr(slot));
+    buf.push(fs);
+    // DEBUG: record this root's pre-GC object so the post-closure pass can verify
+    // it was forwarded (not mis-forwarded to a different valid object).
+    if debug_check_enabled() {
+        if let Some(old) = fs.load() {
+            ROOT_SNAPSHOT.lock().unwrap().push((fs, old));
+        }
+    }
 }
 
 /// DEBUG (MMTK_DEBUG_STACK_CHECK): handed to caml_do_roots / caml_scan_global_roots
@@ -342,55 +364,29 @@ impl Scanning<OCamlVM> for VMScanning {
             }
         }
 
-        // DEBUG (moving-GC bug hunt): after the root scan has forwarded everything
-        // it found, re-walk each domain's bytecode value stack raw. Any slot still
-        // holding a pointer to a *forwarded* object is a stack root the scan failed
-        // to update — the missed-root bug. Prints the slot so we can map it to the
-        // interpreter frame. Gated on MMTK_DEBUG_STACK_CHECK to stay off by default.
-        if std::env::var_os("MMTK_DEBUG_STACK_CHECK").is_some() {
-            for &d in &domains {
-                let (mut lo, hi): (*mut usize, *mut usize) = unsafe {
-                    let mut lo = core::ptr::null_mut();
-                    let mut hi = core::ptr::null_mut();
-                    caml_mmtk_debug_stack_range(d, &mut lo, &mut hi);
-                    (lo, hi)
-                };
-                while !lo.is_null() && (lo as usize) < (hi as usize) {
-                    let word = unsafe { *lo };
-                    if let Some(obj) = managed_obj(word) {
-                        if let Some(fwd) = obj.get_forwarded_object() {
-                            let new = fwd.to_raw_address().as_usize();
-                            if new != word {
-                                eprintln!(
-                                    "[STALE-ROOT/fwd] stack slot {:p} = {:#x} -> forwarded {:#x}",
-                                    lo, word, new
-                                );
-                            }
-                        }
-                        // NB: an is_reachable()==false check here is useless — interior
-                        // (Infix_tag) pointers, common on the value stack, have no VO bit
-                        // so they always read "unreachable" (false positive). The
-                        // forwarded-object check above is the meaningful one.
+        // DEBUG (moving-GC bug hunt, MMTK_DEBUG_STACK_CHECK): verify each root that
+        // was snapshotted pre-GC was *forwarded*, not MIS-forwarded. After the
+        // closure, each root's object must equal forward(old); a *different valid*
+        // object = a mis-forward (Immix in-place partial defrag updating a reference
+        // to the wrong object) — the suspected control-flow-desync root cause. Print
+        // the offending slot, then clear the snapshot for the next GC.
+        if debug_check_enabled() {
+            if let Ok(mut snap) = ROOT_SNAPSHOT.lock() {
+                for &(fs, old) in snap.iter() {
+                    let expected = old.get_forwarded_object().unwrap_or(old);
+                    match fs.load() {
+                        Some(n) if n == expected => {}
+                        got => eprintln!(
+                            "[MIS-FORWARD] slot {:#x}: old {:#x} expected fwd {:#x} got {:#x}",
+                            fs.as_address().as_usize(),
+                            old.to_raw_address().as_usize(),
+                            expected.to_raw_address().as_usize(),
+                            got.map(|o| o.to_raw_address().as_usize()).unwrap_or(0),
+                        ),
                     }
-                    lo = unsafe { lo.add(1) };
                 }
+                snap.clear();
             }
-            // Generalised: check ALL enumerated roots (value stack, local roots,
-            // finalisable, globals) for a slot still pointing at a forwarded object
-            // — catches the partial-move relocation bug wherever the missed slot is,
-            // not just on the raw value stack above.
-            for &d in &domains {
-                unsafe {
-                    caml_do_roots(
-                        check_root_slot,
-                        0,
-                        core::ptr::null_mut(),
-                        d as *mut c_void,
-                        0,
-                    );
-                }
-            }
-            unsafe { caml_scan_global_roots(check_root_slot, core::ptr::null_mut()) };
         }
         false
     }
