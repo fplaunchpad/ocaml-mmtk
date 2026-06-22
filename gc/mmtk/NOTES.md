@@ -5,6 +5,44 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CI bug: cascade traced — root is a *control-flow* desync (likely a mis-forward)
+
+*2026-06-22*
+
+Drove the cascade back another level. The crashing function was reached by
+**falling through** `CHECK_SIGNALS` (`interp.c:1050`, `0x772b76042e28`) into a
+`GRAB` (`0x772b76042e2c`) — these sit in *different* functions in the bytecode
+(one function's poll, the next's entry), so fall-through is wild. And the function
+the caller's APPLY2 actually entered has `Code_val = 0x772b760457f4`, far from the
+GRAB — so **function@`…57f4` itself made a wild backward jump** into another
+function's code; that function (Y) then runs `ACC0`/`SWITCH` against `…57f4`'s
+stack, and the block-vs-int SWITCH (above) sends it wild again → GETFIELD3 crash.
+
+**Key reframing: every value involved is VALID** — `accu` closures, `arg1` blocks,
+return frames all check out; the generalized root check is clean; MarkSweep clean.
+So nothing in the heap or roots is *stale*. What's wrong is the **control flow**:
+the interpreter runs one function's bytecode against another's stack. A *valid*
+value (e.g. a tag-0 block) is then consumed where a different type was expected,
+because the SWITCH/branch it reaches belongs to the wrong function.
+
+**So the root is a control-flow divergence, and the most consistent mechanism is a
+MIS-FORWARD**: Immix *in-place partial* defrag updating some reference to a *valid
+but wrong* object (not a stale one). That explains everything observed:
+- forwarded-stale checks are clean (the wrong object isn't forwarded — it's a live
+  object, just the wrong one);
+- MarkSweep/GenImmix clean (no in-place defrag of the relevant objects);
+- the trigger is *partial* moving (some objects relocate, some don't — a mis-pair);
+- a wrong-but-valid value reaching a branch desyncs control flow → cascade.
+A prime suspect for mis-pairing under in-place defrag is the absent VO bit (object
+boundaries during block evacuation), though precise scanning shouldn't need it —
+needs checking against mmtk-core's Immix defrag.
+
+**Next, decisive check:** snapshot each root's value *before* a GC and verify after
+that `new == get_forwarded_object(old)` (a *mis-forward* detector, unlike the
+current *forwarded-stale* detector). If a root's new value isn't the forward of its
+old value → caught the mis-forward + the slot. Implement as a before/after pass in
+the binding (snapshot in `scan_roots`, compare in `process_weak_refs`).
+
 ## CI bug: driving the fresh trace — desync is a SWITCH cascade from upstream
 
 *2026-06-22*
