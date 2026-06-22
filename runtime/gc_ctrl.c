@@ -111,6 +111,18 @@ CAMLprim value caml_gc_quick_stat(value v)
   CAMLreturn (res);
 }
 
+/* Minor-words allocation odometer under MMTk. Invariant maintained by the MMTk
+   alloc paths (runtime/mmtk.c):
+       total minor words == stat_minor_words
+                            + Wsize_bsize(young_end - young_ptr)
+   - Native (TLAB): the inlined fast path bumps young_ptr downward within the
+     current MMTk block, so (young_end - young_ptr) tracks the live block exactly;
+     a retired block's consumed words are folded into stat_minor_words at block
+     retirement (caml_mmtk_refill_tlab) and at a collection's discard
+     (caml_mmtk_uninterrupt, which also collapses young_end to young_start so this
+     live term reads 0 — no double count).
+   - Bytecode: young_* stay NULL (no TLAB), so the live term is 0;
+     caml_mmtk_alloc_small bumps stat_minor_words per allocation. */
 double caml_gc_minor_words_unboxed (void)
 {
   return (Caml_state->stat_minor_words
@@ -131,13 +143,13 @@ CAMLprim value caml_gc_counters(value v)
 
   /* get a copy of these before allocating anything...
      Gc.counters semantics under MMTk:
-       - minor_words: stat_minor_words plus the span already used in the current
-         young region. NOTE: under MMTk this under-reports allocation — the MMTk
-         alloc paths (bytecode caml_mmtk_alloc_small, and the native TLAB refill
-         in caml_mmtk_refill_tlab) do not feed stat_minor_words, so a tight
-         alloc-then-measure loop sees little/no growth. A faithful allocation
-         odometer needs those paths to accumulate words; that lives in the MMTk
-         alloc fast paths, not here.
+       - minor_words: a faithful allocation odometer (see
+         caml_gc_minor_words_unboxed). The MMTk alloc paths feed stat_minor_words
+         at block retirement (native TLAB: caml_mmtk_refill_tlab /
+         caml_mmtk_uninterrupt) or per allocation (bytecode:
+         caml_mmtk_alloc_small), and the live (young_end - young_ptr) span covers
+         the current native block, so a tight alloc-then-measure loop sees the
+         words it allocated.
        - promoted_words: 0. MMTk has no nursery->major promotion (native TLAB aliases
          the nursery onto an Immix block; bytecode allocates straight into the heap),
          so nothing is ever "promoted". Reported as 0 (documented stub).

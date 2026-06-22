@@ -211,6 +211,15 @@ value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag, reserved_t reserved)
   /* NULL => heap exhausted after collection. Raise from this C frame (safe to
      longjmp; raising inside MMTk's Rust alloc path would not be). */
   if (p == NULL) caml_raise_out_of_memory();
+  /* Minor-words accounting (Gc.minor_words / Gc.counters). The bytecode small
+     path allocates straight through MMTk and never touches the young region, so
+     caml_gc_minor_words_unboxed's live (young_end - young_ptr) term is always 0
+     here — the only allocation odometer is stat_minor_words. Bump it by this
+     block's full size (header + fields). This is the bytecode analogue of the
+     native fast path's young_ptr bump (which is accounted at block retirement,
+     see caml_mmtk_refill_tlab / caml_mmtk_uninterrupt). One add per object: cheap,
+     and bytecode allocation is not a tight native loop. */
+  Caml_state->stat_minor_words += Whsize_wosize(wosize);
   return (value)p;
 }
 
@@ -254,6 +263,20 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
 
   if (!mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end))
     return 0;
+
+  /* Minor-words accounting: the block we are about to replace is retired here.
+     The words it consumed (young_end - young_ptr, a downward bump from
+     young_end) have been reported live by caml_gc_minor_words_unboxed's
+     (young_end - young_ptr) term; fold them into stat_minor_words now, BEFORE
+     repointing young_* at the fresh block, so the odometer is preserved across
+     the swap. Invariant kept by every retirement point:
+         total_minor_words == stat_minor_words + Wsize_bsize(young_end-young_ptr)
+     The new block starts with young_ptr == young_end (consumed 0), so the live
+     term reads 0 and the words just moved into stat. Guard the first-ever refill
+     (young_end == NULL at domain init): nothing consumed yet. */
+  if (dom->young_end != NULL)
+    dom->stat_minor_words +=
+      Wsize_bsize((char*)dom->young_end - (char*)dom->young_ptr);
 
   dom->young_start          = (value*)start;
   dom->young_end            = (value*)end;
@@ -615,6 +638,24 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
 {
   caml_domain_state *d = (caml_domain_state *) domain_state_addr;
   if (caml_mmtk_tlab) {
+    /* Minor-words accounting: a collection discards this domain's current block
+       (the unused tail and the block pointers can no longer be trusted — see
+       below). The words it consumed (young_end - young_ptr) were reported live
+       by caml_gc_minor_words_unboxed; fold them into stat_minor_words now so the
+       odometer survives the discard.
+
+       Double-count hazard: the discard below sets young_ptr = young_start so the
+       next allocation traps and refills. If we left young_end pointing at the old
+       block, the live term Wsize_bsize(young_end - young_ptr) would then read the
+       WHOLE block (young_end - young_start) — re-adding the consumed words AND
+       counting the never-allocated tail. We therefore also collapse the live
+       range by setting young_end = young_start, so the live term reads 0 and the
+       invariant total == stat + Wsize_bsize(young_end-young_ptr) still holds. The
+       block is fully discarded (young_start == young_end == young_ptr); the next
+       fast-path alloc traps to caml_alloc_small_dispatch and refills. */
+    d->stat_minor_words +=
+      Wsize_bsize((char*)d->young_end - (char*)d->young_ptr);
+    d->young_end             = d->young_start;
     d->young_ptr             = d->young_start;
     d->young_trigger         = d->young_start;
     d->memprof_young_trigger = d->young_start;
