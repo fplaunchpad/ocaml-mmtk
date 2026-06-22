@@ -5,14 +5,22 @@
 #**************************************************************************
 
 # Build glue for the in-tree MMTk binding (gc/mmtk). The binding is a Rust
-# Cargo workspace producing a staticlib (libmmtk_ocaml.a) that is linked into
-# the bytecode runtime. This is the bytecode bring-up integration (M0/M1);
-# native-code integration comes later.
+# Cargo workspace producing a staticlib (libmmtk_ocaml.a). MMTk is the always-on
+# collector (M9): the archive is linked into the bytecode runtime executables
+# (via MMTK_LINK, below) and into every -custom bytecode and native program (via
+# config's {bytecomp,native}_c_libraries, referenced relocatably as
+# -lmmtk_ocaml; see configure.ac and the stdlib symlink / install rules in the
+# top-level Makefile).
 #
 # This fragment is included by the top-level Makefile after Makefile.common.
 
 MMTK_DIR   = $(ROOTDIR)/gc/mmtk
 MMTK_LIB   = $(MMTK_DIR)/target/release/libmmtk_ocaml.a
+# Same archive, but as a path relative to $(ROOTDIR). The install machinery
+# (INSTALL_MODE=opam/clone/list) records source files implicitly relative to
+# $(ROOTDIR), so the install rule must use this, not the $(ROOTDIR)-absolute
+# $(MMTK_LIB) (an absolute path would produce a broken opam .install entry).
+MMTK_LIB_REL = gc/mmtk/target/release/libmmtk_ocaml.a
 MMTK_CARGO ?= cargo
 
 # Native libraries the Rust staticlib transitively depends on. Obtained via:
@@ -29,10 +37,25 @@ endif
 # Everything to append to a bytecode-runtime link line so the binding resolves.
 MMTK_LINK = $(MMTK_LIB) $(MMTK_NATIVE_LIBS)
 
+# Strip the absolute build directory out of the staticlib's embedded DWARF.
+# The release profile keeps debug info (gc/mmtk/Cargo.toml: debug = true) for
+# gdb/lldb, but that bakes $(ROOTDIR) into libmmtk_ocaml.a — and, via the linker,
+# into every native executable that links it. That breaks the relocatability
+# check (testsuite/tools/testRelocation.ml), exactly as an un-prefix-mapped C
+# object would. This is the Rust equivalent of the C toolchain's
+# -fdebug-prefix-map (cc_has_debug_prefix_map): remap the build root to a
+# relative "." so the debug info stays useful but carries no build-dir path.
+# (The cargo registry paths under ~/.cargo are not the build root/prefix, so the
+# relocatability check ignores them; only the build root needs remapping.)
+# Cargo embeds *absolute* source paths in the DWARF, so the map source must be
+# the absolute build root ($(ROOTDIR) is relative — "." — at top level).
+MMTK_RUSTFLAGS = --remap-path-prefix=$(abspath $(ROOTDIR))=.
+
 # Build the staticlib via Cargo. Declared PHONY so Cargo's own incremental
 # build decides whether a rebuild is needed (cheap when up to date).
 .PHONY: mmtk-lib
 mmtk-lib:
-	$(MMTK_CARGO) build --release --manifest-path $(MMTK_DIR)/Cargo.toml
+	RUSTFLAGS='$(MMTK_RUSTFLAGS)' \
+	  $(MMTK_CARGO) build --release --manifest-path $(MMTK_DIR)/Cargo.toml
 
 $(MMTK_LIB): mmtk-lib

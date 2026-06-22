@@ -1642,12 +1642,22 @@ RUNTIME_DEP_FILES := $(wildcard $(DEPDIR)/runtime/*.$(D))
 include $(RUNTIME_DEP_FILES)
 
 .PHONY: runtime
-runtime: stdlib/libcamlrun.$(A)
+runtime: stdlib/libcamlrun.$(A) stdlib/libmmtk_ocaml.$(A)
 
 .PHONY: makeruntime
 makeruntime: runtime-all
 stdlib/libcamlrun.$(A): runtime-all
 	cd stdlib; $(LN) ../runtime/libcamlrun.$(A) .
+
+# MMTk: mirror the libasmrun/libcamlrun handling so the in-tree binding archive
+# is found relocatably (as -lmmtk_ocaml) at link time. During the build it lives
+# at gc/mmtk/target/release/libmmtk_ocaml.a; symlink it into stdlib/ (which is on
+# the compiler's Load_path, so ocamlc/ocamlopt auto-add -L<stdlib>) so both
+# -custom bytecode and native links resolve it before install. The path here is
+# relative to stdlib/ ($(MMTK_LIB) is $(ROOTDIR)-absolute, so derive a relative
+# link target from runtime's sibling layout).
+stdlib/libmmtk_ocaml.$(A): $(MMTK_LIB)
+	cd stdlib; $(LN) ../gc/mmtk/target/release/libmmtk_ocaml.$(A) .
 clean::
 	rm -f $(addprefix runtime/, *.o *.obj *.a *.lib *.so *.dll)
 	rm -f $(addprefix runtime/, ocamlrun ocamlrund ocamlruni ocamlruns sak)
@@ -1658,6 +1668,7 @@ clean::
 	rm -f runtime/domain_state.inc
 	rm -rf $(DEPDIR)
 	rm -f stdlib/libcamlrun.a stdlib/libcamlrun.lib
+	rm -f stdlib/libmmtk_ocaml.a stdlib/libmmtk_ocaml.lib
 
 .PHONY: runtimeopt
 runtimeopt: stdlib/libasmrun.$(A)
@@ -2853,6 +2864,12 @@ $(foreach runtime, $(runtime_PROGRAMS), \
 common-install::
 	$(call INSTALL_ITEMS, runtime/ld.conf $(runtime_BYTECODE_STATIC_LIBRARIES), \
 	  lib)
+# MMTk: install the in-tree binding archive into $(LIBDIR) (the Standard Library
+# dir, alongside libcamlrun.a/libasmrun.a) so an installed/relocated compiler can
+# link -custom and native programs via -lmmtk_ocaml after the build tree is gone.
+# Use the $(ROOTDIR)-relative path: the opam/clone/list install modes record
+# sources relative to $(ROOTDIR).
+	$(call INSTALL_ITEMS, $(MMTK_LIB_REL), lib)
 
 $(foreach shared_runtime, $(runtime_BYTECODE_SHARED_LIBRARIES), \
   $(eval $(call INSTALL_RUNTIME_LIB,$(shared_runtime),BYTECODE)))

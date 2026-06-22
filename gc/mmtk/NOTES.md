@@ -5,6 +5,46 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## opam relocatability: `libmmtk_ocaml.a` linked relocatably + DWARF build-root stripped
+
+*2026-06-22*
+
+The CI `opam installation` job's `test-in-prefix` (`testsuite/tools/testRelocation.ml`) failed
+— two distinct build-dir leaks:
+
+1. **Absolute archive path in config.** `configure.ac` (~3019) substituted the absolute build
+   path `$ac_pwd/gc/mmtk/target/release/libmmtk_ocaml.a` into `{bytecomp,native}_c_libraries`,
+   which is baked into `config.cmx` / `ocamlcommon.cma` / the compiler binaries (and the archive
+   was never installed into the prefix). Fix: reference it relocatably as **`-lmmtk_ocaml`**,
+   exactly like the stock C libs — `ocamlc`/`ocamlopt` already pass `-L<standard-library>`
+   (`Ccomp.call_linker` prefixes every `Load_path` dir with `-L`). The archive is **symlinked into
+   `stdlib/`** during the build (`Makefile`: `stdlib/libmmtk_ocaml.$(A)`, a `runtime` prereq,
+   mirroring `stdlib/libcamlrun.a`) so `-lmmtk_ocaml` resolves in-tree, and **installed into
+   `$(LIBDIR)`** via `common-install` (using the `$(ROOTDIR)`-relative `MMTK_LIB_REL` — opam/clone/
+   list install modes record sources relative to `$(ROOTDIR)`; an absolute path → broken
+   `.install`).
+2. **Build root in the archive's DWARF.** `gc/mmtk/Cargo.toml` sets `[profile.release] debug =
+   true`, so Cargo embeds the absolute build root in `libmmtk_ocaml.a`'s DWARF, propagated by the
+   linker into every native binary AND the installed archive. Fix: `Makefile.mmtk` passes
+   `RUSTFLAGS=--remap-path-prefix=$(abspath $(ROOTDIR))=.` to the cargo build — the Rust analogue
+   of the C toolchain's `-fdebug-prefix-map` (`cc_has_debug_prefix_map`). (Cargo registry paths
+   under `~/.cargo` aren't the build root, so the check ignores them; only `$(ROOTDIR)` needs
+   remapping.)
+
+`configure` regenerated with autoconf 2.72 (reproducible — re-running `tools/autogen` is
+byte-identical). Verified on turing: fresh `distclean`+`cargo clean` → configure → `make world.opt`
+→ install all OK; `test-in-prefix` **exit 0** ("relocatable and reproducible", 0 build-dir
+occurrences in the installed archive); and `-custom` bytecode + native programs compile/link/run
+from the installed prefix **with the build tree moved away**.
+
+**Residual (local-iteration footgun, NOT a CI issue):** the native `.opt` binaries link the archive
+via the runtime `Config.*_c_libraries` flag, not a Makefile prerequisite edge (same as
+`libasmrun.a`), so an *incremental* rebuild that changes only `libmmtk_ocaml.a` won't auto-relink
+them. CI always builds fresh, so it's correct there. Locally, after rebuilding the binding `rm` the
+affected `.opt` binaries (or `make clean world.opt`) before re-checking relocatability.
+
+---
+
 ## Bug #3: MMTk STW stop barrier was a no-op (blocking-section counter underflow)
 
 *2026-06-22*

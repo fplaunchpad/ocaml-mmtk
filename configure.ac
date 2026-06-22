@@ -3009,15 +3009,23 @@ AC_CONFIG_COMMANDS_PRE([cclibs="$cclibs $mathlib $DLLIBS $PTHREAD_LIBS"])
 # {bytecomp,native}_c_libraries (consumed by ocamlc/ocamlopt, which place it after
 # the runtime lib on the C link line — the ordering that resolves the references);
 # the runtime executables themselves get it via MMTK_LINK in the Makefile, so this
-# is NOT added to cclibs/BYTECCLIBS (avoids a redundant double-link there). The
-# path is the absolute build directory; packaging (opam switch) will revisit it.
+# is NOT added to cclibs/BYTECCLIBS (avoids a redundant double-link there).
+#
+# Reference it relocatably as "-lmmtk_ocaml", exactly like the stock C libs: the
+# archive (libmmtk_ocaml.a) is symlinked into stdlib/ during the build and
+# installed into $(LIBDIR) (the Standard Library dir) on install, and ocamlc/
+# ocamlopt automatically pass "-L<standard-library>" to the C linker
+# (Ccomp.call_linker prefixes every Load_path dir with -L), so -lmmtk_ocaml
+# resolves both in the build tree and from an installed/relocated prefix. We must
+# NOT bake an absolute build-dir path here: it would be substituted into
+# config.cmx / ocamlcommon.cma / the compiler binaries and break the
+# relocatability check (testsuite/tools/testRelocation.ml).
 # The transitive native deps differ per OS (matches Makefile.mmtk).
 AS_CASE([$host_os],
   [*darwin*],
     [mmtk_native_libs="-lobjc -framework IOKit -framework CoreFoundation -liconv"],
   [mmtk_native_libs="-ldl -lpthread -lm"])
-AC_CONFIG_COMMANDS_PRE(
-  [mmtk_c_libraries="$ac_pwd/gc/mmtk/target/release/libmmtk_ocaml.a $mmtk_native_libs"])
+mmtk_c_libraries="-lmmtk_ocaml $mmtk_native_libs"
 AC_SUBST([mmtk_c_libraries])
 
 AS_IF([test x"$libdir_given" = 'xno'],
