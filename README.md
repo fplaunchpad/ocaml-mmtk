@@ -31,11 +31,13 @@ switch.
 > and there are no code-generator changes (validated on x86-64 Linux; macOS not yet
 > exercised). The default plan is **Immix**.
 >
-> Known limitations (see `ROADMAP.md`): the **moving-GC bug** that SEGV'd the
-> linux-arm64 CI build at the `ocamldoc` step (and StickyImmix ~25–45%) is
-> **fixed** — it was the unmarshaller (`input_value`) triggering a GC in the
-> middle of `intern_rec`, which under a moving plan relocated the half-built
-> structure; collection is now suppressed for the duration of an unmarshal (see
+> Known limitations (see `ROADMAP.md`): the **moving-GC bug** that SEGVs the
+> CI build at the native `ocamldoc` `Stdlib.3o` manpage step (x86-64 + arm64) is
+> **still open** (reopened 2026-06-22) — it's a mutator deref in `odoc_man.ml:307`,
+> a relocated object whose reference was never updated, likely a missed **native**-stack
+> root. A *separate* moving-GC bug — the unmarshaller triggering a GC mid-`intern_rec`
+> — was fixed (collection is suppressed for the duration of an unmarshal), but that
+> fixed only the **bytecode** `parser.ml` crash, not this native one (see
 > `gc/mmtk/NOTES.md`). Weak arrays / ephemerons / finalisers (incl.
 > cross-domain handover) / lazy work (M6, default-on) and their testsuite dirs pass
 > on Immix; a handful of tests (5) are re-tabled as incompatible-by-design (no
@@ -63,7 +65,7 @@ integration comes later.
 | M4 | **Generational** (GenImmix / StickyImmix): mutator write barrier | ✅ done |
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (Immix-family plans), single- **and** multi-domain; staticlib auto-linked | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out, transitional). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **custom-block finalizers**, and **cross-domain finaliser handover** all work under Immix **and** StickyImmix — `pr3612` + `pr5233` + the re-enabled weak/ephemeron/finaliser/lazy dirs pass; full bootstrap clean; no regressions (remaining testsuite failures are non-M6: memprof, runtime-events, `Gc.stat`). | 🟢 done |
-| M7 | Pass the OCaml testsuite — full bytecode suite: **Immix 1366 / MarkSweep 1367 pass** (of 1551; 140 skipped). Remaining failures are unsupported features (`Gc.stat`/memprof/runtime-events); weak/finaliser dirs now pass (M6). The moving-GC bug that SEGV'd StickyImmix (and the arm64 CI `ocamldoc` step) is **fixed** — it was a GC triggered mid-`intern_rec` (unmarshaller); see Known limitations / `gc/mmtk/NOTES.md`. | 🟢 |
+| M7 | Pass the OCaml testsuite — full bytecode suite: **Immix 1366 / MarkSweep 1367 pass** (of 1551; 140 skipped). Remaining failures are unsupported features (`Gc.stat`/memprof/runtime-events); weak/finaliser dirs now pass (M6). The moving-GC bug that SEGVs the CI `ocamldoc` `Stdlib.3o` step (x86-64 + arm64) is **still open** (reopened 2026-06-22; native deref in `odoc_man.ml:307`, likely a missed native-stack root). A *separate* mid-`intern_rec` GC bug (unmarshaller) was fixed, but only for the bytecode `parser.ml` crash — see Known limitations / `gc/mmtk/NOTES.md`. | 🟡 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline ~1.4–1.8× slower on GC-heavy native bench; optimisation levers identified | 🟡 started |
 | M9 | **MMTk-only: excise the stock GC** — always-on ✅, stock **minor** GC deleted ✅, stock **major** GC (mark/sweep/slice, ~1750 lines) deleted ✅, `Gc.stat` on MMTk stats (partial) 🟡. Single-GC runtime. Remaining: minor-heap-arena + header/metadata cleanup | 🟢 mostly done |
 | — | Parallel collection ✅ verified (marking scales ~8× on 16 threads) | ✅ |

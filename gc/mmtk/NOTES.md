@@ -5,11 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## CI moving-GC bug: ROOT-CAUSED + FIXED — GC triggered mid-`intern_rec`
+## CI moving-GC bug (#2) is STILL OPEN — the intern fix was a *different* bug
+
+*2026-06-22 (later — correction to the entry below)*
+
+**The "GC-mid-`intern_rec`" fix below is real and good, but it does NOT fix the CI/ocamldoc
+crash.** After pushing it to `5.5+mmtk`, the **Build CI still SIGSEGVs** at
+`ocamldoc build/man/Stdlib.3o` (Error 139) on x86-64 **and** linux-arm64 — the exact original
+symptom. Not a CI/cache artifact: reproduced **12/12 on turing** with the exact pushed commit
+(`0e707cbe51`), clean-built (binding recompiled, `is_collection_enabled` present; CI also builds
+the binding fresh), under the **default Immix** plan.
+
+Why the earlier validation misled me: I validated against **bytecode** `parser.ml` (the proxy used
+below), which the intern fix genuinely fixed (~45%→0). But the CI crash is **native**
+`ocamldoc.opt` — a different code path. `caml_mmtk_enabled` is 1 in the native runtime too, so the
+intern suppression *is* active; the crash simply isn't a mid-intern GC.
+
+**Real crash (gdb, deterministic under default Immix):**
+```
+#0  camlOdoc_man.fun_3850 () at ocamldoc/odoc_man.ml:307   | Odoc_info.Raw s -> bs b (self#escape s)
+#1  camlStdlib__List.iter_373 () at list.ml:114
+#2  camlOdoc_man.fun_3839 () at ocamldoc/odoc_man.ml:295
+ ...
+#9  camlOdoc.entry () at ocamldoc/odoc.ml:117
+#10 caml_program ()
+```
+A **mutator** dereference while walking the doc tree — *not* the GC scan, *not* intern. Signature
+of a moving-GC correctness bug: a relocated object whose reference was never updated → the mutator
+follows a stale pointer → SIGSEGV. Under default Immix (full-heap moving, traces everything) the
+prime suspect is a **missed root** — and since this is native code, **native-stack root scanning**
+(which the bytecode `parser.ml` proxy never exercises — explaining why the proxy passed).
+
+**Deterministic repro (default Immix):**
+```
+cd api_docgen/ocamldoc && rm -rf build/man && setarch x86_64 -R make V=1 build/man/Stdlib.3o
+```
+(turing can't fetch from the `mmtk` remote — ship code via `git diff` patch / `git bundle` + scp.)
+
+Bug #2 is **REOPENED**. The intern-GC fix below and the `slot.rs` Infix_tag fix both stand — they
+fixed other real manifestations. Investigation continues via rr on this repro (trace recorded
+`/tmp/rr-odoc` on turing).
+
+---
+
+## GC triggered mid-`intern_rec` — ROOT-CAUSED + FIXED (a bytecode crash, NOT the CI/ocamldoc one)
 
 *2026-06-22*
 
-**The long-hunted CI/ocamldoc moving-GC crash (bug #2) is fixed.** Root cause: the
+**A real moving-GC crash on the bytecode `parser.ml` repro is fixed** (this is *not* the CI/ocamldoc
+crash — see the correction entry above). Root cause: the
 **unmarshaller triggers a GC in the middle of `intern_rec`** under MMTk, which vanilla
 OCaml never does.
 
@@ -1475,9 +1519,12 @@ stage 5 (header color/mark-bit reconciliation).
 *2026-06-20*
 
 The latent moving-GC correctness bug (the deterministic StickyImmix `parser.cmo`
-SEGV from the entry below, and almost certainly the rare ocamldoc `Lexing.engine`
-crash) is **root-caused and fixed**. Fix: `gc/mmtk/common/src/slot.rs`
+SEGV from the entry below) is **root-caused and fixed**. Fix: `gc/mmtk/common/src/slot.rs`
 (`FieldSlot::classify`).
+
+> **Correction (2026-06-22):** the speculation here that this *also* fixed the CI ocamldoc
+> crash was wrong. That crash — now pinned to a mutator deref in `odoc_man.ml:307` (not
+> `Lexing.engine`) — is **still open**; see the top-of-file entry. The `slot.rs` fix itself stands.
 
 **Root cause.** `classify()` reads the *pointee's* header word `(addr - 8)` to
 detect an interior (infix) pointer (`Tag == Infix_tag`, 249). During a moving GC the
