@@ -5,6 +5,53 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #4: gc_regs machinery corruption — native ocamlopt SIGSEGV under tight Immix
+
+*2026-06-23*
+
+A **deterministic native SIGSEGV** compiling a large module under a tight **Immix** heap:
+```
+MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=64 setarch x86_64 -R \
+  ./ocamlopt.opt <std native flags> -c typing/typecore.ml -o /tmp/tc.cmx
+```
+4/4 at 64 MB; **0/4 at 96 MB+** (heap-threshold); **Immix only** — StickyImmix at 64 MB is
+clean; `typecore.ml` reliably, not all heavy sources. `rip = caml_call_gc+8`, faulting
+`movq %r11, 0x58(%r15)` (SAVE_ALL_REGS storing `%r11` into `11*8(bucket)`) with
+`%r15 == Caml_state->gc_regs_buckets == 0`: the gc_regs bucket free-list is NULL when
+`caml_call_gc` pops a bucket. (The testsuite triage's top "native ocamlopt SIGSEGV"; distinct
+from the bytecode `parser.ml` moving-GC repro, and the `parser.ml` *native* crash no longer
+reproduces — the bug #3 STW fix resolved that.)
+
+**NOT a free-list protocol leak (two hypotheses tested + refuted, 2026-06-23):**
+- *OOM-raise leak* — that `caml_alloc_small_dispatch`'s `caml_raise_out_of_memory` on a failed
+  TLAB refill (MMTk-specific) raises *through* `caml_call_gc`, skipping `RESTORE_ALL_REGS` and
+  leaking the popped bucket. **Refuted:** instrumented, the refill-fail/OOM path is **never
+  hit** (`oom_raises=0`) at 64 MB; crash identical.
+- *Re-entrant / non-returning `caml_garbage_collection`* (the triage's guess) — a depth counter
+  (entry `++`, pre-return `--`) showed **depth_max = 0** over the whole compile:
+  `caml_garbage_collection` is **never nested and never raises** (a raise would leave the
+  counter stuck high → next entry logs depth>0; never observed). So the asm SAVE/RESTORE
+  pop/push is **balanced**.
+- Forcing a spare bucket at every `caml_garbage_collection` entry (`caml_ensure_gc_regs_bucket`,
+  free-list ≥1 at every GC) **did not prevent the crash**.
+
+A balanced pop/push that still reaches a NULL free-list head, unfixed by keeping a spare,
+points to **memory corruption of the gc_regs machinery in `Caml_state`** — the
+`gc_regs_buckets` field (offset 0x50) or `gc_regs` (0x58; clobbering it makes RESTORE_ALL_REGS
+mismanage the free-list) — by the **full-heap moving Immix collector**, not the bucket
+protocol. Immix-only fits: StickyImmix does mostly nursery GCs and rarely moves old objects;
+tight-heap Immix does frequent full-heap *moving/defragmenting* GCs.
+
+**Next step:** rr the deterministic repro + a *software* watchpoint on
+`&Caml_state->gc_regs_buckets` (and `gc_regs`), reverse-continue from the crash to the stray
+write (NOT hardware watchpoints — they trip the rr/gdb async bug, per CLAUDE.md). Leading
+candidates: the gc_regs bucket (an off-MMTk-heap `caml_stat_alloc` block) being mistaken for a
+movable object and "forwarded" during the root scan; or an MMTk slot update writing through a
+bogus slot into the `Caml_state` struct. Tracked: bug #4. Workaround meanwhile: a larger heap,
+or StickyImmix, for native compiles.
+
+---
+
 ## opam relocatability: `libmmtk_ocaml.a` linked relocatably + DWARF build-root stripped
 
 *2026-06-22*

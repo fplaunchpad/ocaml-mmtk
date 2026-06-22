@@ -90,11 +90,15 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
     but NOT the test's `setpgid`'d group, which is then orphaned and runs **forever**
     (we leaked ~17 runaway `ocamlrun`/`*.byte` processes on turing this way). Use
     `TIMEOUT=` instead. If you must bound a run, also `setsid` it and kill the group.
-  - Needs `ocamltest` + `testsuite/lib/testing.cma` built first. For a **bytecode-only**
-    run (no native compilers in a plain tree), set `native_compiler = false` /
-    `native_dynlink = false` in `ocamltest/ocamltest_config.ml` and rebuild the driver
-    — else each test's native variant errors and masks the bytecode result. A fresh
-    worktree needs `make world` (not `make all`) first — it has no `boot/ocamlrun`.
+  - Needs `ocamltest` + `testsuite/lib/testing.cma` built first. **For native test
+    variants also build `make ocamltest.opt`** — it produces `testsuite/lib/testing.cmxa`
+    + `testsuite/tools/codegen`; without them ~50 native variants spuriously fail on the
+    missing native test lib (looks like real failures but is a test-infra gap). For a
+    **bytecode-only** run (no native compilers in a plain tree), set
+    `native_compiler = false` / `native_dynlink = false` in
+    `ocamltest/ocamltest_config.ml` and rebuild the driver — else each test's native
+    variant errors and masks the bytecode result. A fresh worktree needs `make world`
+    (not `make all`) first — it has no `boot/ocamlrun`.
 
 ## GC plan & env knobs
 
