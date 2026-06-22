@@ -19,6 +19,13 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   - **`upstream-5.5.0-rc1`** pins pristine OCaml 5.5.0-rc1 (the fork point, commit
     `4090d6db95`) so the fork's full diff is reviewable via a self-PR against it. Don't
     build or commit on it.
+  - **`benchmarks`** is an **orphan branch** (no mainline history) holding the CLBG
+    benchmark suite (`benchmarks/clbg/` — the Domain.spawn-ported Benchmarks Game
+    programs + golden outputs). Kept off the mainline so the OCaml tree carries no
+    benchmark/external code; `.github/workflows/clbg.yml` checks it out (`ref:
+    benchmarks` into `_clbg/`) to run the cross-plan correctness gate. Edit the suite
+    on this branch; it does NOT carry the workflows, so suite-only changes don't
+    auto-trigger CI (runtime/gc changes on the mainline still do).
   - **`trunk`** is **upstream OCaml's** dev branch (a leftover in the local clone) —
     NOT ours; never build/push it. (There is no `main` here.) Never push to upstream
     `ocaml/ocaml` regardless — only `mmtk` is ours.

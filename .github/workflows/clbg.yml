@@ -7,13 +7,11 @@ name: CLBG correctness
 on:
   push:
     paths:
-      - 'benchmarks/clbg/**'
       - 'gc/mmtk/**'
       - 'runtime/**'
       - '.github/workflows/clbg.yml'
   pull_request:
     paths:
-      - 'benchmarks/clbg/**'
       - 'gc/mmtk/**'
       - 'runtime/**'
   workflow_dispatch:
@@ -23,6 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The CLBG suite (programs + golden) lives on the dedicated orphan 'benchmarks'
+      # branch, off the OCaml mainline, so the GC fork's tree stays free of benchmark
+      # code. Check it out into _clbg/ — the suite ends up at _clbg/benchmarks/clbg/.
+      - name: Fetch CLBG suite (benchmarks branch)
+        uses: actions/checkout@v4
+        with:
+          ref: benchmarks
+          path: _clbg
 
       - name: Install build dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends build-essential
@@ -63,7 +70,7 @@ jobs:
       # here, so drive them through ocamlrun. setarch -R guards the per-file
       # compiler invocations against the mmap flake.
       - name: Build CLBG benchmarks (bytecode + native)
-        working-directory: benchmarks/clbg
+        working-directory: _clbg/benchmarks/clbg
         run: |
           setarch "$(uname -m)" -R env MMTK_PLAN=MarkSweep make all \
             OCAMLC="$GITHUB_WORKSPACE/runtime/ocamlrun $GITHUB_WORKSPACE/ocamlc" \
@@ -72,7 +79,7 @@ jobs:
       # validate runs bytecode under all 5 plans and, now that build/*.native
       # exist, native under Immix + StickyImmix automatically.
       - name: Validate correctness across all plans
-        working-directory: benchmarks/clbg
+        working-directory: _clbg/benchmarks/clbg
         env:
           MMTK_HEAP_SIZE_MB: 2048
           CLBG_TIMEOUT: 180

@@ -1,7 +1,0 @@
-build/
-results/
-
-# Golden outputs are committed reference data. Override the repo-root `*.out`
-# rule (which otherwise hides them).
-!golden/
-!golden/*.out
