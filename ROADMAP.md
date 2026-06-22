@@ -1,4 +1,4 @@
-# mmtk-ocaml roadmap
+# ocaml-mmtk roadmap
 
 This is the living plan for bringing up an MMTk-backed garbage collector for
 OCaml. It is meant to be picked up cold in a fresh session. Companion docs:
@@ -7,7 +7,7 @@ OCaml. It is meant to be picked up cold in a fresh session. Companion docs:
 and deferred investigations).
 
 **Project shape.** This repo *is* the OCaml fork (base `5.5.0-rc1`, branch
-`5.5+mmtk`), distributed as `mmtk-ocaml`. The MMTk binding is in-tree at
+`5.5+mmtk`), distributed as `ocaml-mmtk`. The MMTk binding is in-tree at
 [`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 from crates.io (not
 vendored). MMTk is **always-on and the only collector** (no opt-out; the stock
 minor *and* major GC have been excised — M9). `MMTK_PLAN` selects the plan. The
@@ -38,10 +38,11 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Cross-domain finaliser handover fixed**: orphaned finalisers from a terminated domain are now adopted into a live domain (`caml_mmtk_adopt_orphaned_finalisers`) at the start of `process_weak_refs` — the stock `adopt_orphaned_work` was deleted in M9 stage 3. (Orphaned *ephemerons* have the same gap — tracked TODO.) | 🟢 done (default-on) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 real regression = `parallel/domain_parallel_spawn_burn_gc_set` SIGSEGV under StickyImmix only (bug #3, multidomain+moving). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — ROOT-CAUSED + FIXED (2026-06-22).** Native unmarshalling allocated unmarshalled objects **outside MMTk spaces**: in `intern.c` the MMTk allocation path (per-object `caml_mmtk_try_alloc_shr` + the bulk `Alloc_small` skip) was wrapped in `#ifndef NATIVE_CODE` (bytecode-only), so native `intern_alloc_obj` fell through to the stock `caml_shared_try_alloc(d->shared_heap, …)`, which under M9 allocates in a non-MMTk `caml_stat`/malloc region. MMTk's root-scan/`scan_object` pointer filter drops those objects, so their fields are never traced and anything reachable only through the unmarshalled graph (the loaded ocamldoc module/info records) is collected → dangling pointer → SIGSEGV in `odoc_man.ml` walking the doc tree. **Fix:** remove the `#ifndef NATIVE_CODE` guards so native intern allocates via MMTk too (+ `CAMLassert(!caml_mmtk_enabled)` on the now-dead stock branch). **Verified:** from-scratch `make clean && make -j world.opt` (incl. the `ocamldoc Stdlib.3o` manpage step) succeeds; manpage repro **0/12** (was 12/12) under default Immix. The earlier bytecode-only fixes — GC-mid-`intern_rec` suppression (`is_collection_enabled`, fixed the `parser.ml` repro) and the `array.c` barrier — stand but were different/`#ifndef NATIVE_CODE` bugs. Full details: `gc/mmtk/NOTES.md`. | 🟢 |
 | M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
-| **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `mmtk-ocaml` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
+| **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then mark/sweep/slice bodies deleted (st.3, ~1750 lines: `major_gc.c` 2540→1002, `shared_heap.c` sweep removed) ✅, `Gc.stat` reimplemented on MMTk stats (st.4 partial) 🟡. `ocaml-mmtk` is a single-GC runtime. Remaining: minor-heap-arena removal + `Gc.counters`, header/metadata reconciliation (st.5) | 🟢 mostly done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
 | — | GC plans: 9/11 work (incl. SemiSpace, GenCopy, MarkCompact, ConcurrentImmix); PageProtect + Compressor need work — see NOTES matrix. (Non-moving plans MarkSweep/NoGC had silently regressed — bug #1's `is_forwarded` check read forwarding-bits metadata they don't map; fixed by registering the spec only for moving plans.) | 🟡 |
 | — | Concurrent GC: `ConcurrentImmix` exists in 0.32 and runs our tests; concurrent-marking correctness unvalidated | 🟡 |
+| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): parallel tests assert stock-GC invariants MMTk doesn't maintain — `caml_gc_phase != Phase_sweep_main` (domain.c), `Field == Debug_free_minor` (memory.h); related to bug #3 + the debug-runtime/MMTk assertion mismatch. (c) **opam installation**: `test-in-prefix` fails. The x86-64 `build` job (the bug-#2 site) is **green**. | 🟡 |
 
 **Architecture decision (2026-06-20): MMTk owns the ENTIRE heap (all-MMTk); the
 minor↔MMTk coordination fix is SUPERSEDED, not just deferred.**
@@ -381,7 +382,7 @@ reasons (not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SI
 5. Immix defrag/policy tuning; reduce TLAB-refill overhead; revisit LOS threshold.
 
 ### I. M9 — MMTk-only: excise the stock GC
-Goal: remove OCaml's stock garbage collector entirely so `mmtk-ocaml` is a
+Goal: remove OCaml's stock garbage collector entirely so `ocaml-mmtk` is a
 single-GC runtime — no `MMTK_ENABLED` opt-in, no dual code paths, no stock
 minor/major GC. This deletes the per-allocation `caml_mmtk_enabled` branch and the
 maintenance tax of keeping two GCs correct side by side.

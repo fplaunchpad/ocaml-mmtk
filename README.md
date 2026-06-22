@@ -1,4 +1,4 @@
-# OCaml + MMTk (`mmtk-ocaml`)
+# OCaml + MMTk (`ocaml-mmtk`)
 
 A fork of [OCaml](https://github.com/ocaml/ocaml) whose garbage collector is
 [MMTk](https://www.mmtk.io), the Memory Management Toolkit. A normally-built
@@ -6,22 +6,20 @@ compiler runs ordinary OCaml programs on an MMTk-managed heap. The eventual goal
 is to ship this as an `ocaml-variants.5.x+mmtk` opam switch.
 
 - **Base:** OCaml `5.5.0-rc1`.
-- **Garbage collector:** MMTk is the **only** collector and is on by default —
-  there is no opt-out, and OCaml's stock GC has been removed. The default plan is
-  **Immix**.
+- **Garbage collector:** MMTk is the **only** collector, on by default — there is
+  no opt-out. The default plan is **Immix**.
 - **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
   [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
 
-A normal `./configure && make` builds the world and self-hosts — the compiler
-bootstraps and the documentation builds — entirely on MMTk, for both the
-**bytecode** and **native** runtimes. Native code uses TLAB nursery-aliasing (MMTk
-owns the nursery), so there are no code-generator changes. Collection is parallel
-and stop-the-world; moving plans relocate objects, generational plans use a write
-barrier, and single- and multi-domain (`Domain.spawn`) programs are supported.
+A normal `./configure && make` builds the full compiler — both **bytecode** and
+**native** — on MMTk, and it self-hosts: the compiler bootstraps and its
+documentation builds. Native code allocates through a TLAB aliased to MMTk's
+nursery, so it needs no special code generation. Collection is parallel and
+stop-the-world; moving plans relocate objects, generational plans use a write
+barrier, and both single- and multi-domain (`Domain.spawn`) programs run.
 
-> Developed and tested on **x86-64 Linux**; native code on macOS is not yet
-> exercised. On GC-heavy workloads MMTk is currently ~1.4–1.8× the stock GC, with
-> tuning ongoing.
+> Supported on **x86-64 Linux**; native code on macOS is untested. On GC-heavy
+> workloads MMTk runs at ~1.4–1.8× the stock GC (tuning ongoing).
 
 **Learn more:** the plan and current status live in [`ROADMAP.md`](ROADMAP.md);
 design notes and investigations in [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md); project
@@ -84,8 +82,8 @@ runtime/mmtk.c      C glue between the runtime and the binding
 Makefile.mmtk       build glue (cargo invocation + link flags)
 ```
 
-Runtime changes are concentrated in `runtime/` (allocation, the write barrier, root
-scanning, and domain init), all routed unconditionally to MMTk.
+In `runtime/`, allocation, the write barrier, root scanning, and domain
+initialization go through MMTk; the C glue lives in `runtime/mmtk.c`.
 
 ## License
 
