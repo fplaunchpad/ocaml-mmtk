@@ -126,16 +126,13 @@ void caml_set_minor_heap_size (asize_t wsize)
   caml_domain_state* domain_state = Caml_state;
   struct caml_minor_tables *r = domain_state->minor_tables;
 
-  if (domain_state->young_ptr != domain_state->young_end) {
-    CAML_EV_COUNTER (EV_C_FORCE_MINOR_SET_MINOR_HEAP_SIZE, 1);
-    caml_minor_collection();
-  }
-  CAMLassert (domain_state->young_ptr == domain_state->young_end);
-
-  if(caml_reallocate_minor_heap_arena(wsize) < 0) {
-    caml_fatal_error("Fatal error: No memory for minor heap");
-  }
-
+  /* Under always-on MMTk the minor heap is an MMTk TLAB block (Immix nursery), not
+     a resizable stock arena: Gc.set minor_heap_size cannot actually resize it. We
+     just record the nominal size (reported by Gc.stat/Gc.get and used to size the
+     minor tables) and re-size the tables. No stock-arena reallocation, and no
+     minor collection / young_ptr==young_end assert (which never holds under TLAB —
+     young_ptr sits mid-block). */
+  domain_state->minor_heap_wsz = caml_norm_minor_heap_size(wsize);
   reset_minor_tables(r);
 }
 

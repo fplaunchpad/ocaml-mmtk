@@ -5,6 +5,34 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Minor-heap arena removed (+ a shared_heap.h-include fallout)
+
+*2026-06-22*
+
+Removed the stock per-domain minor-heap **arena** (the committed minor heap). Under TLAB
+nursery-aliasing the domain's `young_*` are bootstrapped by `caml_mmtk_refill_tlab` (called
+from `caml_mmtk_domain_init` at domain create) pointing at an MMTk Immix block — so
+`allocate_minor_heap_arena`'s `young_*` setup was always immediately overwritten and the
+arena mmap unused. Deleted `allocate/free/reallocate_minor_heap_arena`; domain create now
+just sets `minor_heap_wsz` to the nominal size (for `Gc.stat`/`Gc.get` + minor-table sizing)
+and leaves `young_*` NULL until the refill — verified nothing allocates an OCaml value in the
+create window before `caml_mmtk_domain_init` (it's all `caml_stat`/mmap). domain terminate,
+`caml_set_minor_heap_size`, and `stw_resize_minor_heaps_reservation` no longer touch an arena.
+**KEPT (not removed): the address-space reservation** (`caml_minor_heaps_start/end`), because
+`Is_young(v)` (address_class.h) is `v ∈ [start,end)` — so retiring the reservation is
+entangled with young-object classification (header/metadata reconciliation, #8). Verified on
+turing: multidomain spawn/terminate (Immix+StickyImmix), gc-roots, native old→young
+(StickyImmix), simple programs.
+
+**Include fallout from the earlier `shared_heap.h` deletion:** deleting `caml/shared_heap.h`
+broke two *testsuite* C files that `#include`d it — `gc-roots/globrootsprim.c` (needs
+`NOT_MARKABLE`, now in `caml/major_gc.h`) and `cxx-api/all-includes.h` (dropped). The deletion
+grepped `runtime/` but not `testsuite/`. Lesson: when deleting a `caml/` header, grep the
+WHOLE repo — testsuite C stubs include `caml/` headers too. (These were surfacing as
+gc-roots *compile* failures, easily mistaken for runtime bugs.)
+
+---
+
 ## linux-O0 `tests/parallel`: `check_minor_heap` asserts + a real domain-terminate race
 
 *2026-06-22*
