@@ -11,11 +11,14 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - MMTk is **always-on** (milestone M9). Default plan is **Immix**. Both the bytecode
   interpreter and native code allocate through MMTk.
 - **Branches.** Remote: `mmtk` → `fplaunchpad/ocaml-mmtk` (public, the only remote).
-  - **`5.5+mmtk`** is the fork's **default branch** — all work should ultimately live
-    here (consolidate onto it).
-  - **`m9-mmtk-only`** is the active integration/dev branch; it fast-forwards into
-    `5.5+mmtk` once validated. Do feature work on topic branches, merge to
-    `m9-mmtk-only`, then fast-forward `5.5+mmtk`.
+  - **`5.5+mmtk`** is the fork's **default branch and sole mainline** — all work lands
+    here. Do feature/risky work on short-lived topic branches off it, then merge (or
+    fast-forward) into `5.5+mmtk`. (The former `m9-mmtk-only` integration branch was
+    redundant — always kept identical to `5.5+mmtk`, and it doubled CI — so it was
+    removed; consolidation is done.)
+  - **`upstream-5.5.0-rc1`** pins pristine OCaml 5.5.0-rc1 (the fork point, commit
+    `4090d6db95`) so the fork's full diff is reviewable via a self-PR against it. Don't
+    build or commit on it.
   - **`trunk`** is **upstream OCaml's** dev branch (a leftover in the local clone) —
     NOT ours; never build/push it. (There is no `main` here.) Never push to upstream
     `ocaml/ocaml` regardless — only `mmtk` is ours.

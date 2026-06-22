@@ -489,7 +489,7 @@ Stages (each independently buildable + testable):
 3. **Delete the stock major GC + shared heap** (`major_gc.c`, `shared_heap.c`):
    mark/sweep/slices/mark-stack/pool/LOS. M6 is done (the prerequisite). Done via an
    *inert-first* approach — guard the stock collector to no-op under MMTk, then delete
-   the dead bodies. **🟡 inert step MERGED to `m9-mmtk-only`** (`caml_darken` / slice
+   the dead bodies. **🟡 inert step MERGED to `5.5+mmtk`** (`caml_darken` / slice
    drivers / `caml_finish_*` no-op under MMTk; finish_* still set
    `marking_done`/`sweeping_done` so `caml_domain_terminate` exits). Validated: clean
    Immix+StickyImmix bootstrap, 25×4 `Domain.join` battery, effects 23/0. The earlier
