@@ -5,6 +5,38 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Stock shared heap (`shared_heap.c`) deleted
+
+*2026-06-22*
+
+Under always-on MMTk the stock shared major heap is never allocated into (MMTk owns the
+heap), so `shared_heap.c` (1476 lines) + `caml/shared_heap.h` are deleted — pool allocator,
+sweep, compaction, large-object, adoption, verification, lifecycle all dead. NOT everything
+in the header was dead: the **mark-status colour machinery** (`caml_global_heap_state`, the
+`status`/`Has_status_*`/`is_marked`/`is_unmarked`/`is_garbage`/`caml_allocation_status`
+helpers), **`caml_atom`** + its 256-entry atoms table (zero-length blocks), and
+**`caml_compactions_count`** are still live (weak/ephemeron/finaliser processing; every
+allocator) → relocated to `major_gc.{c,h}`, not removed.
+
+Heap-size/stats consumers rewired to MMTk: `caml_heap_size`/`caml_top_heap_words` (custom.c,
+major_gc.c, sys.c) → new `caml_mmtk_heap_size_bytes()` (wraps `mmtk_ocaml_total_bytes`); the
+dead `gc_ctrl.h` `caml_stat_heap_*` macros dropped; `gc_stats.c` stops sampling the empty
+stock heap; the shared-heap lifecycle calls removed from domain.c/startup_aux.c. The
+`caml_domain_state.shared_heap` field is **kept (set NULL)** to avoid shifting struct offsets
+the native code generator bakes in (remove it later in an ABI-aware pass).
+
+**Link gotcha (non-obvious, will recur):** deleting `shared_heap.c` removed the last *C*
+reference to `caml_do_roots` — under MMTk it's now called only by the Rust binding
+(`scanning.rs`). The link line lists `libcamlrun`/`libasmrun` *before* the staticlib, so
+`roots.o` stopped being pulled → `undefined reference to caml_do_roots`. Fix: a link anchor
+in `mmtk.c` (always linked, since the C runtime calls `caml_mmtk_*`) that references
+`caml_do_roots`. Any future "the Rust binding calls a C function no remaining C code
+references" needs the same anchor. Verified on turing: clean `world.opt` (incl. ocamldoc),
+`Gc.stat` reports the MMTk heap (heap_words=8388608 for a 64 MB heap, major=1), weak-ephe-final
++ gc-roots run clean, native StickyImmix old→young = 1000000.
+
+---
+
 ## Native write barrier wired (`caml_modify` / `caml_initialize`)
 
 *2026-06-22*

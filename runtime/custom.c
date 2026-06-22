@@ -25,7 +25,6 @@
 #include "caml/memory.h"
 #include "caml/mlvalues.h"
 #include "caml/mmtk.h"
-#include "caml/shared_heap.h"
 #include "caml/signals.h"
 #include "caml/memprof.h"
 
@@ -45,7 +44,7 @@ mlsize_t caml_custom_get_max_major (void)
      marking phase) before it starts to deallocate dead blocks
      allocated during the previous cycle.  [heap_size / 150] is really
      [heap_size * (2/3) / 100] (but faster). */
-  return caml_heap_size(Caml_state->shared_heap) / 150
+  return caml_mmtk_heap_size_bytes() / 150
          * atomic_load_relaxed(&caml_custom_major_ratio);
 }
 

@@ -23,7 +23,6 @@
 #include "caml/major_gc.h" /* for caml_major_cycles_completed */
 #include "caml/memory.h"
 #include "caml/fail.h"
-#include "caml/shared_heap.h"
 #include <stddef.h>
 
 struct caml_frame_descrs {

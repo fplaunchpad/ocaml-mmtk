@@ -130,6 +130,10 @@ extern void caml_mmtk_run_custom_finalizers(void);
 extern void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
                                uintnat *free_words, uintnat *collections);
 
+/* Total bytes reserved by MMTk for the heap. Replaces the deleted
+ * caml_heap_size(shared_heap). See runtime/mmtk.c. */
+extern uintnat caml_mmtk_heap_size_bytes(void);
+
 /* Generational write barrier: record that `count` value-sized slots at `start`
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */

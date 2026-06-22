@@ -27,7 +27,7 @@
 #include "caml/mlvalues.h"
 #include "caml/mmtk.h"
 #include "caml/roots.h"
-#include "caml/shared_heap.h"
+#include "caml/major_gc.h"
 
 /* [size] is a number of elements for the [to_do.item] array */
 static void alloc_todo (caml_domain_state* d, int size)

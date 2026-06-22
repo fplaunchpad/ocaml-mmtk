@@ -19,6 +19,7 @@
 #ifdef CAML_INTERNALS
 
 #include <stdbool.h>
+#include "mlvalues.h"
 
 typedef enum {
   Phase_sweep_main,
@@ -77,6 +78,61 @@ Caml_inline void caml_update_major_allocated_words(
   if (self->gc_policy & CAML_GC_RAMP_UP) {
     self->allocated_words_suspended += words;
   }
+}
+
+/* ── Mark-status colours ─────────────────────────────────────────────────
+   These header-colour helpers and the global colour-cycle state used to live
+   in shared_heap.h (deleted under always-on MMTk). They remain live because
+   weak/ephemeron/finaliser processing still reads mark bits, so they have
+   been relocated here. [caml_compactions_count] never advances under MMTk
+   (no stock compaction), so Gc.stat reports 0 compactions. */
+
+CAMLextern atomic_uintnat caml_compactions_count;
+
+/* always readable by all threads
+   written only by a single thread during STW periods */
+typedef uintnat status;
+struct global_heap_state {
+  status MARKED, UNMARKED, GARBAGE;
+};
+extern struct global_heap_state caml_global_heap_state;
+
+/* CR mshinwell: ensure this matches [Emitaux] */
+enum {NOT_MARKABLE = 3 << HEADER_COLOR_SHIFT};
+
+Caml_inline int Has_status_hd(header_t hd, status s) {
+  return Color_hd(hd) == s;
+}
+
+Caml_inline int Has_status_val(value v, status s) {
+  return Has_status_hd(Hd_val(v), s);
+}
+
+Caml_inline header_t With_status_hd(header_t hd, status s) {
+  return Hd_with_color(hd, s);
+}
+
+Caml_inline int is_garbage(value v) {
+  return Has_status_val(v, caml_global_heap_state.GARBAGE);
+}
+
+Caml_inline int is_unmarked(value v) {
+  return Has_status_val(v, caml_global_heap_state.UNMARKED);
+}
+
+Caml_inline int is_marked(value v) {
+  return Has_status_val(v, caml_global_heap_state.MARKED);
+}
+
+Caml_inline int is_not_markable(value v) {
+  return Has_status_val(v, NOT_MARKABLE);
+}
+
+Caml_inline status caml_allocation_status(void) {
+  return
+    caml_marking_started()
+    ? caml_global_heap_state.MARKED
+    : caml_global_heap_state.UNMARKED;
 }
 
 #endif /* CAML_INTERNALS */

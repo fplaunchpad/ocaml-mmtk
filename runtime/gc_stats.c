@@ -19,7 +19,6 @@
 #include "caml/memory.h"
 #include "caml/minor_gc.h"
 #include "caml/platform.h"
-#include "caml/shared_heap.h"
 #include "caml/startup_aux.h"
 
 Caml_inline intnat intnat_max(intnat a, intnat b) {
@@ -145,7 +144,8 @@ void caml_collect_gc_stats_sample_stw(caml_domain_state* domain)
     memset(stats, 0, sizeof(*stats));
   } else {
     caml_collect_alloc_stats_sample(domain, &stats->alloc_stats);
-    caml_collect_heap_stats_sample(domain->shared_heap, &stats->heap_stats);
+    /* No stock shared heap under always-on MMTk: heap_stats stays zeroed.
+       Gc.stat heap fields come from MMTk directly (caml_gc_quick_stat). */
   }
 }
 
@@ -156,7 +156,7 @@ void caml_compute_gc_stats(struct gc_stats* buf)
   int my_id = Caml_state->id;
   memset(buf, 0, sizeof(*buf));
 
-  caml_accum_orphan_heap_stats(&buf->heap_stats);
+  /* No stock shared heap under always-on MMTk: heap_stats stays zeroed. */
   caml_accum_orphan_alloc_stats(&buf->alloc_stats);
 
   /* The instantaneous maximum heap size cannot be computed

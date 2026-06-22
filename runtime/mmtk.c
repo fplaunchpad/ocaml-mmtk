@@ -36,6 +36,18 @@
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 
+/* Link anchor — force roots.o into the link. The MMTk binding (Rust staticlib,
+   scanning.rs) calls caml_do_roots for per-domain root scanning, but with the
+   stock GC removed no C code references it anymore. The link line lists
+   libcamlrun/libasmrun before the staticlib, so without a C-side reference the
+   linker never pulls roots.o out of the archive and fails with "undefined
+   reference to caml_do_roots". mmtk.o is always linked (the C runtime calls
+   caml_mmtk_*), so referencing caml_do_roots here forces roots.o to be pulled. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((used))
+#endif
+static void (*const caml_mmtk_link_anchor)(void) = (void (*)(void)) caml_do_roots;
+
 /* Collection-suppression counter (see caml/mmtk.h, runtime/intern.c). MMTk's
    gc_trigger consults caml_mmtk_collection_enabled() via the binding's
    VMCollection::is_collection_enabled; while the count is non-zero no collection
@@ -490,6 +502,13 @@ void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
   *live_words  = mmtk_ocaml_used_bytes()  / sizeof(value);
   *free_words  = mmtk_ocaml_free_bytes()  / sizeof(value);
   *collections = mmtk_ocaml_gc_count();
+}
+
+/* Total bytes reserved by MMTk for the heap. Replaces the stock
+   caml_heap_size(shared_heap) query now that the stock shared heap is gone. */
+uintnat caml_mmtk_heap_size_bytes(void)
+{
+  return mmtk_ocaml_total_bytes();
 }
 
 /* Service an explicit `Gc` collection request (Gc.major / full_major / compact).

@@ -1254,7 +1254,6 @@ runtime_COMMON_C_SOURCES = \
   prng \
   roots \
   runtime_events \
-  shared_heap \
   signals \
   skiplist \
   startup_aux \

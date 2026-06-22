@@ -33,7 +33,6 @@
 #include "caml/mmtk.h"
 #include "caml/major_gc.h"
 #include "caml/signals.h"
-#include "caml/shared_heap.h"
 #include "caml/domain.h"
 #include "caml/roots.h"
 #include "caml/alloc.h"

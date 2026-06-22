@@ -23,7 +23,6 @@
 #include "caml/gc_stats.h"
 #include "caml/major_gc.h"
 #include "caml/minor_gc.h"
-#include "caml/shared_heap.h"
 #include "caml/misc.h"
 #include "caml/memory.h"
 #include "caml/mlvalues.h"

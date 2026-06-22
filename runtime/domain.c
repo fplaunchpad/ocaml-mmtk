@@ -68,7 +68,6 @@ typedef cpuset_t cpu_set_t;
 #include "caml/memory.h"
 #include "caml/osdeps.h"
 #include "caml/platform.h"
-#include "caml/shared_heap.h"
 #include "caml/signals.h"
 #include "caml/startup.h"
 #include "caml/startup_aux.h"
@@ -922,10 +921,11 @@ static void domain_create(uintnat initial_minor_heap_wsize,
     goto alloc_minor_tables_failure;
   }
 
-  d->state->shared_heap = caml_init_shared_heap();
-  if(d->state->shared_heap == NULL) {
-    goto init_shared_heap_failure;
-  }
+  /* Always-on MMTk: the stock shared heap is gone (MMTk does all allocation).
+     The shared_heap field is kept (it is generated from domain_state.tbl and
+     removing it would shift struct offsets baked into the native code
+     generator), but it is left NULL and never dereferenced. */
+  d->state->shared_heap = NULL;
 
   if (caml_init_major_gc(domain_state) < 0) {
     goto init_major_gc_failure;
@@ -1019,10 +1019,7 @@ create_stack_cache_failure:
 allocate_minor_heap_arena_failure:
   caml_teardown_major_gc();
 init_major_gc_failure:
-  caml_orphan_shared_heap(d->state->shared_heap);
-  caml_free_shared_heap(d->state->shared_heap);
-  domain_state->shared_heap = NULL;
-init_shared_heap_failure:
+  /* No stock shared heap to orphan/free under always-on MMTk. */
   caml_free_minor_tables(domain_state->minor_tables);
   domain_state->minor_tables = NULL;
 alloc_minor_tables_failure:
@@ -2328,10 +2325,7 @@ void caml_domain_terminate(bool last)
     if (!marking_and_sweeping_done(domain_state))
       continue;
 
-    /* Orphan the local shared heap.
-       This is only valid when [sweeping_done], and does
-       not create any new major GC work. */
-    caml_orphan_shared_heap(domain_state->shared_heap);
+    /* No stock shared heap to orphan under always-on MMTk. */
     CAMLassert(marking_and_sweeping_done(domain_state));
 
     /* Take the all_domains_lock to try and exit the STW participant set
@@ -2382,8 +2376,6 @@ void caml_domain_terminate(bool last)
      Caml_state->mmtk_mutator, so it must still be live there. */
   caml_mmtk_domain_terminate(domain_state);
 
-  if (!last) caml_assert_shared_heap_is_empty(domain_state->shared_heap);
-
   /* [domain_state] may be reused by a fresh domain here, now that we
      have done [stop_active_domain] and released the
      [all_domains_lock]. In particular, we cannot touch
@@ -2406,23 +2398,10 @@ void caml_domain_terminate(bool last)
   caml_free_extern_state();
   caml_teardown_major_gc();
 
-  /* At this point, we know that the shared heap has been orphaned,
-     except if [last], if we are the last domain. In that case we
-     finalise all unswept objects and orphan the shared heap now. */
-  if (last) {
-    /* First adopt all orphan pools, to avoid missing unswept objects. */
-    caml_adopt_all_orphan_heaps(domain_state->shared_heap);
-
-    /* Call all custom finalisers of unswept objects. */
-    caml_finalise_heap();
-
-    /* Then orphan all pools again. */
-    caml_orphan_shared_heap(domain_state->shared_heap);
-  }
-  caml_assert_shared_heap_is_empty(domain_state->shared_heap);
-
-  caml_free_shared_heap(domain_state->shared_heap);
-  domain_state->shared_heap = NULL;
+  /* Under always-on MMTk there is no stock shared heap to adopt/finalise/orphan
+     or free on domain termination: MMTk owns all heap objects and runs custom
+     finalisers itself (caml_mmtk_run_custom_finalizers). The shared_heap field
+     is left NULL. */
   caml_free_minor_tables(domain_state->minor_tables);
   domain_state->minor_tables = NULL;
 

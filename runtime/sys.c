@@ -52,6 +52,7 @@
 #include "caml/runtime_events.h"
 #include "caml/fail.h"
 #include "caml/gc_ctrl.h"
+#include "caml/gc_stats.h"
 #include "caml/major_gc.h"
 #include "caml/io.h"
 #include "caml/mlvalues.h"
@@ -63,7 +64,7 @@
 #include "caml/callback.h"
 #include "caml/startup_aux.h"
 #include "caml/major_gc.h"
-#include "caml/shared_heap.h"
+#include "caml/mmtk.h"
 
 CAMLexport char * caml_strerror(int errnum, char * buf, size_t buflen)
 {
@@ -151,11 +152,13 @@ CAMLexport void caml_do_exit(int retcode)
         s.heap_stats.pool_max_words + s.heap_stats.large_max_words;
 
       if (heap_words == 0) {
-        heap_words = Wsize_bsize(caml_heap_size(Caml_state->shared_heap));
+        heap_words = Wsize_bsize(caml_mmtk_heap_size_bytes());
       }
 
       if (top_heap_words == 0) {
-        top_heap_words = caml_top_heap_words(Caml_state->shared_heap);
+        /* MMTk does not track a peak ("top") heap size; use the current heap
+           size as a proxy. */
+        top_heap_words = Wsize_bsize(caml_mmtk_heap_size_bytes());
       }
 
       CAML_GC_MESSAGE(STATS, "allocated_words: %" CAML_PRIdNAT "\n",

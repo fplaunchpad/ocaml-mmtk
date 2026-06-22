@@ -26,7 +26,6 @@
 #include "caml/mlvalues.h"
 #include "caml/roots.h"
 #include "caml/major_gc.h"
-#include "caml/shared_heap.h"
 #include "caml/fiber.h"
 
 CAMLexport _Atomic scan_roots_hook caml_scan_roots_hook =

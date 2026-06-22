@@ -25,7 +25,6 @@
 #include "caml/major_gc.h"
 #include "caml/memory.h"
 #include "caml/mlvalues.h"
-#include "caml/shared_heap.h"
 #include "caml/signals.h"
 #include "caml/weak.h"
 #include "caml/platform.h"

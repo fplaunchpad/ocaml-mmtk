@@ -36,7 +36,6 @@
 #include "caml/mlvalues.h"
 #include "caml/misc.h"
 #include "caml/reverse.h"
-#include "caml/shared_heap.h"
 #include "caml/signals.h"
 
 /* Item on the stack with defined operation */

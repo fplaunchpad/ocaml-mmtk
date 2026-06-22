@@ -34,7 +34,6 @@
 #endif
 #include "caml/gc_stats.h"
 #include "caml/osdeps.h"
-#include "caml/shared_heap.h"
 #include "caml/startup_aux.h"
 #include "caml/prims.h"
 #include "caml/signals.h"
@@ -235,7 +234,7 @@ CAMLexport void caml_shutdown(void)
   } else {
     /* These calls are not safe to use if there are domains left running */
     caml_domain_terminate(true);
-    caml_finalise_freelist();
+    /* No stock shared-heap freelist to finalise under always-on MMTk. */
   }
   caml_free_gc_stats();
   caml_free_locale();

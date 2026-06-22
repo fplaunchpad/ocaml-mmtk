@@ -34,7 +34,6 @@
 #include "caml/misc.h"
 #include "caml/mlvalues.h"
 #include "caml/reverse.h"
-#include "caml/shared_heap.h"
 
 /* Flags affecting marshaling */
 

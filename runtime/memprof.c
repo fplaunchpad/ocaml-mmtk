@@ -29,7 +29,7 @@
 #include "caml/mlvalues.h"
 #include "caml/platform.h"
 #include "caml/runtime_events.h"
-#include "caml/shared_heap.h"
+#include "caml/major_gc.h"
 
 /* Design
  *
