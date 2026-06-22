@@ -27,15 +27,22 @@ exactly one past the switch table → the desync. This is the *first* out-of-ran
 SWITCH (ocamlrund aborts on the first), so it is at/near the cascade origin.
 
 **Reverse-trace (debug build uses a C `switch(curr_instr)` at interp.c:393/396, with
-a verbose per-op header 377-396 — trace checks + sp CAMLasserts).** The opcode
-immediately before the SWITCH loaded `accu = 0x20100c9e850` (tag 5) from a prior
-`accu = 0x20100e3f7e8` (a **tag-0 wosize-2** block) — i.e. `GETFIELD(0x20100e3f7e8,
-n)` or an `ACC`. So a tag-0 block's field (or a stack slot) holds the tag-5 block,
-and the SWITCH on it expects tags 0-4. Next: identify that opcode exactly, decide
-whether the tag-0 *parent* is the wrong object or its *field* is the wrong value,
-and reverse to that value's source (the GC event that produced it). Reverse via
-*breakpoints* + reverse-stepi (reverse-continue needs 2× to clear the SIGILL;
-reverse SW-watchpoints run to the trace start — unreliable).
+a verbose per-op header 376-396 — bcodcount, trace checks, sp CAMLasserts).** The
+opcode immediately before the SWITCH is **ACC1** (`interp.c:404 accu = sp[1]`):
+`accu` transitions `0x20100e3f7e8` → `0x20100c9e850` (tag 5) there. So **`sp[1]` =
+the tag-5 block**, and this function's SWITCH on it expects tags 0-4.
+
+`sp[1]` is a *value-stack slot* — and the mis-forward detector (which snapshots
+exactly these roots) was **clean** — so `sp[1]` was forwarded *correctly*; it
+genuinely holds a tag-5 block (not a mis-forward to a wrong object). So the desync
+is upstream of this frame: **either a wrong-typed value was pushed to `sp[1]`
+earlier (a prior wrong call/arg/jump — a non-SWITCH desync ocamlrund didn't assert
+on), or `sp` is drifted so ACC1 reads the wrong slot.** Next: (1) dump the stack at
+the SWITCH and look for the return frame at the expected offset → tells drift vs
+wrong-value; (2) reverse to where `sp[1]` was pushed (the value's entry to the
+stack) and to this function's entry (APPLY/GRAB) to see if it was called correctly.
+Reverse via *breakpoints* + reverse-stepi (reverse-continue needs 2× to clear the
+SIGILL; reverse SW-watchpoints run to the trace start — unreliable).
 
 ## CI bug: ocamlrund aborts AT the desync (SWITCH assert) — clean repro point
 
