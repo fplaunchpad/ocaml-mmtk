@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## perf: the "obvious-overhead" fast-path levers are sub-noise — the MMTk-vs-vanilla gap is structural, not death-by-a-thousand-cuts
+
+*2026-06-24*
+
+The overnight optimization sweep ("use the night to optimise … avoid basic overheads") consolidated the four
+**obvious-removal** levers from the PERFORMANCE Appendix A backlog onto branch `perf-basic-overheads` (off
+`5.5+mmtk` @ `c2560f1596`; pushed, tip `19a07ea8`, **not merged to mainline**):
+
+- **#C2** — read the block header once in `scan_object` (was loaded twice).
+- **#C4** — hoist the per-root `debug_check_enabled()` branch out of the root-scan inner loop.
+- **#B3** — drop the throwaway empty-src slice in the write barriers.
+- **#B2** — `Is_long(new_val)` short-circuit on the **region** (new-value) barrier only; the SATB **deletion**
+  barrier (depends on the OLD slot value) still fires unconditionally, so no ConcurrentImmix interaction.
+
+**Result: correctness-clean but perf-neutral.** Native, Immix, pinned core, hyperfine warmup=3 runs=12, vs
+baseline `c2560f1596`:
+
+| bench | heap | ratio perf/base | GCs |
+|---|---|---|---|
+| fft | 128 MB | 0.992 | 1 |
+| binarytrees N=20 | 256 MB | 0.995 | 23 |
+| nbody 5M | 64 MB | 0.999 | 0 |
+| fannkuchredux 11 | 64 MB | 1.000 | 1 |
+
+Every delta is inside σ. binarytrees (the only GC-heavy bench, ~56% of wall in GC) is the sole discriminator
+for the scan/root levers (#C2/#C4); its first-run −4.5% GC-time blip did not survive a 3× replicate (±200 ms
+run-to-run jitter, no consistent edge) → noise. The mutator-barrier levers (#B2/#B3) barely apply here — fft's
+float-array stores bypass `caml_modify` entirely; only binarytrees mutates pointers. Correctness gate clean:
+sanity (StickyImmix 64 MB, 130 K objects copied, **0 Invalid reference**), CLBG byte-identical across
+Immix/StickyImmix/GenImmix/MarkSweep + native Immix/StickyImmix, Immix testsuite slice 1440 passed / 53 failed
+(all documented MMTk-vs-vanilla categories, none in lever-touched code).
+
+The three remaining candidates that were *tried* did **not** clear the workflow's correctness-plausibility gate
+and were not pushed (diffs salvaged to the session scratchpad): **#C1** per-slot double slot-load, a second #C1
+slot variant, and **#A3** `alloc_default`.
+
+**Research implication (the point).** The "basic overhead" in the alloc/scan/barrier fast path is **not** where
+MMTk's overhead-vs-vanilla lives — these are L1-hit / sub-wall-clock-noise removals. The gap (≈1.5–2× on
+compute/alloc-heavy benches, RSS 1.5–5×) is therefore **structural, not death-by-a-thousand-cuts**: it is
+dominated by the *deeper* levers (not "obvious removals") — **#A1** (bytecode has no TLAB; per-object FFI
+alloc), **#B1**/**#A1** on native — and by the costs MMTk pays *by design*: heap **reservation** (→ RSS), STW
+mark/evacuate vs vanilla's **incremental, mostly-concurrent, non-moving** major, and scan/copy cost at scale.
+M8 effort should go there, not into more micro-tuning. This is the honest answer to "remove basic overhead
+first": we did, and it was sub-noise. `perf-basic-overheads` is kept as a pushed branch (clean cleanups,
+one merge away) but landing perf-neutral diff onto a fork we keep reviewable against the 5.5.0 base is a
+maintainer judgment call, deferred. Fuller log: `~/perf-basic-overheads-findings.md` on turing.
+
+---
+
 ## bug #31 / GH#3 FIXED — `Domain.join` use-after-free on the un-promoted domain result (all moving plans, not "native-generational")
 
 *2026-06-23*

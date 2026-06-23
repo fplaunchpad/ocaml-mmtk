@@ -263,6 +263,18 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 
 *This is the canonical full backlog; ROADMAP open-work #17 carries the summary. Every "impact" tag is a static hypothesis until measured per §2–§9.*
 
+> **Measured — 2026-06-24 (the obvious-removal pass).** The four obvious-removal levers **#C2, #C4, #B3, #B2**
+> were consolidated on branch `perf-basic-overheads` (off `c2560f1596`; correctness-clean — sanity 0
+> invalid-ref, CLBG byte-identical, Immix testsuite slice clean) and benchmarked native/Immix vs baseline on
+> fft + binarytrees + nbody + fannkuchredux: **all ratios 0.99–1.00, every delta inside σ → perf-neutral**
+> (binarytrees, the only GC-heavy bench, showed no replicable GC-time edge). **#C1-double-load**, a second #C1
+> slot variant, and **#A3** `alloc_default` did not clear correctness-plausibility and were not landed.
+> **Takeaway: the fast-path micro-overhead is sub-noise; the gap is the *deeper* levers (#A1 bytecode TLAB,
+> #B1 native barrier) plus structural costs (RSS from heap reservation; STW mark/evacuate vs vanilla's
+> incremental mostly-concurrent non-moving major). Redirect M8 to #A1/#B1 and the structural questions — not
+> more micro-tuning.** Detail: `gc/mmtk/NOTES.md` (2026-06-24); `~/perf-basic-overheads-findings.md` on turing.
+> Branch pushed (tip `19a07ea8`), **not merged** to `5.5+mmtk`.
+
 ## #17 / M8 — ranked optimization backlog (perf work)
 
 Adopt `PERFORMANCE.md` as the method of record FIRST; do obvious removals, then measure each
