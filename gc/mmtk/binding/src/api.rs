@@ -45,9 +45,15 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // the other pass-through knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …).
 
     let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
+    let constraints = mmtk_instance.get_plan().constraints();
     // Whether this plan ever relocates objects. Only moving plans map the
     // forwarding-bits side metadata, so only they may register the spec below.
-    let plan_moves = mmtk_instance.get_plan().constraints().moves_objects;
+    let plan_moves = constraints.moves_objects;
+    // Mark-compact-style plans (MarkCompact, Compressor) forward objects AFTER a
+    // separate liveness/mark pass rather than in-place during the trace, so they do
+    // NOT map LOCAL_FORWARDING_BITS_SPEC (they use their own mark / offset-vector
+    // metadata). Reading our forwarding-bits spec under those plans is a wild access.
+    let forward_after_liveness = constraints.needs_forward_after_liveness;
     SINGLETON
         .set(mmtk_instance)
         .ok()
@@ -59,12 +65,17 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // without this crate needing the VM type. Our object model uses a single fixed
     // layout (forwarding bits on the side), so one spec is all classify needs.
     //
-    // ONLY for moving plans: a non-moving plan (NoGC, MarkSweep, …) never forwards
-    // and never maps this side metadata, so reading it would be a wild access (SEGV
-    // the first time classify sees an Infix_tag header). Leaving the spec unset
-    // makes is_forwarded() return false, which is correct there — nothing is ever
-    // forwarded, so every Infix_tag header is genuine.
-    if plan_moves {
+    // ONLY for in-place moving plans that map this spec. Two cases must NOT register
+    // it, or classify's is_forwarded() read would be a wild access (SEGV the first
+    // time it sees an Infix_tag-looking header):
+    //   - non-moving plans (NoGC, MarkSweep): never forward, never map the spec;
+    //   - mark-compact plans (MarkCompact, Compressor): forward after the liveness
+    //     pass, so during the trace headers are still genuine OCaml headers and the
+    //     spec is unmapped. needs_forward_after_liveness flags exactly these.
+    // Leaving the spec unset makes is_forwarded() return false, which is correct in
+    // both cases: nothing is forwarded in-place during the trace, so every
+    // Infix_tag header the scan sees is genuine.
+    if plan_moves && !forward_after_liveness {
         mmtk_ocaml_common::slot::set_forwarding_bits_spec(
             *<crate::object_model::VMObjectModel as mmtk::vm::ObjectModel<OCamlVM>>::LOCAL_FORWARDING_BITS_SPEC
                 .as_spec()

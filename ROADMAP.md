@@ -1,10 +1,16 @@
 # ocaml-mmtk roadmap
 
-This is the living plan for bringing up an MMTk-backed garbage collector for
-OCaml. It is meant to be picked up cold in a fresh session. Companion docs:
-[`README.md`](README.md) (overview + build/run), [`fork-handoff.md`](fork-handoff.md)
-(original rationale), [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) (dated design notes
-and deferred investigations).
+This is the living plan for `ocaml-mmtk`. It is meant to be picked up cold in a
+fresh session. Companion docs: [`README.md`](README.md) (overview + build/run),
+[`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) (the GC-research agenda — what this
+platform is *for*), [`fork-handoff.md`](fork-handoff.md) (original rationale),
+[`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) (dated design notes and deferred
+investigations).
+
+The engineering bring-up (M0–M7, and the M9 stock-GC excision) is essentially done.
+**M8 (benchmark + optimise) is the open milestone.** The correctness/perf tail below
+is deferrable engineering; the research questions in `RESEARCH_QUESTIONS.md` drive
+priority.
 
 **Project shape.** This repo *is* the OCaml fork (base `5.5.0-rc1`, branch
 `5.5+mmtk`), distributed as `ocaml-mmtk`. The MMTk binding is in-tree at
@@ -40,11 +46,11 @@ own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, e.g.
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix` — the plans with an Immix nursery allocator), **single- and multi-domain** (`Domain.spawn` clean at 16–48 MB); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | Runtime features: weak arrays, ephemerons, finalisers — `process_weak_refs` **on by default** (`MMTK_WEAK_REFS=0` opts out to the memory-safe interim, transitional). Does weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, **and custom-block finalizers** (via MMTk's finalizer queue, incl. unmarshalled blocks) under Immix **and** StickyImmix. `pr3612` + `pr5233` pass; no regressions (the testsuite weak/finaliser "failures" were parallel-harness flakes — pass in isolation); full bootstrap clean with weak-clearing live. pr5233 needed a plan fix: `Gc.full_major` now requests an *exhaustive* MMTk GC (generational user GCs were nursery-only → mature/LOS weak refs never cleared). **Cross-domain finaliser handover fixed**: orphaned finalisers from a terminated domain are now adopted into a live domain (`caml_mmtk_adopt_orphaned_finalisers`) at the start of `process_weak_refs` — the stock `adopt_orphaned_work` was deleted in M9 stage 3. (Orphaned *ephemerons* have the same gap — tracked TODO.) | 🟢 done (default-on) |
 | M7 | Pass the OCaml testsuite — full bytecode suite under StickyImmix: **1476/1524 pass** (`setarch -R`, per-dir 120s cap). 47 non-pass are unsupported features (weak/finaliser → fixed by `MMTK_WEAK_REFS`; `Gc.stat`/memprof/runtime-events) — none crash; 1 multidomain regression (`parallel/domain_parallel_spawn_burn_gc_set`, bug #3) — **FIXED 2026-06-22** (the MMTk stop-the-world barrier counter underflowed; see Phase 3 #10). **Moving-GC bug (#2) — the linux-arm64/CI `ocamldoc` crash — ROOT-CAUSED + FIXED (2026-06-22).** Native unmarshalling allocated unmarshalled objects **outside MMTk spaces**: in `intern.c` the MMTk allocation path (per-object `caml_mmtk_try_alloc_shr` + the bulk `Alloc_small` skip) was wrapped in `#ifndef NATIVE_CODE` (bytecode-only), so native `intern_alloc_obj` fell through to the stock `caml_shared_try_alloc(d->shared_heap, …)`, which under M9 allocates in a non-MMTk `caml_stat`/malloc region. MMTk's root-scan/`scan_object` pointer filter drops those objects, so their fields are never traced and anything reachable only through the unmarshalled graph (the loaded ocamldoc module/info records) is collected → dangling pointer → SIGSEGV in `odoc_man.ml` walking the doc tree. **Fix:** remove the `#ifndef NATIVE_CODE` guards so native intern allocates via MMTk too (+ `CAMLassert(!caml_mmtk_enabled)` on the now-dead stock branch). **Verified:** from-scratch `make clean && make -j world.opt` (incl. the `ocamldoc Stdlib.3o` manpage step) succeeds; manpage repro **0/12** (was 12/12) under default Immix. The earlier bytecode-only fixes — GC-mid-`intern_rec` suppression (`is_collection_enabled`, fixed the `parser.ml` repro) and the `array.c` barrier — stand but were different/`#ifndef NATIVE_CODE` bugs. Full details: `gc/mmtk/NOTES.md`. | 🟢 |
-| M8 | **Benchmark + optimise** vs. the stock GC — first baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count) | 🟡 started |
+| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces live set). Optimisation levers identified (dynamic heap, generational default, bytecode fast-path inline, GC-thread count); native bump-pointer plans (#16). | 🟡 in progress (open milestone) |
 | **M9** | **MMTk-only: excise the stock GC** — always-on (st.1) ✅, stock **minor** GC deleted (st.2) ✅, stock **major** GC made inert then bodies deleted (st.3) ✅, **`shared_heap.c` + `caml/shared_heap.h` deleted entirely** (st.5, −1665 lines; live colour-machinery/`caml_atom`/`caml_compactions_count` relocated to `major_gc.{c,h}`; heap-size/stats consumers rewired to MMTk; a link anchor in mmtk.c keeps `roots.o` linking) ✅, `Gc.stat` heap fields reimplemented on MMTk stats ✅ (collection-count semantics for `Gc.counters` + the custom-block-pacing-driven tests still partial) 🟡, **per-domain minor-heap arena removed** (domain create/terminate bootstrap `young_*` from MMTk via `caml_mmtk_refill_tlab`; `allocate/free/reallocate_minor_heap_arena` deleted; the address-space reservation was KEPT only because it still bounded `Is_young`) ✅, **header/metadata reconciliation + `Is_young` reservation retired (#8, 2026-06-23)** ✅. `ocaml-mmtk` is a single-GC runtime; M9 stock-GC excision is **complete** bar #11 (weak-clear semantics) and the flagged `memprof.c` colour read. | 🟢 done |
 | — | Parallel collection: ✅ verified (correct; marking ~8.4x on 16 threads) | ✅ |
-| — | **GC plans:** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`. All five validated on **bytecode**; **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (5 wired + 6 unwired) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical correctness gate on the known-good set. | 🟢 |
-| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts + a domain-terminate lock-drop race — **fixed** (see Phase 1 item 1); the bug #3 STW-barrier crash behind the residual `tests/parallel` reds is now **fixed** too (Phase 3 #10), leaving the pre-existing spawn-burn hang/harness-contention timeouts (bug #3b). (c) **opam installation**: `test-in-prefix` (relocatability) — **fixed 2026-06-22**: `configure.ac` baked the absolute build-dir path to `libmmtk_ocaml.a` into config (+ a second leak — Cargo `debug=true` embedded the build root in the archive's DWARF, propagated into every binary). Now referenced relocatably as `-lmmtk_ocaml` (symlinked into `stdlib/` during build, installed into `$(LIBDIR)`, like `libasmrun.a`), and `--remap-path-prefix` strips the DWARF build root. Verified: fresh build + install + `test-in-prefix` exit 0 + post-install compile with the build tree moved away. The x86-64 `build` job (the bug-#2 site) is **green**. Only `i386` (deliberately skipped — 32-bit MMTk unvalidated) remains. | 🟢 |
+| — | **GC plans (9 wired, bytecode):** `Immix` (default), `StickyImmix`, `GenImmix`, `MarkSweep`, `NoGC`, `SemiSpace`, `GenCopy`, `MarkCompact`, `PageProtect`. All validated on **bytecode** (CLBG byte-identical); **native** runs `Immix` + `StickyImmix` only (TLAB needs an Immix nursery allocator — `GenImmix`/`MarkSweep`/`NoGC` abort at startup on native). Collecting plans collect single- and multi-domain; moving plans relocate. The binding is generic over the plan, so the spec is the same for all; the per-plan difference is whether the forwarding-bits side-metadata spec is registered (only for plans whose `constraints().moves_objects`). (Bug #1: non-moving `MarkSweep`/`NoGC` had regressed — `is_forwarded` read forwarding-bits metadata they don't map; fixed by registering that spec only for moving plans.) The four bump-pointer/debug plans (`SemiSpace`/`GenCopy`/`MarkCompact`/`PageProtect`) were wired in bytecode by #15 (MarkCompact needed the forwarding-bits spec gated off `needs_forward_after_liveness`). The **two remaining are deferred**: `Compressor` (needs a unified object-reference model — incompatible with OCaml's value/header layout) and `ConcurrentImmix` (needs an SATB write barrier). CI: the `Testsuite (all GC plans)` workflow (`.github/workflows/testsuite-plans.yml`) runs the full testsuite under all 11 mmtk plans on x86-64 (9 wired + 2 deferred) to surface per-plan breakage (deliberately red — shows what still needs to work); CLBG `run.sh validate` is the byte-identical cross-plan correctness gate on the known-good set. | 🟢 |
+| — | **CI `Build` workflow — remaining red after bug #2 fix** (separate, pre-existing; surfaced once the x86-64 `build` job stopped crashing and the matrix stopped fast-failing). (a) **i386**: MMTk staticlib won't build — `Makefile.mmtk:36 mmtk-lib` Error 127 (32-bit cargo/target unsupported). (b) **linux-O0** (debug runtime): stock-GC debug asserts + a domain-terminate lock-drop race — **fixed** (see Phase 1 item 1); the bug #3 STW-barrier crash behind the residual `tests/parallel` reds is now **fixed** too (Phase 3 #10), leaving the pre-existing spawn-burn hang/harness-contention timeouts (bug #3b — root-caused; the MMTk-native STW rearchitecture that fixes it is in progress, Phase 3 #10). (c) **opam installation**: `test-in-prefix` (relocatability) — **fixed 2026-06-22**: `configure.ac` baked the absolute build-dir path to `libmmtk_ocaml.a` into config (+ a second leak — Cargo `debug=true` embedded the build root in the archive's DWARF, propagated into every binary). Now referenced relocatably as `-lmmtk_ocaml` (symlinked into `stdlib/` during build, installed into `$(LIBDIR)`, like `libasmrun.a`), and `--remap-path-prefix` strips the DWARF build root. Verified: fresh build + install + `test-in-prefix` exit 0 + post-install compile with the build tree moved away. The x86-64 `build` job (the bug-#2 site) is **green**. Only `i386` (deliberately skipped — 32-bit MMTk unvalidated) remains. | 🟢 |
 
 ## Next steps (prioritised)
 
@@ -151,9 +157,20 @@ item is in the workstreams / M9 stages below.
     turing: 0 immediate crashes / 20 runs (pristine 100%), bytecode + native regress clean.
     **bug #3b (residuals — separate, pre-existing, NOT this bug):** a rare (~1/30) `cannot
     trace` with a *wild* (non-immediate) value = a stale-root-slot race (freed fiber stack /
-    reused `gc_regs` / terminating-domain teardown); and a ~30% spawn-burn **hang** in OCaml's
-    own domain-spawn/STW machinery (not MMTk's path). The native-`ocamlopt` SIGSEGV was split
-    out as **bug #4** (item 12b) and is now **fixed**. See `gc/mmtk/NOTES.md`.
+    reused `gc_regs` / terminating-domain teardown); and a ~30% spawn-burn **hang**.
+    **Root-caused 2026-06-23**: a deadlock between OCaml's own domain-spawn/STW handshake and
+    MMTk's `stop_all_mutators` — the binding's hand-rolled **global stop-counter** STW (the
+    `stopped` count that bug #3 fixed the *balance* of) is still the wrong shape. A parent
+    domain wedged in `caml_domain_spawn`'s handshake wait is a registered mutator that is
+    neither at a safepoint nor safe-stopped, so MMTk's stop barrier never completes.
+    **In progress — a first-principles, MMTk-native STW rearchitecture:** replace the global
+    counter with **per-mutator stop state tied to the mutator lifecycle** (each registered
+    mutator carries its own stopped/running flag; the barrier reasons over the mutator set, not
+    a single shared counter), so blocking-section / spawn-handshake / terminate windows can't
+    desynchronise it. (An interim point-fix — bracketing the spawn-handshake wait in
+    `caml_enter/leave_blocking_section` — is the cheap stopgap; the rearchitecture is the real
+    fix.) The native-`ocamlopt` SIGSEGV was split out as **bug #4** (item 12b) and is **fixed**.
+    See `gc/mmtk/NOTES.md`.
 11. Weak refs — fix `process_weak_refs` resurrection ordering (`pr5233`) + the orphaned-ephemeron
     gap; **then retire the transitional `MMTK_WEAK_REFS` flag** (make `process_weak_refs`
     unconditional, like `caml_mmtk_enabled`). Until that fix, `MMTK_WEAK_REFS=0` is the safety
@@ -194,10 +211,11 @@ item is in the workstreams / M9 stages below.
       (asserted a running domain has `young_start/end == NULL` — a stock-arena invariant invalid
       under MMTk TLAB) — **fixed by #8** (the whole reservation machinery, that function included,
       is gone). (b) the **bug #3b spawn/STW hangs** (exit -9) — the real remaining blocker;
-      **root-caused 2026-06-23** (a 4-way deadlock: the parent domain wedged in
-      `caml_domain_spawn`'s handshake wait is a registered mutator that is neither at a safepoint
-      nor safe-stopped, so MMTk's `stop_all_mutators` never completes). Fix: bracket that wait in
-      `caml_enter/leave_blocking_section` (see `gc/mmtk/NOTES.md`).
+      **root-caused 2026-06-23** (a deadlock: the parent domain wedged in `caml_domain_spawn`'s
+      handshake wait is a registered mutator that is neither at a safepoint nor safe-stopped, so
+      MMTk's `stop_all_mutators` never completes). **Fix in progress:** a first-principles,
+      MMTk-native STW rearchitecture — retire the binding's global stop-counter for per-mutator
+      stop state tied to the mutator lifecycle (item 10; see `gc/mmtk/NOTES.md`).
       The release/`normal` + macOS/arm64 jobs were **cancelled by fail-fast**, not failed —
       set `fail-fast: false` for real visibility.
     - **Hygiene** (`check-typo` on whole tree) — **red**: flags pre-existing upstream non-ASCII
@@ -207,9 +225,30 @@ item is in the workstreams / M9 stages below.
       exemptions), and keep new C/build comments ASCII + ≤80 col.
     - `i386` Build job — deliberately skipped (32-bit MMTk staticlib won't build).
 14. macOS native linking (always-on native is Linux-only today).
-15. Unwired plans (bytecode-only — none has a native Immix nursery), per CI triage:
-    `PageProtect`/`SemiSpace` likely cheap; `MarkCompact`/`Compressor` medium; `GenCopy` ≈
-    GenImmix; `ConcurrentImmix` = a SATB write barrier (high-effort, the only high-value one).
+15. Wire the remaining mmtk-core plans (bytecode first — none has a native Immix nursery).
+    The binding is **generic over the plan**: `mmtk_ocaml_init` passes `MMTK_PLAN` straight to
+    mmtk-core, and the forwarding-bits side-metadata spec is registered only for moving plans
+    that do *not* forward-after-liveness (`moves_objects && !needs_forward_after_liveness`).
+    Status:
+    - **Wired + validated on bytecode (#15, done):** `SemiSpace` (two-space copying), `GenCopy`
+      (≈ GenImmix, copying nursery + SemiSpace mature), `MarkCompact` (Lisp-2 sliding compaction),
+      `PageProtect` (debug). CLBG byte-identical. `MarkCompact` needed the forwarding-spec gate
+      above (else it SEGV'd reading an unmapped fwd-bits page — same class as bug #1); `PageProtect`
+      is correct but exceeds the CI time cap, so it is manual-run, not in the CLBG CI set.
+    - **`Compressor` — deferred (needs a unified object-reference model).** mmtk-core's
+      Compressor assumes a single object reference == object start; OCaml's value layout puts
+      the reference at field 0 with the header one word *before* it, so Compressor's bitmap
+      mark-compact addressing is incompatible without a unified-reference redesign of the
+      object model. (The all-plans CI gate even greps for its `requires a unified object
+      reference` abort.)
+    - **`ConcurrentImmix` — deferred (needs an SATB write barrier).** The only high-value
+      unwired plan (the low-latency line — see `RESEARCH_QUESTIONS.md`). It requires a
+      snapshot-at-the-beginning write barrier we don't yet implement (our generational barrier
+      is a slot-remembering region barrier, not SATB). High effort, high payoff.
+16. **Native** support for the bump-pointer plans (`SemiSpace`/`GenCopy`/`MarkCompact`). Today
+    native runs only `Immix`/`StickyImmix` because TLAB nursery-aliasing needs an Immix Default
+    allocator; extending native to a copying nursery is M8 work (overlaps #16 in Phase 5 —
+    native GenImmix copy-nursery TLAB aliasing).
 
 **Phase 5 — performance (M8)**
 16. **Native GenImmix — copy-nursery TLAB aliasing**: the stock-faithful native generational
@@ -296,12 +335,26 @@ runs the testsuite under all 11 to surface exactly that.
 | `Immix` | mark-region w/ opportunistic defrag | yes | ✅ (default) |
 | `StickyImmix` | Immix + sticky mark-bit (generational, no copying nursery) | yes | ✅ |
 | `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ |
-| `SemiSpace` | classic copying (two spaces) | yes | ❌ |
-| `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ❌ |
-| `MarkCompact` | Lisp-2 mark-compact | yes | ❌ |
-| `Compressor` | Compressor-style bitmap mark-compact | yes | ❌ |
-| `PageProtect` | debug — page-granularity alloc, protects dead pages | no | ❌ |
-| `ConcurrentImmix` | concurrent non-moving Immix using SATB | no | ❌ |
+| `SemiSpace` | classic copying (two spaces) | yes | ✅ (bytecode) |
+| `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ✅ (bytecode) |
+| `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode) |
+| `PageProtect` | debug — page-granularity alloc, protects dead pages | no | ✅ (bytecode) |
+| `Compressor` | Compressor-style bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
+| `ConcurrentImmix` | concurrent non-moving Immix using SATB | no | ❌ **deferred** (SATB write barrier) |
+
+The binding is **generic over the plan** (`mmtk_ocaml_init` passes `MMTK_PLAN` straight to
+mmtk-core; the forwarding-bits spec is registered for moving plans that don't forward-after-liveness
+— `moves_objects && !needs_forward_after_liveness`), so wiring a new bump-pointer plan is mostly
+validation, not code. The four above are bytecode-wired (#15). The two deferrals are deeper:
+
+- **`Compressor` — needs a unified object-reference model.** Its bitmap mark-compact addressing
+  assumes the object reference *is* the object start. OCaml puts the value reference at field 0 with
+  the header one word before it, so Compressor can't address our objects without redesigning the
+  object model around a single unified reference. (The all-plans CI gate greps for its `requires a
+  unified object reference` abort.)
+- **`ConcurrentImmix` — needs an SATB write barrier.** The only high-value unwired plan (the
+  low-latency line — see `RESEARCH_QUESTIONS.md`). Our generational barrier is a slot-remembering
+  region barrier, not snapshot-at-the-beginning; ConcurrentImmix needs SATB. High effort, high payoff.
 
 The five wired-up plans, all implemented and validated:
 

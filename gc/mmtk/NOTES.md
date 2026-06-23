@@ -5,6 +5,98 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #3b: multidomain spawn/STW deadlock — root cause + an MMTk-native STW rearchitecture (in progress)
+
+*2026-06-23*
+
+**Status: root-caused; the fix is in progress (a rearchitecture, not a point patch).** bug #3b is
+the residual after bug #3 (the blocking-section counter underflow — fixed): a rare wild-pointer
+`cannot trace` and, more importantly, a ~20–35% **hang** in the `parallel/domain_*_spawn_burn*`
+tests (and the CI debug-matrix `tests/parallel` exit -9 timeouts).
+
+**Root cause — the binding's hand-rolled global stop-counter STW is the wrong shape.**
+`stop_all_mutators` (binding `collection.rs`) waits on a single global `stopped` counter to reach
+`number_of_mutators()`. bug #3 fixed the *balance* of the `+1`/`-1` on that counter across
+blocking sections, but the counter design itself can't represent all the states a mutator passes
+through. The deadlock: a parent domain wedged in `caml_domain_spawn`'s handshake wait is a
+**registered mutator that is neither at a safepoint nor safe-stopped** — it is busy in OCaml's own
+domain-spawn/STW handshake, not polling MMTk's stop flag and not counted as stopped — so MMTk's
+stop barrier never reaches `number_of_mutators()` and never completes. OCaml's STW and MMTk's STW
+deadlock against each other (OCaml waits for the spawning domain to finish the handshake; MMTk
+waits for it to stop). Confirmed by rr on a captured hang: wedged in the OCaml spawn handshake,
+no `caml_mmtk_*` frame on the GC path.
+
+**Direction (in progress): make the STW MMTk-native — per-mutator stop state tied to the mutator
+lifecycle.** Replace the single global counter with per-mutator stop/run state carried by each
+registered mutator, so the barrier reasons over the *set* of mutators and their individual states
+rather than a shared scalar. Every window that today desynchronises the counter — blocking
+sections, the spawn handshake, domain terminate/teardown — becomes an explicit per-mutator state
+transition that the barrier observes directly, so none of them can leave the global count wrong or
+strand a domain that is "registered but not stoppable." This dissolves the OCaml-STW-vs-MMTk-STW
+deadlock by construction instead of patching each window.
+
+**Cheap interim stopgap (not the real fix):** bracket the `caml_domain_spawn` handshake wait in
+`caml_enter/leave_blocking_section` so the spawning domain counts as safe-stopped for the duration
+— makes that one window safe under the current counter, but leaves the counter design (and its
+fragility across the other windows) in place. Prefer the rearchitecture.
+
+The wild-pointer `cannot trace` residual (~1/30, a stale-root-slot race in freed fiber stack /
+reused `gc_regs` / terminating-domain teardown) is expected to be largely subsumed by the same
+rework (a mutator mid-teardown becomes an explicit state the barrier won't scan); confirm with a
+fresh rr capture targeting a wild-pointer (not immediate) crash once the rework lands.
+
+---
+
+## #15: GC-plan wiring status — generic plan dispatch, and why Compressor / ConcurrentImmix are deferred
+
+*2026-06-23*
+
+Status of wiring mmtk-core 0.32's 11 plans. **Nine are wired and validated** (Immix, StickyImmix,
+GenImmix on bytecode + Immix/StickyImmix native; MarkSweep, NoGC, SemiSpace, GenCopy, MarkCompact,
+PageProtect on bytecode). The remaining **two are deferred** (Compressor, ConcurrentImmix); this note
+records the generic plan dispatch, the one per-plan subtlety, and why those two are genuinely deferred.
+
+**The binding is generic over the plan — wiring a bump-pointer plan was mostly validation.**
+`mmtk_ocaml_init` (binding `api.rs`) passes `MMTK_PLAN` straight to mmtk-core
+(`memory_manager::process(&mut builder, "plan", plan_str)`); there is no hardcoded plan allowlist.
+Moving-vs-non-moving is handled generically: the forwarding-bits side-metadata spec is registered
+**iff** the plan `moves_objects` **and not** `needs_forward_after_liveness`. This is the **bug #1
+fix** generalised twice: (a) a non-moving plan (NoGC, MarkSweep) never maps the forwarding-bits
+metadata, so registering the spec for it made `is_forwarded()` read unmapped side metadata and SEGV
+on the first `Infix_tag` header; (b) the **forward-after-liveness movers** (`MarkCompact`,
+`Compressor`) also don't map that spec — they forward via their own offset-vector metadata after a
+liveness pass — so they need the same exclusion (MarkCompact SEGV'd in `slot::is_forwarded` until
+gated). `moves_objects && !needs_forward_after_liveness` is the precise discriminator. Because the
+spec, object model, and scanning are otherwise plan-independent, `SemiSpace`, `GenCopy`, `MarkCompact`,
+and `PageProtect` came up bytecode-wired behind that one-line gate — CLBG byte-identical; the work was
+bring-up + cross-plan validation, not trait code. (`GenCopy` also needs `caml_mmtk_generational` set — the C glue already includes it in
+the generational set.) These are the next plans to validate, **bytecode-first** (none has a native
+Immix nursery allocator; native bump-pointer support is M8, ROADMAP #16).
+
+**Two deferrals, with reasons:**
+
+1. **`Compressor` — deferred: needs a unified object-reference model.** mmtk-core's Compressor is a
+   bitmap mark-compact that assumes a single object reference equal to the object start. OCaml's
+   value layout is incompatible: the value reference points at field 0 with the header one word
+   *before* it (`OBJECT_REF_OFFSET = WORD_SIZE`), so there is no single "object reference ==
+   object start" identity for Compressor's bitmap addressing to use. Supporting it means redesigning
+   the object model around a unified reference, not just flipping a plan flag. (The all-plans CI
+   gate even greps for Compressor's `requires a unified object reference` abort so the deliberately-
+   red matrix classifies it correctly.)
+
+2. **`ConcurrentImmix` — deferred: needs an SATB write barrier.** This is the only high-value
+   unwired plan (the low-latency / concurrent line; see `RESEARCH_QUESTIONS.md`). Our generational
+   write barrier is a **slot-remembering region barrier** (`memory_region_copy_post`, matching
+   OCaml's slot-based remembered set) — it is *not* snapshot-at-the-beginning. ConcurrentImmix's
+   concurrent marking needs an SATB barrier (grey the old referent on overwrite, à la Yuasa) so the
+   mutator can't hide a live object from the concurrent marker. Implementing SATB is real work
+   (high effort), but it is the highest-payoff unwired plan — interesting precisely because OCaml's
+   own collector is SATB and the language is immutable-by-default (most writes are barrier-free
+   initialising writes), so the cost model may differ sharply from the imperative-language
+   measurements in the literature.
+
+---
+
 ## M9 #8: Is_young address-space reservation retired + header-colour audit — M9 cleanup complete
 
 *2026-06-23*

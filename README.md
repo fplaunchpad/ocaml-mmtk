@@ -1,31 +1,43 @@
 # OCaml + MMTk (`ocaml-mmtk`)
 
-A fork of [OCaml](https://github.com/ocaml/ocaml) whose garbage collector is
-[MMTk](https://www.mmtk.io), the Memory Management Toolkit. A normally-built
-compiler runs ordinary OCaml programs on an MMTk-managed heap. The eventual goal
-is to ship this as an `ocaml-variants.5.x+mmtk` opam switch.
+A fork of [OCaml](https://github.com/ocaml/ocaml) 5.5 whose garbage collector is
+[MMTk](https://www.mmtk.io), the Memory Management Toolkit. MMTk is the **only**
+collector and is **always on** — there is no opt-out and no stock OCaml GC left in
+the tree. A normal `./configure && make` builds the full compiler, both **bytecode**
+and **native**, on an MMTk-managed heap; it self-hosts (the compiler bootstraps and
+its documentation builds).
 
-- **Base:** OCaml `5.5.0-rc1`.
-- **Garbage collector:** MMTk is the **only** collector, on by default — there is
-  no opt-out. The default plan is **Immix**.
+This is also a **GC-research platform**: one functional, immutable-by-default,
+multicore, effect-handler language on which MMTk's many collectors can be compared
+on a common substrate. The research agenda lives in
+[`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md).
+
+- **Base:** OCaml `5.5.0-rc1`. **Collector:** MMTk, always on, default plan **Immix**.
 - **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
   [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
-
-A normal `./configure && make` builds the full compiler — both **bytecode** and
-**native** — on MMTk, and it self-hosts: the compiler bootstraps and its
-documentation builds. Native code allocates through a TLAB aliased to MMTk's
-nursery, so it needs no special code generation. Collection is parallel and
-stop-the-world; moving plans relocate objects, generational plans use a write
-barrier, and both single- and multi-domain (`Domain.spawn`) programs run.
+- Collection is multi-domain, parallel, and stop-the-world; moving plans relocate
+  objects and generational plans use a write barrier. Native code allocates from a
+  TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
+  single- and multi-domain (`Domain.spawn`) programs run.
 
 > Supported on **x86-64 Linux**; native code on macOS is untested. On GC-heavy
-> workloads MMTk runs at ~1.4–1.8× the stock GC, with tuning ongoing — benchmark
-> against a vanilla OCaml 5.5 opam switch.
+> workloads MMTk currently runs at ~1.4–1.8× the stock GC and uses more memory —
+> performance tuning is the open milestone (M8). Benchmark against a vanilla OCaml
+> 5.5 opam switch.
 
-**Learn more:** the plan and current status live in [`ROADMAP.md`](ROADMAP.md);
-design notes and investigations in [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md); project
-background in [`fork-handoff.md`](fork-handoff.md). The upstream OCaml README is
-preserved at [`README.upstream.adoc`](README.upstream.adoc).
+## Status at a glance
+
+- **Done:** the full bring-up (build, NoGC → MarkSweep → Immix, generational plans,
+  multi-domain, native code, weak/ephemeron/finaliser support, the testsuite) and
+  **excising the stock GC** — no stock minor/major collector, shared heap, or
+  per-domain minor-heap arena remains. (Two tails remain: weak-clear semantics under
+  generational plans, and a flagged memprof colour read.)
+- **In progress:** performance (benchmark + optimise), and a from-first-principles,
+  MMTk-native rework of the multi-domain stop-the-world handshake (see bug #3b in
+  [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md)).
+
+The milestone-by-milestone plan and current status are in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Building
 
@@ -35,14 +47,11 @@ linked in automatically:
 ```sh
 ./configure
 make            # builds the world; gc/mmtk is built and linked for you
+make world.opt  # also build the native compiler
 ```
 
 Beyond the usual OCaml build prerequisites (see [`INSTALL.adoc`](INSTALL.adoc)) you
-need:
-
-- **Rust + Cargo** (stable) — the build runs `cargo` to produce the binding.
-- On macOS the binding links `-lobjc -framework IOKit -framework CoreFoundation
-  -liconv` (wired up for you in [`Makefile.mmtk`](Makefile.mmtk)).
+need **Rust + Cargo** (stable) — the build runs `cargo` to produce the binding.
 
 ## Running
 
@@ -68,19 +77,27 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 
 ### GC plans
 
-`MMTK_PLAN` selects the collector:
+`MMTK_PLAN` selects the collector at startup. Nine of mmtk-core 0.32's eleven plans are
+wired and validated in **bytecode**; **native** runs the Immix family only (the TLAB
+aliases an MMTk Immix block, so native needs an Immix nursery allocator):
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
 | `Immix` *(default)* | mark-region, moving (defragments) | bytecode + native |
 | `StickyImmix` | generational, in-place nursery | bytecode + native |
 | `GenImmix` | generational, copying nursery | bytecode |
-| `MarkSweep` | non-moving | bytecode |
-| `NoGC` | bump-only; never reclaims memory (short programs only) | bytecode |
+| `MarkSweep` | non-moving free-list | bytecode |
+| `NoGC` | bump-only; never reclaims (short programs only) | bytecode |
+| `SemiSpace` | classic two-space copying | bytecode |
+| `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode |
+| `MarkCompact` | sliding compaction (Lisp-2) | bytecode |
+| `PageProtect` | one page per object (debugging) | bytecode |
 
-**Native** code allocates from a TLAB aliased to an MMTk Immix block, so it needs a
-plan with an Immix nursery — `Immix` or `StickyImmix`. Bytecode runs under any of the
-five.
+Two plans remain unwired: **`Compressor`** needs a unified object-reference model
+(incompatible with OCaml's value/header layout) and **`ConcurrentImmix`** needs an SATB
+write barrier — both need deeper changes (see [`ROADMAP.md`](ROADMAP.md)). Extending native
+beyond the Immix family to the other bump-pointer plans (`SemiSpace`/`GenCopy`/`MarkCompact`)
+is performance-milestone (M8) work.
 
 ## Repository layout
 
@@ -94,7 +111,15 @@ Makefile.mmtk       build glue (cargo invocation + link flags)
 ```
 
 In `runtime/`, allocation, the write barrier, root scanning, and domain
-initialization go through MMTk; the C glue lives in `runtime/mmtk.c`.
+initialization all go through MMTk; the C glue lives in `runtime/mmtk.c`.
+
+## Learn more
+
+- [`ROADMAP.md`](ROADMAP.md) — the live plan and milestone status.
+- [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) — dated design notes and investigations.
+- [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) — the GC-research agenda.
+- [`fork-handoff.md`](fork-handoff.md) — original cold-start brief.
+- [`README.upstream.adoc`](README.upstream.adoc) — the upstream OCaml README.
 
 ## License
 
