@@ -187,6 +187,29 @@ the residual throughput gap against measured mutation rate and lifetime dispersi
 benchmarks that span the mutability spectrum (pure-functional ↔ `ref`/`Bytes`/mutable-array heavy). The
 immutability claim lives or dies on that regression slope.
 
+**The `lazy` corner — an open sub-question, and a deliberate break-it test.** RQ1's correctness rests on
+the SATB deletion barrier covering *every* edge-deleting in-place mutation. OCaml is immutable-by-default,
+but `lazy` is the sharp exception, and it is exactly where the SATB obligation concentrates: **forcing a
+lazy mutates the suspension in place** — it overwrites the thunk + its captured environment with the result
+(or installs a `Forward_tag`). Under concurrent marking that exposes two distinct failure modes. (i)
+*Missed deletion barrier* — the thunk's captured environment may be reachable *only* through the
+suspension; if forcing doesn't grey the old suspension, the concurrent marker loses it → collected-while-
+referenced → dangling. (ii) *Force-vs-mark race* — the tag transitions `Lazy`/`Forcing` → `Forward`/result
+while the marker scans the block, and multi-domain forcing layers OCaml's `Forcing`/`Undefined` protocol on
+top; the binding's `scan_object` can mis-scan a half-updated lazy. Stock OCaml's mostly-concurrent major is
+*itself* an SATB marker that already solved this — but bug-#3's work rewired `caml_modify` to MMTk's
+*generational* barrier and M9 deleted the stock concurrent major, so **no SATB path is wired today**;
+ConcurrentImmix must re-introduce it *and* prove the lazy-forcing path is covered. The research move is to
+**implement it and then deliberately try to break it**: heavy multi-domain lazy forcing under concurrent
+marking, at a small heap (frequent cycles) with MMTk `sanity` on, characterising each break (missed-barrier
+dangling vs force-vs-mark race vs a genuine protocol gap) as fixable-or-open. The currently-disabled
+`lazy/…force` testsuite test is the natural gate. This is a falsifiable probe of the thesis itself: if
+OCaml's immutability is what makes concurrent GC cheap, lazy is the one place that bet is stressed — and
+whether OCaml's *own* lazy/SATB protocol composes cleanly with a *third-party* concurrent marker (rather
+than OCaml's bespoke one) is genuinely open. A clean composition strengthens RQ1; a fundamental conflict is
+itself a publishable finding about language-runtime/GC-framework impedance, extending the RQ4 contrast story
+into the *concurrent* regime.
+
 **Related work / what's genuinely new.** LXR established the read-barrier-free low-latency design *on
 Java*; the concurrent compactors established the latency line *with* read barriers. **No one has tested
 the language-property prediction** — that a low-mutation, immutable-by-default language makes this design

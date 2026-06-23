@@ -5,6 +5,49 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## ConcurrentImmix / SATB — the `lazy` hazard (open research question; implement-and-test-breakage)
+
+*2026-06-23*
+
+Recording the design hazard before the work starts (RQ1 flagship; ROADMAP open work #8). Two parallel
+agents are live: a **native-batch** agent (MarkCompact native + bless SemiSpace/NoGC native + fix the
+`mmtk.c` native-abort message) and a **ConcurrentImmix** agent (diagnose availability in mmtk-core 0.32,
+then wire the SATB barrier + the lazy coverage + *characterise the breakage*). This note is the analysis;
+the agents' findings land in `~/native_batch_findings.md` / `~/cimmix_findings.md` on turing.
+
+**The SATB-is-OCaml-native point (de-risks the barrier).** OCaml's *stock* mostly-concurrent major GC is
+*itself* an SATB marker: `caml_modify` greys the **old** referent on overwrite (Yuasa 1990 deletion
+barrier). bug-#3's work rewired `caml_modify` → `caml_mmtk_modify` to MMTk's **generational**
+(slot-remembering) region barrier, gated on `caml_mmtk_generational`; M9 deleted the stock concurrent
+major. So **no SATB path is wired today**, but the *shape* is native to the runtime/codegen —
+ConcurrentImmix re-introduces a known mechanism (gate SATB greying on the concurrent plan; feed
+mmtk-core's marker), it does not invent one. Reference for the binding-side barrier surface:
+`_references/mmtk-openjdk` (the JIT emits the inline fast-path; the Rust binding exposes the
+`object_reference_write_pre/post` slow-paths; mmtk-core's plan constraints pick SATB vs object-remembering).
+
+**The `lazy` corner (the sharp open question).** OCaml is immutable-by-default, but **forcing a `lazy`
+mutates the suspension in place** — it overwrites the thunk + its captured environment with the result, or
+installs a `Forward_tag`. Under concurrent marking that is the canonical hazard, two distinct failure modes:
+1. **Missed deletion barrier.** The thunk's captured env may be reachable *only* through the suspension;
+   if forcing doesn't grey the old suspension, the concurrent marker loses it → collected-while-referenced
+   → dangling. So the **lazy-forcing path itself** must route through the SATB barrier — verify whether it
+   goes through `caml_modify`/the lazy update primitives or a raw store (if raw, add the barrier there).
+2. **Force-vs-mark race.** The tag transitions `Lazy`/`Forcing` → `Forward`/result *while the marker scans
+   the block*; multi-domain forcing adds OCaml's `Forcing`/`Undefined` protocol. The binding's
+   `scan_object` must not mis-scan a half-updated lazy.
+
+**Why it's research, not just engineering.** It's a falsifiable probe of RQ1's thesis: if OCaml's
+immutability is what makes concurrent GC cheap, `lazy` is the one place the SATB obligation concentrates.
+Whether OCaml's *own* lazy/SATB protocol composes cleanly with a *third-party* concurrent marker (vs
+OCaml's bespoke one) is genuinely open — a clean compose strengthens RQ1; a fundamental conflict is itself
+a publishable language-runtime/GC-framework impedance finding (extends RQ4 into the concurrent regime).
+**Method:** implement, then deliberately break it — heavy multi-domain forcing under concurrent marking at
+a small heap with `sanity` on; classify each break fixable (missing barrier) vs open (protocol gap).
+**Gate:** re-enable the disabled `lazy/…force` testsuite test. **Coverage must also include** `Obj.set_field`/
+`set_tag`/`Obj.truncate` (the other edge-deleting in-place mutations).
+
+---
+
 ## Native GenImmix + GenCopy (copy-nursery TLAB aliasing) — the stock-faithful native default
 
 *2026-06-23*

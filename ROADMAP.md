@@ -95,9 +95,15 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    materialise because the moving-root fixup is already general (no minor-vs-major root path —
    reused from the major/defrag path), so it was a 2-file change. **GenImmix is the
    stock-faithful generational native default.** → Shipped / NOTES (2026-06-23).
-   **Remaining (deferred, low-priority):** native `SemiSpace`/`MarkCompact` (each space differs —
-   payoff doesn't justify it; GenImmix is the one that matters); `MarkSweep` (free-list) and
-   `PageProtect` have no bump allocator → native would need a codegen change, else bytecode-only.
+   **In progress (native-batch agent, 2026-06-23):** `SemiSpace` + `NoGC` native were found to
+   *already* work via the `BumpPointer` generalization (their Default allocator is a bump pointer) —
+   `SemiSpace` old→young A/B passes; being blessed with `sanity`. **`MarkCompact` native — wanted
+   (compaction is useful: a sliding full-heap defragmenter without a copy-space's 2× footprint, and it
+   mirrors OCaml's own `Gc.compact`).** It aborts today only because its allocator is a distinct
+   `MarkCompact(_)` selector (not `BumpPointer`) even though it bump-allocates internally → a small
+   refill-`match` extension; the slide reuses the existing moving-root fixup. **Genuinely blocked:**
+   `MarkSweep` (free-list — no bump region) and `PageProtect` (page-per-object debug) have no bump
+   allocator the inlined native fast-path can alias → bytecode-only without a codegen change.
 
 7. **#17 — benchmarking + perf tuning (M8).** The open milestone; ties directly to
    `RESEARCH_QUESTIONS.md`. Levers identified (first-round results in NOTES): dynamic
@@ -106,6 +112,24 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    gap), inline the bytecode alloc fast-path (vs per-object `mmtk_ocaml_alloc`),
    GC-thread-count balance (default `nproc` per process), Immix defrag/LOS tuning. →
    NOTES `Workstreams archive` (benchmark baseline + levers).
+
+8. **`ConcurrentImmix` + SATB write barrier — the RQ1 research flagship (in progress).**
+   The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make
+   read-barrier-free concurrent GC unusually cheap?). **De-risked:** OCaml's *stock* major
+   barrier is *already* SATB (Yuasa grey-old-referent) — bug-#3 rewired `caml_modify` to
+   MMTk's *generational* barrier and M9 deleted the stock concurrent major, so no SATB path
+   is wired today, but the shape is native to the runtime/codegen → re-introduce it (gated on
+   the concurrent plan) rather than invent it. **First-class sub-item — lazy/SATB coverage (an
+   open research question, "implement and test breakage"):** forcing a `lazy` mutates the
+   suspension in place, so the SATB deletion barrier must fire on forcing (else the thunk's
+   captured env is lost → dangling) and the binding's `scan_object` must survive the
+   force-vs-mark tag-transition race (`Lazy`/`Forcing` → `Forward`/result) + multi-domain
+   `Forcing`/`Undefined` protocol. Plan: implement, then *deliberately break it* — heavy
+   multi-domain forcing under concurrent marking at a small heap with `sanity`; characterise
+   each break as fixable (missing barrier) or open (protocol conflict). **Gate:** re-enable the
+   disabled `lazy/…force` testsuite test. *Diagnose first* — confirm `ConcurrentImmix` is
+   actually in mmtk-core 0.32 (may be unreleased / feature-gated). → RESEARCH_QUESTIONS RQ1;
+   NOTES (2026-06-23).
 
 ### Shipped (done — one line each; depth in NOTES)
 
@@ -153,14 +177,14 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode) |
 | `PageProtect` | debug — page-granularity alloc | no | ✅ (bytecode, manual — exceeds CI time cap) |
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
-| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ❌ **deferred** (SATB write barrier) |
+| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | 🚧 **in progress** (RQ1 flagship — SATB barrier + lazy) |
 
 **Native** runs `Immix`/`StickyImmix` (in-place Immix-block TLAB) **and `GenImmix`/`GenCopy`**
 (copy-nursery `BumpPointer` TLAB — the moving-root fixup is reused from the major path). The rest
 (free-list `MarkSweep`, `PageProtect`, the deferred plans) abort at startup on native (bytecode-only).
 `GenImmix` is the stock-faithful generational native default.
 
-**The two deferrals:**
+**`Compressor` (deferred) and `ConcurrentImmix` (in progress, open work #8):**
 
 - **`Compressor` — needs a unified object-reference model.** Its bitmap mark-compact
   assumes the object reference *is* the object start; OCaml puts the value reference at
@@ -168,11 +192,15 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
   no single "reference == object start" identity. Supporting it means redesigning the
   object model. (The all-plans CI gate greps for its `requires a unified object
   reference` abort.) → NOTES #15 (2026-06-23).
-- **`ConcurrentImmix` — needs an SATB write barrier.** The only high-value unwired plan
-  (the low-latency line — see `RESEARCH_QUESTIONS.md`). Our generational barrier is a
-  slot-remembering region barrier, not snapshot-at-the-beginning; concurrent marking
-  needs SATB. High effort, high payoff — and interesting precisely because OCaml's own
-  collector is SATB and the language is immutable-by-default. → NOTES #15 (2026-06-23).
+- **`ConcurrentImmix` — needs an SATB write barrier (RQ1 flagship; in progress).** The
+  high-value low-latency line (`RESEARCH_QUESTIONS.md` RQ1). Today's barrier is a
+  slot-remembering *generational* region barrier, not snapshot-at-the-beginning — but
+  OCaml's *stock* major barrier is *already* SATB (Yuasa), so re-introducing it (gated on
+  the concurrent plan) re-uses a runtime-native mechanism rather than inventing one. The
+  sharp correctness corner is **`lazy`**: forcing mutates the suspension in place, so the
+  SATB barrier must cover lazy-forcing and the marker must survive the force-vs-mark race —
+  an open "implement-and-test-breakage" research question (open work #8; gate = the disabled
+  `lazy/…force` test). → open work #8; RESEARCH_QUESTIONS RQ1; NOTES (2026-06-23).
 
 ---
 
