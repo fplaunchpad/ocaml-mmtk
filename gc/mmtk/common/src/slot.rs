@@ -45,6 +45,33 @@ pub fn set_forwarding_bits_spec(spec: SideMetadataSpec) {
     let _ = FORWARDING_BITS_SPEC.set(spec);
 }
 
+/// Cached MMTk heap address bounds `[start, end)`, captured lazily on first use.
+///
+/// MMTk reserves a *fixed* virtual address range for the whole heap at init
+/// (`vm_layout().heap_start..heap_end`; see `memory_manager::{starting,last}_heap_address`)
+/// and never changes it afterwards — so caching the two words once is sound.
+/// Any address outside this range is provably outside every MMTk space, which
+/// lets [`FieldSlot::classify`] reject foreign/code/atom pointers with two
+/// integer compares instead of the full SFT lookup
+/// (`is_in_mmtk_spaces` = chunk-indexed `SFT_MAP.get_checked` + virtual
+/// `is_in_space` dispatch). An address *inside* the range is NOT necessarily in
+/// a space (there can be unmapped holes between spaces), so it still falls
+/// through to the authoritative `is_in_mmtk_spaces` check — the bounds test only
+/// ever short-circuits the *negative* (foreign) case, never approves a trace.
+static HEAP_BOUNDS: OnceLock<(usize, usize)> = OnceLock::new();
+
+/// Lazily fetch and cache the fixed MMTk heap bounds. The `get_or_init` closure
+/// runs at most once; steady state is a single relaxed pointer load + deref.
+#[inline]
+fn heap_bounds() -> (usize, usize) {
+    *HEAP_BOUNDS.get_or_init(|| {
+        (
+            memory_manager::starting_heap_address().as_usize(),
+            memory_manager::last_heap_address().as_usize(),
+        )
+    })
+}
+
 /// True if the object at `addr` has been (or is being) forwarded by a moving GC.
 ///
 /// MMTk overwrites a forwarded object's header word with the forwarding pointer,
@@ -111,13 +138,32 @@ impl FieldSlot {
             return NOT_TRACEABLE; // tagged integer (LSB=1) or null
         }
         let addr = unsafe { Address::from_usize(raw) };
-        let obj = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
 
         // Only objects MMTk actually manages are references it can trace. OCaml
         // has pointers outside any MMTk space — atoms (static zero-size blocks),
         // code addresses, objects allocated before MMTk was enabled. Tracing
         // those would make mmtk-core panic, and reading their "header" to test
         // for an infix tag would be a wild read; filter them out here.
+        //
+        // Fast path: MMTk's heap occupies one fixed address range, so an address
+        // outside `[heap_start, heap_end)` is provably in NO MMTk space — reject
+        // it with two integer compares, skipping the chunk-indexed SFT lookup +
+        // virtual dispatch of `is_in_mmtk_spaces` (the per-edge hot cost, lever
+        // #C1b). Most live OCaml pointers ARE in-heap, so the common case still
+        // pays the SFT lookup — but foreign/code/atom pointers (and the wild
+        // reads they would cause below) are filtered for free. The bounds test is
+        // a strict superset of `has_sft_entry` (`addr >= start && addr < end`,
+        // sft_map.rs), so it NEVER admits an address the SFT would reject; it only
+        // short-circuits the negative case. An address inside the range may still
+        // sit in an unmapped hole between spaces, so it falls through to the
+        // authoritative `is_in_mmtk_spaces` below — exactness is preserved.
+        let raw_addr = addr.as_usize();
+        let (lo, hi) = heap_bounds();
+        if raw_addr < lo || raw_addr >= hi {
+            return NOT_TRACEABLE;
+        }
+
+        let obj = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
         if !memory_manager::is_in_mmtk_spaces(obj) {
             return NOT_TRACEABLE;
         }
