@@ -5,6 +5,72 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native ConcurrentImmix — the two "gaps" were already closed; only an atomics-SATB ordering bug was real
+
+*2026-06-23*
+
+Closed the native-SATB gap for `ConcurrentImmix` (so it runs native, not just bytecode).
+**Diagnosis-first finding: both anticipated native gaps were already covered by existing
+mechanisms; there was no inlined fast-path to fix.**
+
+**Gap #1 — SATB barrier for native writes: already covered.** This tree's native codegen
+has *no* inlined write barrier. Every pointer-overwrite assignment of `Caml_modify` kind is
+emitted as an out-of-line `Cextcall("caml_modify", …)` (`asmcomp/cmm_helpers.ml` `setfield`
+:2286, `setfield_computed`/`addr_array_set` :2417/:770; `cmmgen.ml` lowers `Psetfield` only
+via these). `amd64.S` has no `caml_modify` symbol → the C function in `runtime/memory.c` is
+the sole impl, and it already calls `caml_mmtk_satb_barrier` *before* the store
+(`write_barrier`, gated on `caml_mmtk_concurrent`). `Array.fill` is the C primitive
+`caml_array_fill` (`stdlib/array.ml`: `external "caml_array_fill"`, NOT a `%`-builtin), so
+native fills also reach `caml_uniform_array_fill` → SATB barrier. (The stale comment in
+`array.c` claiming native bypasses that helper was wrong; corrected.) `caml_initialize`
+correctly takes no SATB (init writes delete nothing). The task's hypothesis — "native inlines
+a generational-only fast-path that skips `caml_modify`" — is false for this tree.
+
+**The one real defect — SATB ordering on atomics (bytecode+native shared).** `caml_modify`
+greys the slot *before* the store, so mmtk's `enqueue_node`→`slot.load()` reads the OLD
+referent. But `caml_atomic_exchange_field` / `caml_atomic_cas_field` called `write_barrier`
+(hence the SATB barrier) *after* the store → the slot already held the NEW value, so the
+deleted referent was lost. Latent SATB soundness hole for pointer-valued `Atomic.exchange` /
+`Atomic.compare_and_set`. **Fix:** grey the old referent explicitly *before* the store in
+those two functions (self-gated; no-op off the concurrent plan; conservative under a
+cross-domain race — greying a stale-but-live referent is harmless). Affects both runtimes
+since both go through these C helpers.
+
+**Gap #2 — native TLAB allocate-black: already correct (mmtk-core does it).** During a
+concurrent cycle mmtk-core's `ImmixAllocator::acquire_clean_block` / `acquire_recyclable_lines`
+run `Line::eager_mark_lines` over the *whole* acquired region (gated on
+`should_allocate_as_live()`, flipped true at `InitialMark` end), stamping both the line mark
+table (drives line-granular sweep) and the per-line mark-bit byte (allocate-black for the
+marker). OCaml acquires its TLAB via `ImmixAllocator::alloc` (the one-word probe in
+`mmtk_ocaml_refill_tlab`), so the gapless bump fill inherits black-ness at LINE granularity
+for free. mmtk-core's doc comment on `initialize_mark_table_as_marked` literally describes
+this "mutator need not mark bump-allocated objects" case. `needs_log_bit`/SATBBarrier need
+nothing set on NEW objects (the unlog bit is bulk-set at InitialMark over the *live* heap; the
+barrier is keyed on the source object being mutated). **No binding change needed.**
+
+**Validation (turing, x86-64, socket0):** `world.opt` builds. Native `ConcurrentImmix` runs
+the 4-domain deep-continuation/effect stressor (`/tmp/cont_stress3.ml`) 6/6 at 256 MB and 6/6
+at 96 MB, invariant `checksum=3603528000`; a lazy stressor byte-identical to bytecode
+(`acc=40000444445 acc2=70001066668`); a pointer-atomics stressor byte-identical
+(`total=29999800000 sum=4999950000`). **MMTk `sanity` (full-heap re-trace each GC) clean** at
+64/48 MB (66 re-traces in one run, 0 Invalid). GenImmix + StickyImmix controls (issue #3
+pre-existing native-generational SIGSEGV) ran clean 10/10 — #3 didn't reproduce, so it
+couldn't be contrasted, but ConcurrentImmix showed zero crashes across 21 native runs.
+**Assessment: native ConcurrentImmix is sound on this evidence; no wall hit.** Open (deferred,
+non-blocking): an UNLOG-bit barrier gate (perf); the sanity-build-only ~10 MB deadlock; macOS
+native (untouched). See `~/native_cimmix_findings.md` for the full run log.
+
+**Lesson (rsync stale-binary trap):** `rsync -az` from a macOS worktree carried over Mach-O
+arm64 *tool* binaries that slip past `*.o`/`*.cm*` excludes — `runtime/sak` (generates part
+of `prims.c` → truncated `prims.c` on Linux) and `yacc/ocamlyacc`. Also an unanchored
+`--exclude='ocamlc'` + `--delete` deleted the portable `boot/ocamlc`. Fix: `rm` the stale
+Mach-O tools and let the build regenerate them; re-rsync `boot/` (portable bytecode) without
+the global excludes, keeping the dest's own x86-64 `boot/ocamlrun`. Prefer source-only rsync
+with anchored excludes (or just exclude `gc/mmtk/target` + top-level built artifacts and let
+`make world world.opt` rebuild).
+
+---
+
 ## fft differential perf debugging — MMTk's fft slowdown is GC, not locality (and not a flambda artifact)
 
 *2026-06-23*
@@ -100,9 +166,11 @@ is an ancestor of the 5.5.0 merge):
   shape — *not* the object-granularity path, which needs a src object `caml_modify` lacks); `caml_modify` /
   `Array.fill` fire it pre-store, gated on `caml_mmtk_concurrent`, inert off the concurrent plan.
   Availability confirmed (real `PlanSelector` in 0.32; `needs_prepare_mutator` = zero binding work). `lazy`
-  proven clean (force-vs-mark + force-vs-relocate; FAQ Q2 / RESEARCH_QUESTIONS RQ1). **Open:** FAQ Q3
-  (continuation fiber stacks scanned concurrently vs a resume — fix = vanilla's per-continuation lock, in
-  progress); native SATB fast-path + an UNLOG-bit barrier gate.
+  proven clean (force-vs-mark + force-vs-relocate; FAQ Q2 / RESEARCH_QUESTIONS RQ1). **Open (at the time of
+  this entry; both since resolved — see the newest entry above):** FAQ Q3 (continuation fiber stacks scanned
+  concurrently vs a resume — fixed by the per-continuation lock); native SATB fast-path (no codegen needed —
+  native already routes through the C barrier helpers; only an atomics-ordering bug was real) + an UNLOG-bit
+  barrier gate (still open, perf-only).
 - **Native plan set finalized at 6** (Immix/StickyImmix/GenImmix/GenCopy/**SemiSpace**/**NoGC**) — SemiSpace
   blessed `sanity`-clean (0 Invalid, 3M+ copied); NoGC native is moot (never reclaims). **`MarkCompact`
   native is INFEASIBLE via TLAB aliasing** (confirmed by two independent agents): it needs a per-object

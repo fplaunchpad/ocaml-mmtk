@@ -94,11 +94,15 @@ default.
 | `MarkSweep` | non-moving free-list | bytecode (native infeasible — free-list) |
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
-| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode (RQ1; `lazy`-clean, continuations open) |
+| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (RQ1; `lazy`-clean, Q3 fixed) |
 
 `ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
-write barrier is wired in bytecode and `lazy` is proven clean, with one open hazard —
-continuation stacks scanned concurrently with a resume (see [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3).
+write barrier is wired for **both bytecode and native** — native needs no new codegen because
+every pointer overwrite (`<-`, array set, `Array.fill`) already routes through the out-of-line
+C helpers (`caml_modify`/`caml_array_fill`) that fire the barrier, and the native TLAB inherits
+mmtk-core's line-granular allocate-black during a concurrent cycle. `lazy` is proven clean and
+the continuation-resume hazard is fixed (per-continuation scan lock; see
+[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3).
 The one **unwired** plan is **`Compressor`**, which needs a unified object-reference model
 incompatible with OCaml's value/header layout (see [`ROADMAP.md`](ROADMAP.md)).
 `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only — their allocators can't back the

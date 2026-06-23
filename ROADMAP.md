@@ -133,7 +133,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      StickyImmix closes much of the gap; GC-thread-count `nproc` oversized). → full ranked
      backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
 
-8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode, 2026-06-23; `lazy`-clean; Q3 continuations fixed; native SATB open).**
+8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode + native, 2026-06-23; `lazy`-clean; Q3 continuations fixed; native validated).**
    The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make
    read-barrier-free concurrent GC unusually cheap?). **De-risked:** OCaml's *stock* major
    barrier is *already* SATB (Yuasa grey-old-referent) — bug-#3 rewired `caml_modify` to
@@ -151,8 +151,17 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    mmtk-core 0.32 `PlanSelector` with `SATBBarrier`); **SATB barrier wired (~82 lines, bytecode) and
    `lazy` is clean** (force-vs-mark + force-vs-relocate, FAQ Q2). **Q3 (continuation scan vs resume) FIXED**
    (commit `55ab6ce40b`: per-continuation lock `cont_lock.rs` + resume SATB-snapshot — deterministic crash
-   gone, STW flat in fiber count). **Open:** native SATB fast-path + an UNLOG-bit barrier gate (+ a
-   sanity-build-only ~10 MB deadlock, `rr` follow-up). → RESEARCH_QUESTIONS RQ1;
+   gone, STW flat in fiber count). **Native: validated (2026-06-23).** No new codegen was needed — the two
+   anticipated gaps were already closed: (a) native routes every pointer overwrite (`<-`, array set,
+   `Array.fill`) through the out-of-line C helpers (`caml_modify`/`caml_array_fill`) that already fire the
+   SATB barrier (this tree's codegen has *no* inlined write barrier to bypass); (b) the native TLAB inherits
+   mmtk-core's **line-granular allocate-black** at block acquisition during a concurrent cycle, so the gapless
+   bump fill is black for free. The one real defect found was an SATB **ordering bug on atomics**
+   (`caml_atomic_exchange`/`cas` greyed the slot *after* the store → missed the deleted referent), now fixed —
+   bytecode+native shared, not native-specific. `world.opt` builds; native ConcurrentImmix runs the 4-domain
+   continuation stressor + a lazy stressor clean, byte-identical to bytecode, and is **MMTk-sanity-clean** (66
+   full-heap re-traces, 0 Invalid). **Open:** an UNLOG-bit barrier gate (perf, not correctness); a
+   sanity-build-only ~10 MB deadlock (`rr` follow-up); macOS native (untouched). → RESEARCH_QUESTIONS RQ1;
    NOTES (2026-06-23).
 
 ### Shipped (done — one line each; depth in NOTES)
@@ -201,16 +210,18 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode; native **infeasible** — VO bit + reserved header word) |
 | `PageProtect` | debug — page-granularity alloc | no | ✅ (bytecode, manual — exceeds CI time cap) |
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
-| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (bytecode) — SATB; `lazy`-clean; **Q3 fixed**; native SATB open |
+| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (bytecode + native) — SATB; `lazy`-clean; **Q3 fixed**; native validated (sanity-clean) |
 
-**Native** runs **6 plans** — `Immix`/`StickyImmix` (in-place Immix-block TLAB), `GenImmix`/`GenCopy`
-(copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) — i.e. every plan
-whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root fixup is reused
-from the major path. `MarkSweep` (free-list), `MarkCompact` (per-object VO bit + reserved Lisp-2 header
-word the gapless TLAB can't produce), and `PageProtect` abort at startup on native (bytecode-only).
+**Native** runs **7 plans** — `Immix`/`StickyImmix`/`ConcurrentImmix` (in-place Immix-block TLAB),
+`GenImmix`/`GenCopy` (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) —
+i.e. every plan whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root
+fixup is reused from the major path. `ConcurrentImmix`'s `Immix` Default allocator additionally stamps the
+aliased region allocate-black (line-granular) during a concurrent cycle, so native objects allocated mid-mark
+are conservatively live for free. `MarkSweep` (free-list), `MarkCompact` (per-object VO bit + reserved Lisp-2
+header word the gapless TLAB can't produce), and `PageProtect` abort at startup on native (bytecode-only).
 `GenImmix` is the stock-faithful generational native default.
 
-**`Compressor` (deferred) and `ConcurrentImmix` (landed bytecode, open work #8):**
+**`Compressor` (deferred) and `ConcurrentImmix` (landed bytecode + native, open work #8):**
 
 - **`Compressor` — needs a unified object-reference model.** Its bitmap mark-compact
   assumes the object reference *is* the object start; OCaml puts the value reference at
@@ -218,13 +229,17 @@ word the gapless TLAB can't produce), and `PageProtect` abort at startup on nati
   no single "reference == object start" identity. Supporting it means redesigning the
   object model. (The all-plans CI gate greps for its `requires a unified object
   reference` abort.) → NOTES #15 (2026-06-23).
-- **`ConcurrentImmix` — SATB write barrier (RQ1 flagship; landed bytecode).** The high-value
+- **`ConcurrentImmix` — SATB write barrier (RQ1 flagship; landed bytecode + native).** The high-value
   low-latency line (`RESEARCH_QUESTIONS.md` RQ1). The SATB deletion barrier is wired (~82 lines)
   by re-using OCaml's *stock* SATB-shaped barrier (its major barrier is already Yuasa) via
   mmtk-core's slot-granularity `memory_region_copy_pre`, gated on the concurrent plan — inert
   off it. **`lazy` is clean**, and **Q3 (continuation scan vs resume) is fixed** (per-continuation lock +
-  resume SATB-snapshot, commit `55ab6ce40b`; FAQ Q2/Q3). **Open:** the native SATB fast-path + an UNLOG-bit
-  gate (+ a sanity-build-only ~10 MB deadlock, `rr` follow-up).
+  resume SATB-snapshot, commit `55ab6ce40b`; FAQ Q2/Q3). **Native validated (2026-06-23):** native needed
+  no codegen change — every pointer overwrite already routes through the C helpers that fire the barrier, and
+  the native TLAB inherits mmtk-core's line-granular allocate-black during a concurrent cycle; the only fix
+  was an SATB ordering bug on atomic stores (greyed post-store, now greyed pre-store). `world.opt` builds and
+  native ConcurrentImmix is sanity-clean on the continuation + lazy stressors. **Open:** an UNLOG-bit gate
+  (perf); a sanity-build-only ~10 MB deadlock (`rr` follow-up); macOS native.
   → open work #8; RESEARCH_QUESTIONS RQ1; FAQ Q1–Q4; NOTES (2026-06-23).
 
 ---
