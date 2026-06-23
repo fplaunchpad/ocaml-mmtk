@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native ConcurrentImmix — VALIDATED; both expected gaps were already closed; one real atomics bug fixed
+
+*2026-06-23*
+
+Native ConcurrentImmix is now sound + landed. Diagnosis-first showed the two anticipated native "gaps"
+**did not need the expected fix**:
+
+1. **Native SATB barrier — already covered.** This tree's native codegen has **no inlined write barrier** —
+   every `Caml_modify`-kind pointer overwrite is an out-of-line `Cextcall("caml_modify", …)`
+   (`asmcomp/cmm_helpers.ml` setfield/array-set; `amd64.S` has no `caml_modify` symbol), and `Array.fill` is
+   the C primitive `caml_array_fill` → `caml_uniform_array_fill`. All these C helpers already fire the SATB
+   barrier pre-store, so native reaches it. (The earlier "native inlines `caml_modify` and skips it" claim was
+   wrong for this tree — vindicating the PERFORMANCE #B1 read.) `caml_initialize` correctly takes no SATB.
+2. **TLAB allocate-black — automatic.** During a concurrent cycle, mmtk-core's `ImmixAllocator`
+   eager-marks (allocate-blacks) the lines it acquires; OCaml's native TLAB is acquired through
+   `ImmixAllocator::alloc`, so the gapless bump fill inherits black-ness. No binding change needed.
+
+**The one real defect (fixed, `d0c721a8b7`):** the SATB barrier on **pointer-valued atomics** —
+`caml_atomic_exchange_field` / `caml_atomic_cas_field` (`runtime/memory.c`) greyed the slot **after** the
+store, so the SATB barrier re-read the *new* value and lost the deleted referent. A latent soundness hole for
+`Atomic.exchange` / `compare_and_set` on pointers, **shared by bytecode and native** (both go through these C
+helpers). Fixed by greying the old referent before the store, mirroring `caml_modify`.
+
+**Validated:** macOS arm64 — cargo + `make world` (bytecode) clean; hello/lazy/atomics stressors byte-identical
+under Immix and ConcurrentImmix (the macOS *bytecode* build gate, never previously checked, is now closed).
+Linux native (turing) — `world.opt` builds; native ConcurrentImmix runs the 4-domain continuation stressor +
+lazy + atomics stressors, all clean; MMTk `sanity`-clean (66 re-traces, 0 Invalid); 21 native ConcurrentImmix
+runs, 0 crashes; non-concurrent regression clean. Native plan set is now **7** (adds ConcurrentImmix).
+**Open (perf, not correctness):** an UNLOG-bit barrier fast-path gate; the sanity-build-only ~10 MB deadlock
+(`rr`, issue #4); native-on-macOS linking (separate, unfinished).
+
+**rsync stale-binary lesson:** the macOS build cost two restarts — Mach-O `runtime/sak` + `yacc/ocamlyacc`
+slipped past `*.o` excludes (truncating generated `prims.c`), and an unanchored `--exclude='ocamlc'` deleted
+`boot/ocamlc`. After any rsync, verify the *generated* artifacts + boot binaries, not just `.o`.
+
+---
+
 ## M8 macro-benches campaign — partial results (7 of 8 benches, SALVAGED)
 
 *2026-06-23*

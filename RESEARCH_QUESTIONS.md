@@ -241,9 +241,12 @@ barrier (C4 / ZGC / Shenandoah) — the cost OCaml's designers refused. So OCaml
 moot *precisely because* the design stays read-barrier-free. **A concurrent-compacting plan would reopen
 it** — and that is exactly where RQ1's immutability bet would meet its real test (and where an LXR/RC-style
 or read-barrier design becomes the interesting comparison). Net: the lazy question is **closed for
-ConcurrentImmix** (clean, mechanism-explained) — in bytecode; the **native-code SATB fast-path is in
-progress** (ROADMAP #8 / task #30), along with an UNLOG-bit barrier gate (every concurrent-plan `caml_modify`
-currently buffers).
+ConcurrentImmix** (clean, mechanism-explained) — in bytecode **and native**. Diagnosis showed the expected
+native gaps were already closed (native reaches `caml_modify` via the out-of-line extcall; mmtk-core
+eager-marks acquired lines, so allocate-black is automatic), and a real **atomics-SATB-ordering bug was found
++ fixed** (pointer-valued `Atomic.exchange`/`compare_and_set` greyed the slot *after* the store — a soundness
+hole shared by bytecode + native). Still deferred (perf, not correctness): an UNLOG-bit barrier gate (every
+concurrent-plan `caml_modify` currently buffers).
 
 **Related work / what's genuinely new.** LXR established the read-barrier-free low-latency design *on
 Java*; the concurrent compactors established the latency line *with* read barriers. **No one has tested

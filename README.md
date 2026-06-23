@@ -20,7 +20,8 @@ on a common substrate. The research agenda lives in
   TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
   single- and multi-domain (`Domain.spawn`) programs run.
 
-> Supported on **x86-64 Linux**; native code on macOS is untested. MMTk's overhead is
+> Supported on **x86-64 Linux**; the **macOS bytecode build is validated** (native linking on macOS is
+> still unfinished). MMTk's overhead is
 > workload-dependent — early numbers span parity (short-lived / generational workloads) to
 > ~2× (allocation- or compute-heavy), and it uses more memory (it reserves its heap).
 > Performance tuning is the open milestone (M8); the methodology is
@@ -32,10 +33,10 @@ on a common substrate. The research agenda lives in
   multi-domain, native code, weak/ephemeron/finaliser support, the testsuite); **excising
   the stock GC** (no stock minor/major collector, shared heap, or minor-heap arena remains);
   advancing the base to **OCaml 5.5.0 final**; the MMTk-native multi-domain stop-the-world
-  handshake (per-mutator RUNNING set, bug #3b); and **`ConcurrentImmix` in bytecode** — SATB
+  handshake (per-mutator RUNNING set, bug #3b); and **`ConcurrentImmix`** (bytecode + native) — SATB
   write barrier, `lazy`-clean, and the continuation-scan-vs-resume hazard fixed (FAQ Q3).
-- **In progress:** the macro-benchmark performance campaign + analysis (M8); **native
-  `ConcurrentImmix`**; and three rare-crash investigations tracked as GitHub issues.
+- **In progress:** the macro-benchmark performance campaign + analysis (M8); and three
+  rare-crash investigations tracked as GitHub issues.
 - **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
   read, and `runtime_events` emission under MMTk (broken — see ROADMAP / FAQ).
 
@@ -81,9 +82,9 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 ### GC plans
 
 `MMTK_PLAN` selects the collector at startup. **Ten** of mmtk-core 0.32's eleven plans are
-wired in **bytecode**; **native** runs the **six** whose Default allocator is a bump/Immix
+wired in **bytecode**; **native** runs the **seven** whose Default allocator is a bump/Immix
 region the inlined TLAB can alias — `Immix`/`StickyImmix` (in-place), `GenImmix`/`GenCopy`
-(copy-nursery), and `SemiSpace`/`NoGC`. `GenImmix` is the stock-faithful generational native
+(copy-nursery), `SemiSpace`/`NoGC`, and `ConcurrentImmix`. `GenImmix` is the stock-faithful generational native
 default.
 
 | Plan | Description | Runtimes |
@@ -97,7 +98,7 @@ default.
 | `MarkSweep` | non-moving free-list | bytecode (native infeasible — free-list) |
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
-| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode (RQ1; `lazy`-clean, continuations open) |
+| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (RQ1; `lazy`-clean, Q3 fixed) |
 
 `ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
 write barrier is wired in bytecode and `lazy` is proven clean, with one open hazard —
