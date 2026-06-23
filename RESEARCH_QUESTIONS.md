@@ -6,141 +6,319 @@ ROADMAP's M0–M7, and ~90% of M9) is essentially done. This document is about t
 **research** this platform enables. The ROADMAP correctness/perf tail is deferrable engineering; the
 questions below are the reason to keep going.
 
-This is a living document — sharpen, cut, and re-prioritise as the questions firm up.
+This is a living document — sharpen, cut, and re-prioritise as the questions firm up. Citations have
+been verified against the source PDFs / dblp; a few that the v1 draft over-claimed have been
+corrected in place (see the notes on LXR and the Julia report below).
 
 ---
 
 ## Thesis: `ocaml-mmtk` is a GC research platform, and OCaml fills a gap in it
 
-MMTk's purpose (Blackburn et al., *Oil and Water?*, ICSE'04; *Rust as a language for high-performance
-GC*, ISMM'16) is to implement many collectors once and compare them rigorously under one framework.
-It has language bindings for **Java** (JikesRVM/OpenJDK), **Julia**, **CRuby**, **V8**, **.NET**.
+MMTk's reason to exist is to implement many collectors *once* from shared components and compare them
+rigorously on a common substrate (Blackburn, Cheng & McKinley, *Oil and Water?*, ICSE'04; Lin,
+Blackburn, Hosking & Norrish, *Rust as a language for high-performance GC implementation*, ISMM'16).
+It has language bindings for **Java** (JikesRVM / OpenJDK), **Julia**, **CRuby**, **V8**, and **.NET**.
 
 There is **no functional, immutable-by-default, statically-typed, multicore, effect-handler language**
 in that set. OCaml is a genuinely distinct point in the design space — and several of its properties
-are exactly the ones GC research cares about *and* that the recent Julia/Ruby bindings found themselves
-fighting:
+are exactly the ones GC research cares about *and* that the recent Julia/Ruby MMTk bindings found
+themselves fighting:
 
-| Property | Julia / Ruby (per the ISMM'25 reports) | OCaml |
+| Property | Julia / CRuby (per the ISMM'25 reports) | OCaml |
 |---|---|---|
-| Root reporting | conservative / elision complexity | **precise** (`caml_do_roots`, `caml_scan_stack`) |
-| Object motion | non-moving assumptions, friction with copying | **moving-friendly** by design (no-naked-pointers) |
-| Mutation rate | high (imperative) | **low** (immutable-by-default) |
-| Concurrency model | mostly single-threaded heaps | **multicore** (domains, mostly domain-local) |
+| Root reporting | conservative; ambiguous/"dominated" roots need pinning | **precise** (`caml_do_roots`, `caml_scan_stack`) |
+| Object motion | non-moving assumptions baked in; needed retrofitting | **moving-friendly** by design (no naked pointers) |
+| Mutation | high (imperative); WB-unprotected objects | **low** (immutable-by-default; init writes need no barrier) |
+| Concurrency model | mostly single-heap (GIL in CRuby) | **multicore** (domains, mostly domain-local) |
 | Control flow | — | **effect handlers / first-class continuations** |
 
-So OCaml is not "another binding"; it is a **contrast case** that lets us ask whether a GC-friendly
-*language design* changes the GC tradeoffs that the literature has measured on imperative languages.
+A precise nuance the v1 draft got slightly wrong, worth stating exactly because the audience will
+notice: the Julia report does **not** claim impedance "cannot be eliminated through engineering
+alone" — that phrase is not in the paper. What it says is that a non-moving collector is *"fundamentally
+and unavoidably exposed to fragmentation and reduced locality"* (de Souza Amorim et al., ISMM'25), i.e.
+the limitation is **inherent to the design**, not removable by tuning. The Julia and CRuby reports
+*do* document, concretely, that those runtimes had non-moving assumptions, conservative/ambiguous
+roots, and undefined GC-safe-region semantics baked in, and that retrofitting a moving/general GC
+meant changing the runtime, not just the binding. OCaml is the **contrast case**: it was *designed*
+(for its own multicore GC; Sivaramakrishnan et al., ICFP'20) with precise rooting, no naked pointers,
+and explicit safepoints. So the platform lets us ask whether a GC-friendly *language design* actually
+changes the GC tradeoffs the literature has measured on imperative languages — and what such a design
+buys a third-party-GC retrofit.
+
+---
+
+## The baseline: OCaml's own multicore GC (the thing `ocaml-mmtk` replaces)
+
+Every RQ here is measured against, and motivated by, the Multicore OCaml collector described in
+**Sivaramakrishnan, Dolan, White, Jaffer, Kelly, Sahoo, Parimala, Dhiman & Madhavapeddy,
+*Retrofitting Parallelism onto OCaml*, PACMPL 4(ICFP), Article 113, 2020.** It is essential context,
+so state it precisely:
+
+- **Three stated requirements.** *R1 feature compatibility* — a well-typed serial program stays
+  well-typed and same-semantics on the parallel runtime; *R2 performance compatibility* — its
+  performance profile and GC pauses don't regress; *R3 parallel scaling* — minimise pauses, then run
+  as fast as the cores allow. These constraints, not algorithmic ambition, drove the design.
+- **Hybrid structure.** Each domain has a **small (256 K-word default) thread-local bump-pointer
+  minor heap**; minor collection **copies** survivors into a **shared major heap** collected by a
+  **non-moving, mostly-concurrent, mark-and-sweep** collector modelled on VCGC (incremental, with an
+  optional stop-the-world compaction phase).
+- **Stop-the-world minor, on purpose.** They chose a **stop-the-world parallel** minor collector
+  (`ParMinor`) over a concurrent one (`ConcMinor`) **specifically to avoid a read barrier** — *"stock
+  OCaml does not use read barriers and the C API also works under this assumption"*; making reads into
+  safepoints would force every C-API user to change their code, violating R1. Domains rendezvous via
+  the interrupt mechanism + a barrier to agree a collection can start.
+- **The mutation/immutability rationale — in the authors' own words.** *"Being a functional
+  programming language, OCaml code usually exhibits a high rate of allocation with most objects being
+  small and short-lived."* And, load-bearing for RQ1: *"Many objects in OCaml are immutable. For
+  immutable objects, the initialising writes (the only ones) are done without barriers and reads
+  require no barriers."* The major-heap **write barrier is SATB** (snapshot-at-the-beginning, à la
+  Yuasa 1990): on overwrite it greys the old referent.
+- **Headline numbers.** `ParMinor` is **3.5% slower** than stock sequential OCaml (geomean; `ConcMinor`
+  4.9%, the gap being the read barrier), while using **61% less memory** (`ConcMinor` 54%).
+
+That last set of facts is the frame for everything below: OCaml's designers reached for a generational,
+mostly-domain-local, SATB, **read-barrier-free** design *because of* the language's allocation profile,
+and explicitly leaned on immutability to elide barriers. `ocaml-mmtk` lets us test, with a different
+collector family underneath the same language, whether that profile generalises into the GC-design
+predictions the broader literature has only ever measured on imperative workloads.
 
 ---
 
 ## The current frontier (what to build on)
 
-- **MMTk as a comparison vehicle** — Blackburn et al., *Oil and Water?* (ICSE'04); Immix (Blackburn &
-  McKinley, PLDI'08); *Rust as a language for high-performance GC implementations* (ISMM'16).
-- **Language-binding practitioner reports** — *Reconsidering Garbage Collection in Julia: A
-  Practitioner Report* (Blackburn et al., ISMM'25) and *Reworking Memory Management in CRuby: A
-  Practitioner Report* (Wang, Blackburn, Zhu, Valentine-House, ISMM'25). Both catalogue
-  **language-specific impedance** between a runtime's assumptions and a GC framework's expectations;
-  the Julia report's thesis is that *"the impedance ... cannot be eliminated through engineering alone"*
-  — GC portability needs language-level design. OCaml is the natural, and contrasting, next entry.
-- **Low-latency GC** — LXR (Zhao, Blackburn, McKinley, *Low-Latency, High-Throughput Garbage
-  Collection*, PLDI'22): reference counting + Immix backup tracing, **sub-millisecond max pauses** with
-  competitive throughput. Crucially, its effectiveness is **gated by write-barrier cost / mutation
-  rate** — high-mutation workloads erode RC's latency advantage.
-- **Parallelism / engineering abstractions** — *Work Packets* (Blackburn group, PACMPL/OOPSLA'25);
-  *Memory Management on Mobile Devices* (Sareen, Blackburn, Hamouda, Gidra, ISMM'24).
-- **Precise mark-region** — *Nofl: A Precise Immix* (2025) — relevant given OCaml's precise rooting.
-- **Methodology** — *Myths and Realities* (Blackburn et al., SIGMETRICS'04); *Distilling the Real Cost
-  of Production Garbage Collectors* (ISPASS'22); *Evaluating GC Performance Across Managed Language
-  Runtimes* (ICSE'25); MemBalancer heap-sizing (ISMM'19) for heap-size-normalised comparison.
-- **OCaml side** — the Multicore OCaml GC (Sivaramakrishnan et al., *Retrofitting Parallelism onto
-  OCaml*, ICFP'20); the memory model (*Bounding Data Races in Space and Time*, PLDI'18); effect
-  handlers (*Retrofitting Effect Handlers onto OCaml*, PLDI'21).
+- **MMTk as a comparison vehicle** — *Oil and Water?* (Blackburn, Cheng & McKinley, ICSE'04); Immix
+  (Blackburn & McKinley, PLDI'08); *Rust as a language for high-performance GC implementation* (Lin,
+  Blackburn, Hosking & Norrish, ISMM'16). The methodology ancestor is *Myths and Realities* (Blackburn,
+  Cheng & McKinley, SIGMETRICS'04): implement the canonical collectors in one framework so only the
+  *policy* differs, then compare.
+- **Language-binding practitioner reports** — *Reconsidering Garbage Collection in Julia* (de Souza
+  Amorim, Lin, Blackburn, Netto, Baraldi, Daly, Hosking, Pamnany & Smith, ISMM'25) and *Reworking
+  Memory Management in CRuby* (Wang, Blackburn, Zhu & Valentine-House, ISMM'25). Both catalogue
+  **language-specific impedance** between a runtime's assumptions and a general GC framework, and both
+  hit the same wall — conservative/ambiguous roots needing VO-bit pinning, non-moving assumptions, and
+  ill-defined GC-safe regions for the FFI. OCaml is the natural, *contrasting* next entry.
+- **Low-latency GC** — **LXR** (Zhao, Blackburn & McKinley, *Low-Latency, High-Throughput Garbage
+  Collection*, PLDI'22; extended version arXiv:2210.17175): reference counting on a hierarchical Immix
+  heap + occasional concurrent SATB backup tracing, no read barrier. *Correction to the v1 framing:*
+  LXR does **not** state that its effectiveness is "gated by mutation rate." Its argument runs the
+  other way — a **cheap write barrier (1.6% mutator overhead) and the *absence* of a read barrier are
+  the enabling design choices**, justified by stores being ~an order of magnitude rarer than loads
+  (≈4.3/µs vs 64.3/µs), which makes read barriers ~5× more expensive than a store-side remembering
+  barrier. The honest, *defensible* version of the v1 claim is therefore: **LXR's whole design bets on
+  store/mutation frequency being low enough to keep the write barrier cheap and skip the read barrier —
+  and OCaml's allocation profile (low mutation, immutable-by-default) is exactly the regime that bet
+  assumes.** Numbers: in a tight heap, 7.8× throughput and 10× better 99.99% tail latency vs Shenandoah;
+  in a moderate heap, +4% throughput over G1 and +43% over Shenandoah.
+- **The "how generational is this workload?" measure** — Dolan, *Lifetime Dispersion and Generational
+  GC: An Intellectual Abstract*, ISMM'25 (DOI 10.1145/3735950.3735958). Introduces **lifetime
+  dispersion** (a Gini-coefficient measure of how concentrated object lifetimes are) as a *composable*
+  predictor of how much generational collection helps. This is the right instrument for RQ1/RQ2: it
+  turns "this program mutates / ages a lot" from hand-waving into a measured covariate, and it is by a
+  core OCaml-GC author.
+- **Concurrent / low-pause lineage (the latency line the v1 draft under-cited).** SATB marking
+  originates with **Yuasa, *Real-time garbage collection on general-purpose machines*, JSS 11(3), 1990**
+  (deletion / pre-write barrier); the tricolor + insertion-barrier alternative is **Dijkstra, Lamport,
+  Martin, Scholten & Steffens, CACM 1978**. Production concurrent compactors: **C4** (Tene, Iyengar &
+  Wolf, ISMM'11) and its predecessor **the Pauseless GC algorithm** (Click, Tene & Wolf, VEE'05), both
+  built on a self-healing **load-value (read) barrier**; **Shenandoah** (Flood, Kennke, Dinn, Haley &
+  Westrelin, PPPJ'16), SATB marking + concurrent evacuation (Brooks pointers → later load-reference
+  barriers); and **ZGC** (OpenJDK JEPs 333/377; generational JEP 439, JDK 21), colored-pointer load
+  barriers. The recurring theme — and OCaml's relevance — is that every one of these pays a **read
+  barrier** to compact concurrently, the exact cost OCaml's designers refused and LXR avoids.
+- **Parallelism / engineering abstractions** — *Work Packets* (Zhao, Blackburn & McKinley, PACMPL
+  9(OOPSLA2), Art. 361, 2025; DOI 10.1145/3763139). NUMA / multicore GC — *NumaGiC* (Gidra, Thomas,
+  Sopena, Shapiro & Nguyen, ASPLOS'15) and the scalability study (Gidra et al., ASPLOS'13); *Memory
+  Management on Mobile Devices* (Sareen, Blackburn, Hamouda & Gidra, ISMM'24). (Gidra is on the
+  OCaml-MMTk effort — the NUMA/GC pedigree is in the building.)
+- **Precise mark-region** — *Nofl: A Precise Immix* (Wingo, arXiv:2503.16971, 2025; preprint) — relevant
+  given OCaml's precise rooting and small objects.
+- **Methodology** — *Distilling the Real Cost of Production Garbage Collectors* (Cai, Blackburn, Bond &
+  Maas, ISPASS'22) and its lower-bound-overhead method; *Evaluating Garbage Collection Performance
+  Across Managed Language Runtimes* (Wang, Dou, Liang, Wang, Wang, Wei & Huang, ICSE'25, the cross-runtime
+  GEAR methodology); heap-size normalisation via **MemBalancer** — note this is **Kirisame, Shenoy &
+  Panchekha, *Optimal Heap Limits for Reducing Browser Memory Use*, PACMPL 6(OOPSLA2), Art. 160, 2022**,
+  *not* an ISMM'19 paper (the v1 draft mis-dated it). For online heap sizing under control theory, White,
+  Singer, Aitken & Jones, ISMM'13.
+- **GC observability** — *Improving Garbage Collection Observability with Performance Tracing* (Huang,
+  Blackburn & Cai, MPLR'23): built **on MMTk**, eBPF/LTTng tracepoints at near-zero overhead; the
+  artifact lives in `mmtk-core/tools/tracing`. The classic ancestor is *GCspy* (Printezis & Jones,
+  OOPSLA'02). This is a thin academic area and a real opening (see RQ5).
+- **Formal / mechanised** — there is already **a mechanically verified GC for OCaml**: Shamsu, Kafle,
+  Maroo, Nagar, Bhargavan & Sivaramakrishnan, *A Mechanically Verified Garbage Collector for OCaml*,
+  JAR 69(2), Art. 11, 2025 — a STW mark-and-sweep collector verified in **F\*/Low\***, extracted to C via
+  KaRaMeL, wired into the OCaml 4.14 runtime. **It verifies the collector algorithm, not the
+  mutator↔collector coordination protocol** — which is exactly the gap RQ5b targets. Adjacent: McCreight,
+  Shao, Lin & Li, *A General Framework for Certifying GCs and Their Mutators*, PLDI'07; Gammie, Hosking &
+  Engelhardt, *Relaxing Safely: Verified On-the-Fly GC for x86-TSO*, PLDI'15; Zakowski et al., *Verifying
+  a Concurrent GC Using a Rely-Guarantee Methodology*, ITP'17; the verified GC for CakeML (Sandberg
+  Ericsson, Myreen & Åman Pohjola, ITP'17); CertiGC (Wang, Cao, Mohan & Hobor, OOPSLA'19); and the heap-
+  space-bound separation logic IrisFit (Moine, Charguéraud & Pottier, TOPLAS'25).
+- **OCaml side** — the memory model, *Bounding Data Races in Space and Time* (Dolan, Sivaramakrishnan &
+  Madhavapeddy, PLDI'18); effect handlers, *Retrofitting Effect Handlers onto OCaml* (Sivaramakrishnan,
+  Dolan, White, Kelly, Jaffer & Madhavapeddy, PLDI'21); `runtime_events` (Jaffer & Ferris, OCaml
+  Workshop'22 — a talk, no proceedings).
 
 ---
 
 ## Research questions
 
-### RQ1 — Does OCaml's immutability make low-latency GC unusually effective? *(flagship)*
+### RQ1 — Does OCaml's immutability make read-barrier-free low-latency GC unusually effective? *(flagship)*
 
-**Hook.** LXR's whole bet — and the bet of concurrent collectors generally — is throttled by
-write-barrier / mutation cost. OCaml is immutable-by-default: mutation is rare, so the barrier cost
-that erodes RC/concurrent collection elsewhere is *largely absent*.
+**Hook.** The concurrent-compaction lineage (C4, ZGC, Shenandoah) buys low pauses with a **read
+barrier**, and OCaml's own designers refused that barrier (choosing `ParMinor`) precisely to keep the
+C API and the language's no-read-barrier assumption intact. LXR shows you can get sub-millisecond-class
+latency *without* a read barrier if the **write** barrier stays cheap — and write-barrier cost is
+governed by mutation / store frequency. OCaml is immutable-by-default: in the ICFP'20 authors' own
+words, *"the initialising writes (the only ones) are done without barriers and reads require no
+barriers."* So OCaml is, on paper, the regime LXR's bet assumes — only more so.
 
-**Hypothesis (falsifiable).** OCaml is a near-ideal target for low-pause GC: an RC-Immix/LXR-style
-collector, or a concurrent-marking (SATB) plan, achieves sub-millisecond pauses at a *smaller*
-throughput cost than the literature reports for imperative languages — and the size of that cost
-**correlates with the program's mutation rate**.
+**Hypothesis (falsifiable).** An RC-Immix/LXR-style collector (or a ConcurrentImmix + SATB plan) on
+OCaml achieves sub-millisecond max pauses at a *smaller* throughput cost than the literature reports for
+imperative/Java workloads — and, decisively, **the residual throughput cost rises with the program's
+mutation rate / lifetime dispersion** (Dolan's Gini measure), not with allocation rate. If we instead
+find the cost is dominated by something mutation-independent (allocation rate, tracing volume, root
+scanning), the immutability story is *wrong* and RQ1 fails honestly.
 
-**How to test.** Port LXR's RC (or wire ConcurrentImmix + an SATB barrier) into the binding —
-OCaml's `caml_modify`/`caml_initialize` already have barrier hooks (wired in ROADMAP #3). Measure
-pause-time + throughput vs OCaml's own STW GC, and *regress the gap against mutation rate* across
-modules that vary in `ref`/mutable-array usage. The immutability claim lives or dies on that
-correlation.
+**How to test.** Wire ConcurrentImmix + an SATB write barrier (ROADMAP #15's one high-value unwired
+plan) and/or port LXR's RC barrier into the binding — OCaml's `caml_modify`/`caml_initialize` already
+carry MMTk barrier hooks (ROADMAP Phase 2 #3; the native barrier is live). Measure pause-time +
+throughput vs OCaml's own STW GC (a vanilla 5.5 opam switch) on Sandmark + the compiler, and **regress
+the residual throughput gap against measured mutation rate and lifetime dispersion** across modules /
+benchmarks that span the mutability spectrum (pure-functional ↔ `ref`/`Bytes`/mutable-array heavy). The
+immutability claim lives or dies on that regression slope.
 
-**Why it's research, not tuning.** It's a claim about a *language property* (mutability) predicting a
-*GC design outcome* (low-latency feasibility) — generalisable beyond OCaml. **Venue:** PLDI/ISMM.
-**Risk:** high (needs RC/concurrent plan + barrier), high upside. Serves the charter's
-"reliable/trustworthy" via predictable latency.
+**Related work / what's genuinely new.** LXR established the read-barrier-free low-latency design *on
+Java*; the concurrent compactors established the latency line *with* read barriers. **No one has tested
+the language-property prediction** — that a low-mutation, immutable-by-default language makes this design
+class cheaper — because there was no immutable-by-default language in a multi-collector framework to test
+it on. Dolan'25 gives the covariate to make the test quantitative. That is the new contribution: a
+*language-property → GC-design-outcome* law, not another collector.
 
-### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest risk; precursor to RQ1)*
+**Venue:** PLDI / ISMM. **Risk:** high (needs a concurrent/RC plan + barrier + latency harness), high
+upside. **Novelty: strong** — the *prediction-tested-across-the-mutation-spectrum* framing is new;
+"RC works on OCaml" alone would not be. Serves the charter's reliability/trustworthiness via predictable
+latency.
 
-**The platform.** Finish M9, then ROADMAP #15 wires the rest of MMTk's plans cheaply — giving *one
-language, one runtime, one set of workloads, N collectors* (Immix, GenImmix, StickyImmix, MarkSweep,
-SemiSpace, MarkCompact, Compressor, ConcurrentImmix).
+### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest research risk; precursor to RQ1)*
 
-**Questions.** Which collector fits OCaml's profile — high allocation rate, small short-lived objects,
-a strong generational hypothesis, low mutation — and *why*? How does the answer differ from the
-DaCapo/Java-shaped conventional wisdom, and from the Julia/Ruby findings? Does OCaml's mostly
-domain-local multicore heap change the calculus (per-domain vs shared collection)?
+**The platform.** Finish M9, then ROADMAP #15 wires the rest of MMTk's plans cheaply — *one language,
+one runtime, one set of workloads, N collectors* (Immix, GenImmix, StickyImmix, MarkSweep, SemiSpace,
+GenCopy, MarkCompact, Compressor, ConcurrentImmix). This is *Myths and Realities* / *Distilling the Real
+Cost* methodology applied to a language family those studies never covered.
 
-**Needs.** #8 → #15, plus a benchmark suite (Sandmark + the OCaml compiler itself + the CLBG suite
-already in-repo). **Venue:** ISMM. **Risk:** low — first systematic GC comparison for a functional
-multicore language; produces the data that *motivates and frames* RQ1.
+**Questions.** Which collector fits OCaml's profile — high allocation rate, small short-lived objects, a
+strong generational hypothesis, low mutation — and *why*? How does the answer differ from the DaCapo/Java
+conventional wisdom and from the Julia/CRuby findings? Does OCaml's mostly-domain-local multicore heap
+change the calculus (per-domain vs shared collection, NUMA placement à la NumaGiC)? Crucially, *quantify
+the workload first*: report each benchmark's allocation rate, survival rate, **lifetime dispersion
+(Dolan'25)**, and mutation rate, then show which plan wins where — so the comparison is heap-size-
+normalised (MemBalancer) and explanatory, not a leaderboard.
 
-### RQ3 — Effect handlers / fibers as a GC workload *(novel, narrower)*
+**Related work / new.** The MMTk practitioner reports characterise the *retrofit*, not the
+collector-choice landscape; *Distilling* and *Myths and Realities* characterise Java. The **first
+systematic, mechanism-explained GC comparison for a functional multicore language** is new, and it
+produces the data that *motivates and frames* RQ1.
 
-OCaml 5's effect handlers allocate **fiber stacks** and **first-class continuations** on the heap;
-capture/resume churns many small stack objects. No prior GC study targets this (effects are new and
-near-unique to OCaml). **Questions:** how do continuations/fibers stress collectors; does
-moving/compaction relieve fiber-stack fragmentation; what's the cost of scanning many small stacks
-precisely? **Needs:** effect-heavy benchmarks + the platform. **Venue:** ISMM/OOPSLA.
+**Needs.** #8 → #15, plus a benchmark suite (Sandmark — the OCaml community's own suite — + the compiler
+itself + the in-repo CLBG suite). **Venue:** ISMM. **Risk:** low. **Novelty: solid** as a
+characterization paper; honestly, *medium* in raw novelty (it is "the Blackburn-group methodology on a
+new language"), but the functional / domain-local angle and the lifetime-dispersion framing lift it.
+
+### RQ3 — Effect handlers / fibers as a GC workload *(novel, narrower — but get the mechanism right)*
+
+OCaml 5's effect handlers represent continuations as **real call stacks (fibers)**. **Correction to the
+v1 framing, and it matters for credibility:** per *Retrofitting Effect Handlers onto OCaml* (PLDI'21),
+fiber **stacks are allocated on the C heap (`malloc`/`free`) with a free-list "stack cache," *not* on
+the OCaml GC heap.** Only the small **first-class continuation object is a GC-heap object**, pointing at
+the malloc'd fiber; fibers are **one-shot** (multi-shot would force a stack copy per resume); and because
+OCaml emits no interior stack pointers, **relocating a fiber needs only two `fiber_info` fields fixed.**
+So the GC's job is not "collect millions of heap-resident stacklets" — it is to **scan the roots inside
+many live fiber stacks precisely** and keep the continuation→fiber linkage coherent under a moving
+collector. (`ocaml-mmtk` already had to learn this: a real bug was the binding never scanning
+continuation fiber stacks — see `NOTES.md`.)
+
+**Hypothesis (falsifiable).** Effect-heavy / continuation-churning OCaml programs stress collectors
+through **root-scanning cost over many live fiber stacks**, not through GC-heap pressure; therefore a
+plan's ranking on effect-heavy workloads is predicted by its **root-scan / STW-pause behaviour**, and is
+largely *insensitive* to the moving-vs-non-moving choice (since fibers aren't in the GC heap). If instead
+moving plans clearly win or lose on effect benchmarks, the mechanism differs from this account and we
+report *that*.
+
+**Related work / new.** Farvardin & Reppy (*From Folklore to Fact*, PLDI'20) compare stack/continuation
+*implementations* and their allocator/GC interaction, but **no GC paper takes a continuation-/fiber-heavy
+heap as its workload** — confirmed gap. Effect handlers are new and near-unique to OCaml, so this is a
+genuinely first-of-kind GC characterization. **Venue:** ISMM / OOPSLA. **Risk:** medium. **Novelty:
+genuine but narrow** — the contribution is the measurement + the (possibly negative / surprising)
+mechanism result, so it must be honest about what fibers do and don't put in the collected heap.
 
 ### RQ4 — Practitioner report: retrofitting MMTk onto a *GC-friendly* language *(bank-it / experience; near-term)*
 
-The Julia and CRuby reports established the format; OCaml is the **contrast**. Where those runtimes
-fought conservative roots, non-moving assumptions, and undefined FFI GC-safe regions, OCaml was
-*designed* with precise rooting, no-naked-pointers (moving-friendly), and explicit safepoints — so it
-tests the converse of the Julia thesis: **what does a GC-friendly language design buy you when
-retrofitting a third-party GC?**
+The Julia and CRuby reports established the format; OCaml is the **contrast**. Where those runtimes fought
+non-moving assumptions, conservative/ambiguous roots, and undefined GC-safe regions, OCaml was *designed*
+(ICFP'20) with precise rooting, no naked pointers, and explicit safepoints. So this report tests the
+converse of the Julia/CRuby experience: **what does a GC-friendly language design actually buy you when
+retrofitting a third-party general-purpose GC — and where does it still bite?**
 
-Concrete findings already in hand to report:
-- **Precise rooting reuse** — `caml_do_roots`/`caml_scan_stack` fed straight into MMTk's root factory.
-- **No-naked-pointers ⇒ moving for free** — Immix/compaction worked without the Julia-style non-moving
-  retrofit.
+Concrete findings already in hand:
+- **Precise rooting reuse** — `caml_do_roots`/`caml_scan_stack` fed straight into MMTk's root factory;
+  no VO-bit conservative-pinning machinery (the centrepiece of *both* the Julia and CRuby reports) was
+  needed.
+- **No naked pointers ⇒ moving for free** — Immix/compaction worked without the Julia-style non-moving
+  retrofit; relocation of ordinary blocks, closures, infix/interior pointers, and fiber linkages all
+  worked once interior-pointer offsets were tracked in the slot.
 - **TLAB nursery-aliasing** — aliasing OCaml's inlined bump-pointer minor allocator onto an MMTk Immix
-  block (the technique that made *native* code work).
-- **The GC-safe-region impedance, concretely.** bug #3 (the MMTk stop-the-world barrier silently
-  becoming a no-op because the blocking-section safe-stopped counter underflowed) is a precise,
-  generalisable instance of exactly the "when can the GC safely run during native/foreign execution"
-  problem the Julia report flags — here as a *coordination* bug between two STW mechanisms. bug #4
-  (a gc_regs bucket leaked when an OOM raise unwound through the GC entry) is a second one.
+  block; the technique that made *native* code work with no codegen change.
+- **The GC-safe-region impedance, concretely — the converse-but-not-zero finding.** Even a
+  safepoint-designed runtime still has interface hazards. **Bug #3**: MMTk's stop-the-world barrier
+  silently became a no-op because OCaml's blocking-section "safe-stopped" counter *underflowed* (a
+  `usize` wrap), so the GC scanned domains that had not actually stopped — tracing their live, mutating
+  stacks. This is exactly the "when can the GC safely run during foreign/native execution" problem the
+  Julia report flags, here as a precise *coordination* bug between two safepoint protocols. **Bug #4**: a
+  `gc_regs` register-save bucket leaked when an `Out_of_memory` raise unwound *through* the GC entry path
+  (RESTORE_ALL_REGS never ran), faulting the next collection. **Bug #2**: native unmarshalling allocated
+  objects *outside* MMTk spaces (the MMTk alloc path was `#ifndef NATIVE_CODE`), so they went untraced and
+  their referents were collected — the classic "every allocation path must reach the GC" lesson. All three
+  are generalisable GC-runtime-interface findings, root-caused under `rr`.
+
+**Honest framing.** The headline is not "OCaml was easy." It is **"a GC-friendly design eliminates the
+*root/motion* impedance the Julia/CRuby reports spent most of their effort on, but the *coordination*
+impedance (safepoints, GC-safe regions, every-alloc-path-traced) persists and bit us three times."** That
+is a more interesting and more honest contribution than "it just worked."
 
 **Needs:** ~nothing new — write up the bring-up + the bugs-as-findings. **Venue:** ISMM Practitioner
-Report. **Risk:** lowest; establishes the platform's credibility and the ISMM relationship.
+Report. **Risk:** lowest; establishes credibility and the ISMM relationship. **Novelty: as an experience
+report, appropriate** — the value is the *contrast* with two existing reports, not a new technique.
 
 ### RQ5 — Adjacent / optional
 
-- **(a) Methodology** — heap-size-normalised, "real cost"–style cross-collector (and cross-runtime, cf.
-  ICSE'25) comparison done right on a functional language.
-- **(b) Mathematical guardrails (POPL/CPP angle, on-charter)** — a **mechanised specification + proof of
-  the MMTk↔OCaml safepoint / GC-safe-region protocol** — the very invariant bug #3 violated. "Trustworthy
-  software with mathematical guardrails" applied to the GC-runtime interface.
-- **(c) AI-driven systems research (charter's AI-agents focus)** — this binding, and its subtle GC bugs
-  (bug #3 STW underflow; bug #4 gc_regs, root-caused under `rr`), were largely AI-agent-driven. A data
-  point on whether agents can do real systems/GC research, with honest failure modes (e.g. the
-  stale-binary instrumentation that produced a *wrong* root cause before `rr` corrected it).
+- **(a) Methodology.** Heap-size-normalised (MemBalancer), lower-bound-overhead (*Distilling*),
+  cross-runtime (GEAR, ICSE'25) comparison done right on a functional language — largely subsumed by RQ2,
+  worth keeping only if a distinct methodological contribution emerges (e.g. lifetime dispersion as a
+  *cross-language* normaliser).
+- **(b) Mathematical guardrails — mechanised spec of the safepoint / GC-safe-region protocol (POPL / CPP /
+  ITP; on-charter).** There is already a mechanically verified *collector* for OCaml (Shamsu et al., JAR'25,
+  F\*/Low\*) — but it verifies the **collector algorithm in isolation, not the mutator↔collector
+  coordination protocol**. And the broader literature confirms a gap: no published work takes a
+  **safepoint / GC-safe-region / STW-handshake protocol as its primary verified artifact** (it appears only
+  as a sub-component of full concurrent-collector proofs — Gammie et al.'15, McCreight et al.'07). Bug #3
+  was a *violation of exactly this invariant*. A mechanised model + proof of the MMTk↔OCaml safepoint /
+  GC-safe-region protocol — the contract that "no domain is scanned until it has actually stopped, and no
+  GC runs while a domain holds raw heap pointers in a blocking section" — would be a clean, on-charter
+  "trustworthy software with mathematical guardrails" result, anchored to a real bug. **Novelty: strong**
+  (the gap is real and confirmed); **risk: high** (verification effort; needs the right abstraction of the
+  protocol). **Venue:** CPP / ITP / POPL.
+- **(c) GC observability for a multi-collector functional runtime.** GC telemetry is a thin academic area
+  (essentially GCspy'02 and the MMTk-based Huang et al., MPLR'23). OCaml already ships `runtime_events`
+  (zero-overhead per-domain ring buffers). Combining MMTk's tracing hooks with `runtime_events` to give
+  *plan-agnostic, low-overhead* GC observability across the swappable plans — and using it to *explain*
+  the RQ2 results — is a plausible MPLR-scale contribution. **Novelty: medium; risk: low.**
+- **(d) AI-driven systems research (charter's AI-agents focus).** This binding, and its subtle GC bugs
+  (bug #3 STW underflow; bug #4 `gc_regs`; bug #2 off-heap intern — all root-caused under `rr`), were
+  largely AI-agent-driven. A candid data point on whether agents can do real systems / GC research, *with
+  the failure modes named*: e.g. the stale-binary instrumentation pass that produced a confidently *wrong*
+  root cause for bug #4 before `rr` corrected it (recorded in `NOTES.md`). Honest about both the wins and
+  the "confirmed mechanism beats guessed mechanism" lesson. **Novelty: meta / experience; venue:** a
+  workshop or an experience track.
 
 ---
 
@@ -148,42 +326,128 @@ Report. **Risk:** lowest; establishes the platform's credibility and the ISMM re
 
 - **Common prerequisite:** finish M9 (ROADMAP #8 — retire the always-false `Is_young` reservation +
   header/metadata reconciliation) so plan-swapping is clean. Then **#15 wires the non-Immix plans
-  cheaply** — exactly the "do it immediately after vanilla removal" step.
-- **RQ1:** + ConcurrentImmix and/or an LXR-style RC plan + the SATB/RC write barrier + a latency
-  harness. *(This is the real research engineering.)*
-- **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), and effect
-  microbenchmarks for RQ3.
+  cheaply** — the "do it immediately after vanilla removal" step. Per the ROADMAP's own triage,
+  `SemiSpace`/`PageProtect` are cheap, `MarkCompact`/`Compressor` medium, `GenCopy` ≈ GenImmix, and
+  **`ConcurrentImmix` (a SATB write barrier) is the one high-effort, high-value plan** — and it is RQ1's
+  enabler.
+- **RQ1:** + ConcurrentImmix and/or an LXR-style RC plan + the SATB/RC write barrier + a latency harness +
+  a mutation-rate / lifetime-dispersion instrument. *(This is the real research engineering.)*
+- **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
+  RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler.
 - **RQ4:** essentially the write-up; nothing new to build.
+- **RQ5(b):** an extracted, abstractable model of the safepoint / blocking-section protocol (the bug-#3
+  site) in a proof assistant — not platform engineering, but it depends on pinning the protocol down
+  precisely.
+- **RQ5(c):** wire MMTk's tracing hooks to `runtime_events`.
 
 ## Suggested sequencing
 
-1. **RQ4 (practitioner report)** — bank the existing bring-up + bugs-as-findings. Lowest risk,
-   near-term, and it opens the door at ISMM. Needs no new engineering.
-2. **RQ2 (characterization)** — finish #8, wire #15, build the benchmark harness, run the comparison.
-   Produces the data that motivates RQ1 and is a paper in its own right.
-3. **RQ1 (flagship)** — the immutability ⇒ low-latency hypothesis. The high-upside PLDI/ISMM claim;
-   start the RC/concurrent plan engineering once RQ2 has framed the question.
-4. **RQ3 / RQ5** — opportunistic, as the platform and interest allow.
+1. **RQ4 (practitioner report)** — bank the existing bring-up + bugs-as-findings, framed as the *contrast*
+   with Julia/CRuby. Lowest risk, near-term, opens the ISMM door. No new engineering.
+2. **RQ2 (characterization)** — finish #8, wire #15, build the benchmark + profiling harness, run the
+   comparison. Produces the data that motivates RQ1 and is a paper in its own right.
+3. **RQ1 (flagship)** — the immutability ⇒ read-barrier-free-low-latency hypothesis, tested across the
+   mutation spectrum. The high-upside PLDI/ISMM claim; start the RC / ConcurrentImmix engineering once
+   RQ2 has framed the question.
+4. **RQ3 / RQ5** — opportunistic, as the platform and interest allow; RQ5(b) is the standout long-game
+   (real, confirmed gap; on-charter).
 
-The point of identifying the question first: it tells us the *minimum* platform to build (for RQ4,
-almost nothing; for RQ2, #8 → #15 + benchmarks; for RQ1, a new collector) — so we don't grind the
-whole correctness/perf tail to 100% before we know which 20% the research actually needs.
+The point of identifying the question first: it tells us the *minimum* platform to build (for RQ4, almost
+nothing; for RQ2, #8 → #15 + benchmarks; for RQ1, a new collector) — so we don't grind the whole
+correctness/perf tail to 100% before we know which 20% the research actually needs.
 
 ---
 
 ## Sources / key reading
 
-- LXR — Zhao, Blackburn, McKinley, *Low-Latency, High-Throughput Garbage Collection*, PLDI'22:
-  https://www.steveblackburn.org/pubs/papers/lxr-pldi-2022.pdf
-- *Reconsidering Garbage Collection in Julia: A Practitioner Report*, ISMM'25:
-  https://www.steveblackburn.org/pubs/papers/julia-ismm-2025.pdf
-- *Reworking Memory Management in CRuby: A Practitioner Report*, ISMM'25 (Wang, Blackburn, Zhu,
-  Valentine-House).
-- *Work Packets: A New Abstraction for GC Software Engineering...*, PACMPL/OOPSLA'25:
-  https://dl.acm.org/doi/10.1145/3763139
-- *Nofl: A Precise Immix*, 2025: https://arxiv.org/pdf/2503.16971
-- Steve Blackburn — publications: https://www.steveblackburn.org/ ; dblp:
-  https://dblp.org/pid/b/StephenMBlackburn.html
-- ISMM: https://www.sigplan.org/Conferences/ISMM/
-- Background: Immix (PLDI'08); *Oil and Water?* (ICSE'04); *Rust as a language for high-performance GC*
-  (ISMM'16); *Myths and Realities* (SIGMETRICS'04); MemBalancer (ISMM'19).
+*Citations verified against source PDFs / dblp. Author order and venue checked.*
+
+**The baseline**
+- Sivaramakrishnan, Dolan, White, Jaffer, Kelly, Sahoo, Parimala, Dhiman & Madhavapeddy,
+  *Retrofitting Parallelism onto OCaml*, PACMPL 4(ICFP), Art. 113, 2020. DOI 10.1145/3408995.
+  PDF: https://kcsrk.info/papers/retro-parallel_icfp_20.pdf · arXiv:2004.11663
+- Dolan, Sivaramakrishnan & Madhavapeddy, *Bounding Data Races in Space and Time*, PLDI'18.
+  DOI 10.1145/3192366.3192421.
+- Sivaramakrishnan, Dolan, White, Kelly, Jaffer & Madhavapeddy, *Retrofitting Effect Handlers onto
+  OCaml*, PLDI'21. DOI 10.1145/3453483.3454039. arXiv:2104.00250.
+
+**MMTk framework + practitioner reports**
+- Blackburn, Cheng & McKinley, *Oil and Water? High Performance GC in Java with MMTk*, ICSE'04.
+  DOI 10.1109/ICSE.2004.1317436.
+- Lin, Blackburn, Hosking & Norrish, *Rust as a language for high-performance GC implementation*,
+  ISMM'16. DOI 10.1145/2926697.2926707.
+- de Souza Amorim, Lin, Blackburn, Netto, Baraldi, Daly, Hosking, Pamnany & Smith, *Reconsidering
+  Garbage Collection in Julia: A Practitioner Report*, ISMM'25. DOI 10.1145/3735950.3735957.
+  PDF: https://www.steveblackburn.org/pubs/papers/julia-ismm-2025.pdf
+- Wang, Blackburn, Zhu & Valentine-House, *Reworking Memory Management in CRuby: A Practitioner Report*,
+  ISMM'25. DOI 10.1145/3735950.3735960. PDF: https://www.steveblackburn.org/pubs/papers/ruby-ismm-2025.pdf
+
+**Collectors**
+- Blackburn & McKinley, *Immix: A Mark-Region GC...*, PLDI'08. DOI 10.1145/1375581.1375586.
+- Zhao, Blackburn & McKinley, *Low-Latency, High-Throughput Garbage Collection* (LXR), PLDI'22.
+  DOI 10.1145/3519939.3523440. PDF: https://www.steveblackburn.org/pubs/papers/lxr-pldi-2022.pdf ·
+  extended arXiv:2210.17175.
+- Zhao, Blackburn & McKinley, *Work Packets...*, PACMPL 9(OOPSLA2), Art. 361, 2025. DOI 10.1145/3763139.
+- Wingo, *Nofl: A Precise Immix*, arXiv:2503.16971, 2025 (preprint).
+- Tene, Iyengar & Wolf, *C4: The Continuously Concurrent Compacting Collector*, ISMM'11.
+  DOI 10.1145/1993478.1993491. · Click, Tene & Wolf, *The Pauseless GC Algorithm*, VEE'05.
+  DOI 10.1145/1064979.1064988.
+- Flood, Kennke, Dinn, Haley & Westrelin, *Shenandoah...*, PPPJ'16. DOI 10.1145/2972206.2972210.
+- ZGC: OpenJDK JEP 333 (JDK 11), JEP 377 (JDK 15), JEP 439 generational (JDK 21).
+- Yuasa, *Real-time garbage collection on general-purpose machines*, J. Systems and Software 11(3), 1990.
+  DOI 10.1016/0164-1212(90)90084-Y (SATB origin). · Dijkstra, Lamport, Martin, Scholten & Steffens,
+  *On-the-fly garbage collection...*, CACM 21(11), 1978. DOI 10.1145/359642.359655.
+
+**NUMA / mobile / generational measure**
+- Gidra, Thomas, Sopena, Shapiro & Nguyen, *NumaGiC...*, ASPLOS'15. DOI 10.1145/2694344.2694361. ·
+  Gidra, Thomas, Sopena & Shapiro, *A study of the scalability of STW GCs on multicores*, ASPLOS'13.
+  DOI 10.1145/2451116.2451142.
+- Sareen, Blackburn, Hamouda & Gidra, *Memory Management on Mobile Devices*, ISMM'24.
+  DOI 10.1145/3652024.3665510.
+- Dolan, *Lifetime Dispersion and Generational GC: An Intellectual Abstract*, ISMM'25.
+  DOI 10.1145/3735950.3735958.
+- Lieberman & Hewitt, *A Real-Time GC Based on the Lifetimes of Objects*, CACM 26(6), 1983.
+  DOI 10.1145/358141.358147. · Ungar, *Generation Scavenging...*, SDE 1, 1984. DOI 10.1145/800020.808261.
+  · Appel, *Garbage Collection Can Be Faster Than Stack Allocation*, IPL 25(4), 1987.
+
+**Functional-language GC**
+- Marlow & Peyton Jones, *Multicore garbage collection with local heaps*, ISMM'11.
+  DOI 10.1145/1993478.1993482. · Marlow, Harris, James & Peyton Jones, *Parallel generational-copying GC
+  with a block-structured heap*, ISMM'08. DOI 10.1145/1375634.1375637.
+- Sagonas & Wilhelmsson, *Efficient memory management for concurrent programs that use message passing*,
+  Sci. Comput. Program. 62(2), 2006. DOI 10.1016/j.scico.2006.02.006 (Erlang per-process heaps).
+- Farvardin & Reppy, *From Folklore to Fact: Comparing Implementations of Stacks and Continuations*,
+  PLDI'20. DOI 10.1145/3385412.3385994.
+
+**Methodology / heap sizing / observability**
+- Blackburn, Cheng & McKinley, *Myths and Realities: The Performance Impact of GC*, SIGMETRICS'04.
+  DOI 10.1145/1005686.1005693.
+- Cai, Blackburn, Bond & Maas, *Distilling the Real Cost of Production Garbage Collectors*, ISPASS'22.
+  DOI 10.1109/ISPASS55109.2022.00005. arXiv:2112.07880.
+- Wang, Dou, Liang, Wang, Wang, Wei & Huang, *Evaluating GC Performance Across Managed Language Runtimes*
+  (GEAR), ICSE'25. DOI 10.1109/ICSE55347.2025.00218.
+- Kirisame, Shenoy & Panchekha, *Optimal Heap Limits for Reducing Browser Memory Use* (MemBalancer),
+  PACMPL 6(OOPSLA2), Art. 160, 2022. DOI 10.1145/3563323. arXiv:2204.10455.
+- Huang, Blackburn & Cai, *Improving Garbage Collection Observability with Performance Tracing*, MPLR'23.
+  DOI 10.1145/3617651.3622986. · Printezis & Jones, *GCspy: An Adaptable Heap Visualisation Framework*,
+  OOPSLA'02. DOI 10.1145/582419.582451.
+
+**Formal / mechanised GC**
+- Shamsu, Kafle, Maroo, Nagar, Bhargavan & Sivaramakrishnan, *A Mechanically Verified Garbage Collector
+  for OCaml*, JAR 69(2), Art. 11, 2025. DOI 10.1007/s10817-025-09721-0 (collector verified, **not** the
+  coordination protocol).
+- McCreight, Shao, Lin & Li, *A General Framework for Certifying GCs and Their Mutators*, PLDI'07.
+  DOI 10.1145/1250734.1250788. · Gammie, Hosking & Engelhardt, *Relaxing Safely: Verified On-the-Fly GC
+  for x86-TSO*, PLDI'15. DOI 10.1145/2737924.2738006. · Zakowski, Cachera, Demange, Petri, Pichardie,
+  Jagannathan & Vitek, *Verifying a Concurrent GC Using a Rely-Guarantee Methodology*, ITP'17.
+  DOI 10.1007/978-3-319-66107-0_31.
+- Sandberg Ericsson, Myreen & Åman Pohjola, *A Verified Generational GC for CakeML*, ITP'17.
+  DOI 10.1007/978-3-319-66107-0_28. · Wang, Cao, Mohan & Hobor, *Certifying Graph-Manipulating C Programs
+  via Localizations within Data Structures* (CertiGC), PACMPL 3(OOPSLA), Art. 171, 2019. DOI 10.1145/3360597.
+- Moine, Charguéraud & Pottier, *Will It Fit? Verifying Heap Space Bounds... under Garbage Collection*
+  (IrisFit), ACM TOPLAS 47(1), Art. 3, 2025. DOI 10.1145/3716312.
+
+**Platform**
+- ROADMAP.md (milestones, plan-wiring #15, the bugs as findings) · gc/mmtk/NOTES.md (dated root-cause
+  notes, `rr` traces) · Sandmark: https://github.com/ocaml-bench/sandmark
+- Steve Blackburn — publications: https://www.steveblackburn.org/ · ISMM: https://www.sigplan.org/Conferences/ISMM/
