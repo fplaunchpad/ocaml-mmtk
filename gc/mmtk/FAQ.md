@@ -124,3 +124,31 @@ linear-scan the space. The native fast path bump-fills objects gaplessly into ra
 heap (confirmed empirically: first compaction panics *"does not have a forwarding pointer"*). MarkSweep
 (free-list, no bump region) is native-infeasible for the related reason. Both stay **bytecode-only**;
 SemiSpace/NoGC/GenImmix/GenCopy/StickyImmix/Immix run native.
+
+---
+
+## Q6. Which GC plans break OCaml's C-API "no read barrier" assumption? — **SETTLED (none of the current plans; it gates future concurrent compactors)**
+
+**The constraint.** OCaml's C API lets C code read OCaml values *raw* (`Field(v,i)`, `Bytes_val`, …) with no
+read/load barrier, and the runtime depends on it. *Retrofitting Parallelism onto OCaml* (ICFP'20) chose the
+STW `ParMinor` over the concurrent `ConcMinor` **specifically to avoid a read barrier** — adding one would
+force every C-API user to change their code, violating their R1 feature-compatibility requirement. So a plan
+that **moves objects concurrently with the mutator** and uses a read barrier to forward reads would silently
+break every C stub that reads a field raw (stale / from-space data).
+
+**Which plans does it affect? None of mmtk-core 0.32's.** Every available plan moves objects *only at STW*:
+Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/MarkCompact/Compressor defrag/copy/compact at a stop-the-world
+pause; **ConcurrentImmix marks concurrently but moves only at its STW Full pause** (Q3 / RQ1
+force-vs-relocate). At STW, pointers are fixed up once and every mutator — including a domain running C — is
+stopped at a safepoint (and a domain in a *non-blocking* C section keeps the world from stopping until it
+yields; the bug-#3 RUNNING-set protocol). So C never observes a move mid-read, and mmtk-core 0.32 carries
+only *write*-side barriers (None / ObjectBarrier / SATBBarrier) — **no plan uses a read barrier.** The whole
+current menu is C-API-safe on this axis.
+
+**What WOULD break it:** a *concurrent-compacting / on-the-fly copying* collector (the ZGC / C4 / Shenandoah
+load-barrier family, or a future concurrent-*evacuating* Immix). 0.32 ships none. Note **LXR is deliberately
+read-barrier-free** (write barrier + RC), so an LXR-style plan would *stay* C-API-compatible — which is
+exactly why it's RQ1's vehicle. Supporting a true read-barrier plan would require **evolving the C API**:
+either a read barrier in the accessor macros (breaks all existing stubs) or object **pinning** across FFI
+calls (the VO-bit machinery the Julia/CRuby reports needed and OCaml has so far avoided — RQ4). Whether
+that's worth doing is `RESEARCH_QUESTIONS.md` RQ6.

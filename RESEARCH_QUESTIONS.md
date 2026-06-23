@@ -380,6 +380,34 @@ report, appropriate** — the value is the *contrast* with two existing reports,
 
 ---
 
+### RQ6 — Is a read-barrier concurrent compactor worth evolving OCaml's C API for? *(inverts RQ1; a language-design × GC-design tradeoff)*
+
+OCaml deliberately stayed **read-barrier-free**: ICFP'20 chose `ParMinor` over `ConcMinor` to keep the C
+API's raw-read assumption intact (R1) — C stubs read OCaml values directly (`Field`, `Bytes_val`, …) with no
+load barrier. RQ1 asks whether that constraint is *cheap* — whether the read-barrier-free low-latency designs
+(ConcurrentImmix/SATB, LXR-style RC) are unusually effective on OCaml's immutable heap. **RQ6 asks the
+converse: what does the constraint COST?** Is a read-barrier *concurrent compactor* (ZGC / C4 / Shenandoah-style
+on-the-fly evacuation) enough better — on max pause, fragmentation, locality, tail latency — to justify
+**evolving OCaml's C API** to tolerate it (a read barrier in the accessors, or object pinning across FFI calls
+— the VO-bit machinery of RQ4)?
+
+**Why it's real, and decision-relevant.** Every current plan is C-API-safe precisely because it moves only at
+STW (FAQ Q6), which bounds pause time by the STW evacuation. A concurrent compactor removes that bound — the
+headline win of the ZGC/C4 line — but at the price OCaml refused. Measuring the delta between the best
+read-barrier-free plan (RQ1) and a read-barrier concurrent compactor, on OCaml workloads, answers whether the
+ICFP'20 R1 choice leaves latency on the table: if the read-barrier-free plans already hit the target, the C
+API stays as-is; if the concurrent compactor decisively wins, that is a concrete, measured argument (and a
+roadmap) for evolving the FFI. It is the natural sequel to RQ1 (the read-barrier-free hypothesis) and RQ4
+(the FFI/pinning impedance the practitioner reports hit), now in the concurrent-*moving* regime.
+
+**Related / new.** The concurrent-compaction lineage measured the read-barrier cost *on Java*; nobody has
+measured what a language that *deliberately avoided* the read barrier (for its C API) gives up by doing so —
+or what evolving the API would buy. **Needs:** a read-barrier concurrent-moving plan in MMTk (not in 0.32 —
+future / port) + a pinning-or-read-barrier C-API prototype. **Venue:** PLDI / ISMM. **Risk:** high (needs the
+plan + an API change). **Novelty: strong.**
+
+---
+
 ## What each question needs from the platform
 
 - **Common prerequisite:** finish M9 (ROADMAP #8 — retire the always-false `Is_young` reservation +
