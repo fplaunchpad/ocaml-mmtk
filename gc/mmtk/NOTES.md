@@ -5,6 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #31 / GH#3 FIXED — `Domain.join` use-after-free on the un-promoted domain result (all moving plans, not "native-generational")
+
+*2026-06-23*
+
+The intermittent SIGSEGV (rc=139, originally ~2/6, up to ~100% under an 8-domain stressor) was **mis-titled
+"native-generational"** — it is a general **moving-plan `Domain.join` use-after-free**, on Immix / StickyImmix
+/ GenImmix, **multi-domain only** (a single-domain control with the identical alloc/continuation pattern never
+crashes — the discriminator that ruled out the gc_regs / generational-remembered-set hypotheses). The
+continuations were only GC pressure, not the corrupted root.
+
+**Root cause.** `sync_and_terminate` → `make_finished` allocates the domain's `Finished(Ok v)` result on the
+**terminating domain's young TLAB**, then `sync_result` publishes it into `term_sync->state` and wakes the
+joiner. Stock OCaml's terminate minor-GC (`caml_empty_minor_heap_promote`) oldified young survivors; under
+always-on MMTk that routine is **neutered to a bare `young_ptr = young_start` discard — it does not promote**.
+So the result stays *young* while published to the joiner; the domain then deregisters/tears down; a GC on a
+third domain relocates/reclaims that young block, and the joiner dereferences a corrupted `Finished` chain →
+SIGSEGV in `Domain.join`. Confirmed by core dump: `#0 Domain.join … movzbq -8(%rax)`, `%rax = 0x29 =
+Val_int(20)` (a pointer field overwritten with a stray int).
+
+**Fix** (`runtime/domain.c`, +28/-1, commit `1d2504ab4f`): root the result with `CAMLlocal1` and call
+`caml_mmtk_collect()` after `make_finished` and **before** `sync_result` publishes it — tracing it into stable
+space (promote for generational plans; mark its block live for Immix) while the domain is still a registered,
+running STW participant. Self-gated (no-op for NoGC).
+
+**Validated** (16 MB worst band, 8-domain `cont_stress3` stressor): StickyImmix control 14/15 crash → fix
+**0/15 and 0/40**; GenImmix **0/12**; Immix **0/12**; correct checksum; loose heap 5/5. Regression: 7 effects
+tests + `parallel/domain_dls` + `parallel/join` clean. No functional regression.
+
+**rr was unusable** here — default `rr record` serializes and hides the cooperative race (9+ min, no crash);
+`rr record --chaos` aborts (chaos randomizes layout, trips MMTk's meta-memory mmap). The race reproduces on a
+**single physical core** under normal OS preemption, so it's a *logical* scheduling race — diagnosed via a
+**core dump** (`~/i31_traces/core.domain_join_crash`) instead of reverse-debugging.
+
+**Perf follow-up (flagged):** the fix forces a full MMTk collection per domain-terminate — correct and
+acceptable (terminate is rare; stock OCaml also did real GC work there), but a lighter mechanism (promote just
+the result, or retain the terminating domain's last block until traced) is worthwhile for join-heavy code.
+
+---
+
 ## Native ConcurrentImmix — VALIDATED; both expected gaps were already closed; one real atomics bug fixed
 
 *2026-06-23*
