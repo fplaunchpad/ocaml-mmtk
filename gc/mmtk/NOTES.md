@@ -60,45 +60,60 @@ closes much of the gap, and more heap headroom helps.
 
 ---
 
-## bug #3b: multidomain spawn/STW deadlock — root cause + an MMTk-native STW rearchitecture (in progress)
+## bug #3b: multidomain spawn/STW deadlock — FIXED via an MMTk-native per-mutator STW
 
 *2026-06-23*
 
-**Status: root-caused; the fix is in progress (a rearchitecture, not a point patch).** bug #3b is
-the residual after bug #3 (the blocking-section counter underflow — fixed): a rare wild-pointer
-`cannot trace` and, more importantly, a ~20–35% **hang** in the `parallel/domain_*_spawn_burn*`
-tests (and the CI debug-matrix `tests/parallel` exit -9 timeouts).
+**Status: FIXED.** bug #3b was the residual after bug #3 (the blocking-section counter underflow):
+a ~20–35% **hang** in `parallel/domain_*_spawn_burn*` + `domain_dls` (and the CI debug-matrix exit
+-9 timeouts).
 
-**Root cause — the binding's hand-rolled global stop-counter STW is the wrong shape.**
-`stop_all_mutators` (binding `collection.rs`) waits on a single global `stopped` counter to reach
-`number_of_mutators()`. bug #3 fixed the *balance* of the `+1`/`-1` on that counter across
-blocking sections, but the counter design itself can't represent all the states a mutator passes
-through. The deadlock: a parent domain wedged in `caml_domain_spawn`'s handshake wait is a
-**registered mutator that is neither at a safepoint nor safe-stopped** — it is busy in OCaml's own
-domain-spawn/STW handshake, not polling MMTk's stop flag and not counted as stopped — so MMTk's
-stop barrier never reaches `number_of_mutators()` and never completes. OCaml's STW and MMTk's STW
-deadlock against each other (OCaml waits for the spawning domain to finish the handshake; MMTk
-waits for it to stop). Confirmed by rr on a captured hang: wedged in the OCaml spawn handshake,
-no `caml_mmtk_*` frame on the GC path.
+**Root cause — the binding's hand-rolled global stop-counter STW was the wrong shape.**
+`stop_all_mutators` (binding `collection.rs`) waited on a single global `stopped` counter to reach
+`number_of_mutators()`. bug #3 fixed the *balance* of the `+1`/`-1` across blocking sections, but the
+counter design itself can't represent all the states a mutator passes through. The deadlock: a parent
+domain wedged in `caml_domain_spawn`'s handshake wait is a **registered mutator that is neither at a
+safepoint nor safe-stopped** — busy in OCaml's own spawn/STW handshake, not polling MMTk's stop flag,
+not counted as stopped — so MMTk's barrier never reached `number_of_mutators()`. OCaml's STW and
+MMTk's STW deadlocked (rr on a captured hang: wedged in the OCaml spawn handshake, no `caml_mmtk_*`
+frame on the GC path).
 
-**Direction (in progress): make the STW MMTk-native — per-mutator stop state tied to the mutator
-lifecycle.** Replace the single global counter with per-mutator stop/run state carried by each
-registered mutator, so the barrier reasons over the *set* of mutators and their individual states
-rather than a shared scalar. Every window that today desynchronises the counter — blocking
-sections, the spawn handshake, domain terminate/teardown — becomes an explicit per-mutator state
-transition that the barrier observes directly, so none of them can leave the global count wrong or
-strand a domain that is "registered but not stoppable." This dissolves the OCaml-STW-vs-MMTk-STW
-deadlock by construction instead of patching each window.
+**Fix — MMTk-native per-mutator stop state.** Replaced the global `stopped` counter with a per-mutator
+**RUNNING set** (a `HashSet` of `caml_domain_state` addresses currently executing OCaml, in the
+binding's lock-guarded `StwState`). `stop_all_mutators` now waits for `running.is_empty()`. A domain
+is born **STOPPED** at `bind_mutator` and is RUNNING only between "(re)entered OCaml" and "left OCaml
+/ parked / blocking / terminating." Idempotent set semantics make the bug #3 underflow **structurally
+impossible**; a transitioning domain (booting/terminating/blocked) is simply **absent** from the
+awaited set (bug #3b). Four coordinated pieces:
+1. **Running-set accounting** (`collection.rs` / `active_plan.rs`) — the barrier predicate.
+2. **Cooperative RUNNING transition** (`caml_mmtk_become_running` → `mmtk_ocaml_try_mark_running`): a
+   STOPPED→RUNNING edge marks RUNNING iff no GC is active, else the domain **parks cooperatively**
+   (releasing its domain lock so the backup thread answers OCaml's own STW) and retries — which also
+   fixed a **second deadlock** (MMTk-STW vs OCaml's minor-heap STW `caml_empty_minor_heaps_once`: a
+   domain never spins on GC-active while holding its domain lock). `park` waits on `gc_active` (written
+   under the STW lock), not an epoch → no lost wakeup.
+3. **Terminate fence:** deregister (remove from registry + running set) **then** wait out any in-flight
+   collection before teardown — replaces `caml_mmtk_park_terminating` and fixed a **bug #3 `cannot
+   trace` corruption** surfaced when the terminate park was first removed.
+4. **Spawn handshake:** the parent's idle wait is bracketed STOPPED; the child becomes RUNNING only
+   when it starts executing OCaml.
+**Removed:** the global `stopped` counter, the `>= number_of_mutators()` barrier,
+`caml_mmtk_park_terminating`, and the underflow class. Touches
+`gc/mmtk/binding/src/{collection,active_plan}.rs`, `gc/mmtk/include/mmtk_ocaml.h`,
+`runtime/{mmtk.c,domain.c,caml/mmtk.h}`.
 
-**Cheap interim stopgap (not the real fix):** bracket the `caml_domain_spawn` handshake wait in
-`caml_enter/leave_blocking_section` so the spawning domain counts as safe-stopped for the duration
-— makes that one window safe under the current counter, but leaves the counter design (and its
-fragility across the other windows) in place. Prefer the rearchitecture.
+**Verified:** native `domain_dls` 14/30 hang → **30/30** (agent), 25/25 (independent forced-clean
+re-run), 0/12 (integrated mainline); burn 26/30 → 30/30; bytecode dls/stress 30/30; MMTk `sanity`
+(48 MB, multidomain, Immix+StickyImmix) no panic; **0 crashes** across all sweeps; checksums identical
+(1919992825); gc-roots 4/4; clean `world.opt`.
 
-The wild-pointer `cannot trace` residual (~1/30, a stale-root-slot race in freed fiber stack /
-reused `gc_regs` / terminating-domain teardown) is expected to be largely subsumed by the same
-rework (a mutator mid-teardown becomes an explicit state the barrier won't scan); confirm with a
-fresh rr capture targeting a wild-pointer (not immediate) crash once the rework lands.
+**Residual → bug #3c (separate, pre-existing).** A rare hang (~2/30 *bytecode* burn; ~0–1/20 native
+burn; dls/stress 30/30) persists **only** in the `burn` pattern (3 driver domains hammering
+`Gc.minor`/`Gc.major` + 25-way spawn bursts) — a different race: a GC during the tight `Gc.minor`
+OCaml-minor-STW loop and/or during `caml_mmtk_refill_tlab` at domain init (child holds
+`all_domains_lock`, no backup thread). Fix sketch: route `Gc.minor` to MMTk (don't run OCaml's own
+minor STW) and/or suppress collection (`is_collection_enabled`) around the init-time TLAB refill. The
+earlier wild-pointer `cannot trace` residual was not observed in any post-fix sweep (0 crashes).
 
 ---
 

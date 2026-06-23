@@ -63,7 +63,11 @@ extern value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag);
  * at the safepoint. caml_mmtk_interrupt / _uninterrupt poison / reset a domain's
  * young_limit; they are called by the GC worker (via the binding). */
 extern void caml_mmtk_stw_poll(void);
-extern void caml_mmtk_park(void);
+extern void caml_mmtk_park(uintnat domain_state_addr);
+/* Transition a domain to the RUNNING (must-stop) state, parking cooperatively if
+ * a collection is active (so the backup thread services OCaml STW meanwhile).
+ * Used on every STOPPED->RUNNING edge. */
+extern void caml_mmtk_become_running(uintnat domain_state_addr);
 
 /* Report a domain's weak arrays / ephemerons (domain->ephe_info lists) as strong
  * roots, so MMTk keeps them alive and updated instead of letting them dangle.

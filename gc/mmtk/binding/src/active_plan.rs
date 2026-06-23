@@ -52,6 +52,10 @@ pub fn domain_addrs() -> Vec<usize> {
 /// safely w.r.t. an in-progress collection is left for later.)
 pub fn deregister_by_addr(domain_state_addr: usize) {
     DOMAIN_REGISTRY.write().unwrap().remove(&domain_state_addr);
+    // Also drop it from the stop-the-world RUNNING set so a collection in flight
+    // does not wait for a domain that has terminated (it has left the runtime's
+    // STW participant set and is no longer executing OCaml).
+    crate::collection::remove_running(domain_state_addr);
 }
 
 /// Deregister the mutator by pointer match. Panics if the pointer is not registered.
@@ -63,6 +67,8 @@ pub fn deregister_by_ptr(mutator_ptr: *mut Mutator<OCamlVM>) {
         .map(|(k, _v)| *k)
         .expect("deregister_by_ptr: mutator pointer not found — double-free or unregistered pointer");
     map.remove(&key);
+    drop(map);
+    crate::collection::remove_running(key);
 }
 
 impl ActivePlan<OCamlVM> for VMActivePlan {

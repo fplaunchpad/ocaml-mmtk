@@ -50,15 +50,14 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 Correctness before performance; dependencies noted. **Depth for every item is in
 `gc/mmtk/NOTES.md`** (dated, newest-first) — this list is the index, not the detail.
 
-1. **bug #3b — MMTk-native STW rearchitecture (IN PROGRESS, not committed).**
-   Retire the binding's hand-rolled global stop-counter for **per-mutator stop state
-   tied to the mutator lifecycle**, so blocking-section / spawn-handshake / terminate
-   windows can't desynchronise the stop barrier. Fixes the residual ~20–35%
-   `domain_*_spawn_burn*` **hang** (an OCaml-STW vs MMTk-STW deadlock — a parent wedged
-   in `caml_domain_spawn`'s handshake is registered-but-not-stoppable) and is expected
-   to subsume the rare wild-pointer `cannot trace` stale-root race. Interim stopgap
-   (not the real fix): bracket the spawn-handshake wait in
-   `caml_enter/leave_blocking_section`. → NOTES `bug #3b` (2026-06-23).
+1. **bug #3c — rare burn-pattern hang (after the bug #3b STW rearchitecture).** A rare
+   hang (~2/30 bytecode burn; ~0–1/20 native burn; `dls`/stress are 30/30) remains
+   **only** in the `burn` pattern (3 driver domains hammering `Gc.minor`/`Gc.major` +
+   25-way spawn bursts) — a *separate* race from bug #3b (now fixed): a GC during the
+   tight `Gc.minor` OCaml-minor-STW loop and/or during `caml_mmtk_refill_tlab` at domain
+   init (child holds `all_domains_lock`, no backup thread). Fix: route `Gc.minor` to MMTk
+   so it doesn't run OCaml's own minor STW, and/or suppress collection around the
+   init-time refill. → NOTES `bug #3b` residual (2026-06-23).
 
 2. **#11 — weak-ref resurrection ordering + retire `MMTK_WEAK_REFS`.** Fix
    `process_weak_refs` resurrection ordering (`pr5233` — a value resurrected only for
@@ -110,6 +109,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 
 - **bug #2** — native unmarshalling allocated off-heap (intern path was `#ifndef NATIVE_CODE`); un-guarded so native interns via MMTk. (CI ocamldoc SIGSEGV resolved; manpage repro 0/12.)
 - **bug #3** — MMTk STW stop barrier was a no-op (blocking-section counter underflowed `usize`); fixed by passing the domain to `caml_mmtk_enter/leave_blocking`.
+- **bug #3b** — multidomain spawn/STW deadlock: replaced the global stop-counter with an MMTk-native per-mutator RUNNING set (`stop_all_mutators` waits for `running.is_empty()`); also fixed an MMTk-STW × OCaml-minor-STW deadlock + a terminate corruption; removed `park_terminating`. native `domain_dls` 14/30 hang → 30/30.
 - **bug #4** — `gc_regs` bucket leak on OOM-raise inside `caml_call_gc` (RESTORE_ALL_REGS skipped); `caml_mmtk_recycle_gc_regs_bucket()` before the raise. 25/25→0/25.
 - **bug #1** — `is_forwarded` read forwarding-bits metadata that non-moving plans don't map; register that spec only for `moves_objects && !needs_forward_after_liveness`.
 - **moving-GC root cause** — forwarding-pointer / `Infix_tag` collision in `slot.rs` `classify` (consult forwarding-bits side metadata before trusting the header).

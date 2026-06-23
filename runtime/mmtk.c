@@ -571,13 +571,42 @@ void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
    duration of the park — exactly what a C blocking section does
    (caml_enter/leave_blocking_section_default). The backup thread answers
    caml_try_run_on_all_domains on our behalf while we wait. */
-void caml_mmtk_park(void)
+/* Cooperatively wait out an in-progress collection: hand this domain's OCaml-STW
+   participation to its backup thread, drop the domain lock, mark STOPPED and wait
+   for the MMTk resume epoch, then re-enter OCaml. Does NOT re-mark RUNNING — the
+   caller does that via caml_mmtk_become_running (so the RUNNING transition and the
+   GC-active check stay atomic w.r.t. the next collection). */
+static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 {
   caml_bt_exit_ocaml();
   caml_release_domain_lock();
-  mmtk_ocaml_stw_park();        /* stopped++, wait for the resume epoch, stopped-- */
+  mmtk_ocaml_stw_park(domain_state_addr);   /* mark STOPPED, wait for resume */
   caml_bt_enter_ocaml();
   caml_acquire_domain_lock();
+}
+
+/* Transition this domain to RUNNING (a must-stop STW participant). If a
+   collection is active, mmtk_ocaml_try_mark_running refuses and we park
+   cooperatively (above) so the backup thread keeps servicing OCaml's own STW
+   while we wait — then retry. We must NOT just spin on "GC active" while holding
+   the domain lock: a running domain may be leading OCaml's minor-heap STW
+   (caml_empty_minor_heaps_once), and freezing here without releasing the lock /
+   handing off to the backup deadlocks that STW against MMTk's (see the burn
+   deadlock in gc/mmtk/NOTES.md). Used on every STOPPED->RUNNING edge: resume from
+   park, leave a blocking section, and a child starting to run OCaml. */
+void caml_mmtk_become_running(uintnat domain_state_addr)
+{
+  while (!mmtk_ocaml_try_mark_running(domain_state_addr))
+    caml_mmtk_cooperative_park(domain_state_addr);
+}
+
+/* Park the calling domain for an in-progress MMTk collection, then resume as a
+   RUNNING participant. Called from block_for_gc (the triggering domain) and the
+   safepoint poll. */
+void caml_mmtk_park(uintnat domain_state_addr)
+{
+  caml_mmtk_cooperative_park(domain_state_addr);
+  caml_mmtk_become_running(domain_state_addr);
 }
 
 /* Called from caml_handle_gc_interrupt at every safepoint. If MMTk has a
@@ -586,32 +615,8 @@ void caml_mmtk_park(void)
 void caml_mmtk_stw_poll(void)
 {
   if (mmtk_ocaml_stw_active()) {
-    caml_mmtk_park();
+    caml_mmtk_park((uintnat) Caml_state);
   }
-}
-
-/* Park for an in-progress MMTk collection from the *terminate* path, WITHOUT
-   releasing this domain's domain_lock.
-
-   The regular caml_mmtk_park releases domain_lock (and hands OCaml-STW duty to
-   the backup thread) so that OCaml's own multi-domain STW can complete while we
-   are frozen in MMTk's park — otherwise the two barriers deadlock. By the time
-   caml_domain_terminate calls us, however, the domain has already left the OCaml
-   STW participant set (stop_active_domain), so caml_try_run_on_all_domains no
-   longer waits for it and that deadlock cannot arise.
-
-   Crucially we must NOT release domain_lock here: caml_domain_terminate relies on
-   holding domain_lock continuously across its teardown to keep the slot's
-   caml_domain_state from being reused by a fresh domain mid-teardown (domain_create
-   blocks on the same d->domain_lock; see the comment there). The regular park's
-   lock-drop window is exactly what let a reusing domain observe half-torn-down
-   state — a non-NULL memprof (debug assert at domain.c) and, worse, a still-live
-   MMTk mutator registration (mmtk_ocaml_bind_mutator panicking "already
-   registered"). We still bump MMTk's stopped count (mmtk_ocaml_stw_park) so the
-   collection's "all mutators stopped" barrier is satisfied. */
-static void caml_mmtk_park_terminating(void)
-{
-  mmtk_ocaml_stw_park();        /* stopped++, wait for the resume epoch, stopped-- */
 }
 
 /* Poison a domain's young_limit so its next safepoint check
@@ -689,27 +694,47 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
 void caml_mmtk_enter_blocking(uintnat dom)
 {
   if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
-    mmtk_ocaml_enter_blocking();
+    mmtk_ocaml_enter_blocking(dom);
 }
 
 void caml_mmtk_leave_blocking(uintnat dom)
 {
   if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
-    mmtk_ocaml_leave_blocking();
+    caml_mmtk_become_running(dom);
 }
 
-/* Called when a domain terminates: park if a collection is in progress (so it
-   participates), then deregister so future collections don't wait for it.
+/* Called when a domain terminates: deregister it so collections no longer wait
+   for it or scan it.
 
-   Uses the terminate-specific park, which does NOT release domain_lock — the
-   caller (caml_domain_terminate) must keep that lock held across teardown so the
-   slot's caml_domain_state is not reused by a fresh domain before deregistration
-   and the rest of teardown complete. See caml_mmtk_park_terminating. */
+   No park is needed. By the time caml_domain_terminate calls us, the domain has
+   left the runtime's STW participant set (stop_active_domain) and is no longer
+   executing OCaml, so it is absent from MMTk's RUNNING set — a collection in
+   flight does not wait for it. Deregistering removes it from both the mutator
+   registry and the RUNNING set (active_plan::deregister_by_addr). This subsumes
+   the former terminate-specific park special-case (the terminating domain no
+   longer needs to park at all). The caller still holds domain_lock continuously
+   across teardown to keep the slot from being reused mid-teardown — unchanged and
+   orthogonal to MMTk. */
 void caml_mmtk_domain_terminate(caml_domain_state *dom)
 {
   if (dom->mmtk_mutator == NULL) return;
-  if (mmtk_ocaml_stw_active())
-    caml_mmtk_park_terminating();
+  /* Deregister first: this removes the domain from BOTH the mutator registry (so
+     a collection started from now on will not scan it) AND the RUNNING set (so an
+     in-progress stop_all_mutators that is waiting for all running domains to stop
+     no longer waits for this one -- it has left OCaml STW too and sits in C
+     teardown with no safepoint, exactly the un-stoppable case bug #3b is about). */
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
+  /* Then, if a collection is in progress, wait for it to finish before returning
+     to caml_domain_terminate, which tears this domain's stack/roots down. A
+     collection that snapshotted the registry just BEFORE the deregister above
+     still holds this domain's mutator pointer and is scanning its roots; tearing
+     them down concurrently traced a freed/garbage slot -> the MMTk "cannot trace
+     object" panic (bug #3) seen in the spawn-burn tests. Waiting keeps the roots
+     valid until that scan completes. We do NOT release domain_lock here: the
+     domain has already left OCaml's STW participant set (stop_active_domain), so
+     OCaml STW will not wait for us and cannot deadlock, while domain_lock must
+     stay held across teardown to keep the slot from being reused mid-teardown
+     (domain_create blocks on the same lock). */
+  mmtk_ocaml_wait_collection_done();
   dom->mmtk_mutator = NULL;
 }

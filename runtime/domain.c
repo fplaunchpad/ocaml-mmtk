@@ -1204,6 +1204,12 @@ domain_thread_func(void* v)
     goto out2;
   }
 
+  /* The child is now about to run OCaml: mark it a must-stop MMTk participant.
+     leave_blocking waits out any in-progress collection first, so we never flip
+     RUNNING while a collection is scanning this domain (see caml/mmtk.h). It was
+     born STOPPED at bind (caml_mmtk_domain_init); this is its first RUNNING edge. */
+  caml_mmtk_leave_blocking((uintnat) domain_self->state);
+
   caml_gc_log("Domain starting (unique_id = %" CAML_PRIuNAT ")",
               domain_self->interruptor.unique_id);
   CAML_EV_LIFECYCLE(EV_DOMAIN_SPAWN, getpid());
@@ -1309,7 +1315,24 @@ CAMLprim value caml_domain_spawn(value callback, value term_sync)
       handle_incoming(interruptor);
       caml_plat_lock_blocking(&interruptor->lock);
     } else {
-      caml_plat_wait(&interruptor->cond, &interruptor->lock);
+      /* Idle-wait for the child. Mark this (parent) domain safe-stopped for MMTk
+         while we block here — otherwise a collection triggered by another domain
+         would wait for us forever, since we hold no safepoint in this wait (bug
+         #3b). Use the blocking-section hooks (no pending-action processing, so no
+         raise can escape mid-handshake). interruptor->lock is independent of
+         domain_lock (which the enter hook releases), so drop it around the section
+         and re-test p.status under it to avoid a lost wakeup. */
+      caml_domain_state *self = domain_self->state;
+      caml_plat_unlock(&interruptor->lock);
+      caml_enter_blocking_section_hook();
+      caml_mmtk_enter_blocking((uintnat) self);
+      caml_plat_lock_blocking(&interruptor->lock);
+      if (p.status == Dom_starting && !caml_incoming_interrupts_queued())
+        caml_plat_wait(&interruptor->cond, &interruptor->lock);
+      caml_plat_unlock(&interruptor->lock);
+      caml_leave_blocking_section_hook();
+      caml_mmtk_leave_blocking((uintnat) self);
+      caml_plat_lock_blocking(&interruptor->lock);
     }
   }
   caml_plat_unlock(&interruptor->lock);
