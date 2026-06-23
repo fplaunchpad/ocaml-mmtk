@@ -16,7 +16,7 @@ and were pushed** as `perf-lever-*` branches; **one was rejected**:
 
 | lever | what | verdict |
 |---|---|---|
-| **#C1-sftbound** | cached `[heap_start,heap_end)` bounds pre-check before the per-edge `is_in_mmtk_spaces` SFT lookup in `FieldSlot::classify` | **the only load-bearing lever: +1.26% on fannkuchredux (outside noise); halves the SFT-lookup self% cluster.** ✅ |
+| **#C1-sftbound** | cached `[heap_start,heap_end)` bounds pre-check before the per-edge `is_in_mmtk_spaces` SFT lookup in `FieldSlot::classify` | **the only load-bearing lever (~+1%, outside noise); halves the SFT-lookup self% cluster. On the current base the win sits on binarytrees (the most trace-heavy bench).** ✅ `perf-c1-sftbound` @`b953a50e4` |
 | #C2-header | read the block header once in `scan_object` (was read twice) | neutral (L1 hit, ≤ noise) ✅ |
 | #C4-debugbranch | hoist per-root `debug_check_enabled()` out of the STW root-scan inner loop | neutral (≤ sampling floor) ✅ |
 | #B2-islong | `Is_long(new_val)` short-circuit on the **region** (new-value) barrier; SATB deletion barrier left unguarded (depends on OLD value) | neutral ✅ |
@@ -34,26 +34,30 @@ only the **SFT-bounds pre-check** (C1-sftbound) — purely additive, never appro
 classify-path win. (My session-spawned consolidation agent independently tested only C2/C4/B2/B3 and called
 them all neutral; correct as far as it went, but it **missed C1-sftbound**, the one real win.)
 
-**Vanilla-vs-MMTk-Immix baseline (workflow, native, `MMTK_THREADS=4`).** ⚠️ Measured on the **pre-fft-fix** base
-`8122989c4`, so fft (and likely fannkuchredux) are stale — see the caveat:
+**Vanilla-vs-MMTk-Immix baseline — DEFINITIVE, post-fft-fix** (fork @ `c2560f1596` vs released vanilla 5.5.0,
+native Immix `MMTK_THREADS=4`, interleaved A/B, hyperfine 2 warmup + 10 timed; outputs byte-identical):
 
-| bench | kind | heap | fork/vanilla |
-|---|---|---|---|
-| nbody | seq float, ~0 alloc | 256 MB | **1.00× (parity)** |
-| fft | seq float-array | 128 MB | 1.69× *(pre-fix — poll storm)* |
-| fft | (same) | default | 1.02× |
-| spectralnorm | seq float-array alloc | 256 MB | 1.75× |
-| fannkuchredux | multi-domain, light alloc | 256 MB | 1.65× |
-| binarytrees | multi-domain, heavy alloc | 512 MB | **0.51× — MMTk 2× FASTER** |
+| bench | heap | GCs | fork/vanilla (post-fix) | (pre-fix) | status |
+|---|---|---|---|---|---|
+| nbody 5M | 256 MB | 0 | **1.005×** | 1.00× | parity |
+| fft | 128 MB | 1 | **1.115×** | 1.69× | **fft fix CLOSED the poll storm** |
+| fft | default | 0 | 1.079× | 1.02× | small genuine mutator residual |
+| spectralnorm 3000 | 256 MB | 23 | **1.738×** | 1.75× | **the one structural gap** |
+| fannkuchredux 11 | 256 MB | 9 | **0.985×** | 1.65× | **fix CLOSED it — fork now wins** |
+| binarytrees 20 | 512 MB | 15 | **0.661×** | 0.51× | **fork wins 1.5×** |
 
-**The fft fix already closed fft's gap.** A post-fix spot-check (mainline `c2560f1596`) puts fft@128 at ~2.33 s
-≈ vanilla (~2.31 s) — the **+67–69% was the post-GC poll storm** the landed refill-at-resume fix (`46cb3253f2`)
-eliminated. The pre-fix `+80%` instruction count on fft@128 (10.78 B vs 6.00 B) was exactly those 35.9 M
-spurious `caml_garbage_collection` poll entries. A **post-fix re-measurement of all five benches vs vanilla is
-in flight** (branch `perf-c1-sftbound` + the current table) to see which other gaps the fix closed:
-fannkuchredux is the same poll-storm class and likely shrank; spectralnorm's overhead is Immix
-**sweep/metadata** (`bzero_metadata`/`SweepChunk`/`side_metadata_access`, IPC 3.65→2.33) — genuinely structural,
-won't move.
+**The fft fix (`46cb3253f2`) closed TWO of the three big gaps** — fft@128 (1.69×→1.11×) *and* fannkuchredux
+(1.65×→0.985×, fork now slightly faster). Both were the **post-GC poll storm**: a bench that fires ≥1 GC then
+runs an allocation-light hot loop trapped into `caml_garbage_collection` on every poll. fannkuchredux's
+`perf record` is the smoking gun — PRE: `caml_call_gc` 16.4% + `caml_garbage_collection` 9.5% +
+`caml_find_frame_descr` 9.2% ≈ **37% of cycles in the poll storm**, mutator 49.6%; POST: those two ≈ **0%**,
+mutator 79.4%. nbody / fft@default never trap (0 GCs). **spectralnorm (1.74×) is the lone remaining structural
+gap** — it allocates continuously (every poll-trap promptly refills, so the storm never builds), and its
+overhead is real Immix **sweep/metadata**: `bzero_metadata` 4.9% + `side_metadata_access` 2.7% +
+`SweepChunk::do_work` 2.2% + `Line::is_marked` 1.0% + ~16% libc memset; `caml_call_gc` absent (IPC 3.65→2.33,
+memory-stall bound). **Net: 5 of 6 configs are now parity-or-better; spectralnorm's Immix sweep cost is the one
+real loss and the genuine M8 research target.** C1-sftbound on the current base is a consistent ~+1% (its win
+migrated from fannkuchredux — now trace-light post-fix — to binarytrees, the most edge-classify-heavy bench).
 
 **What the profiles confirm.** (1) The surviving serial overhead is the **STW root scan** —
 `caml_call_gc` + `caml_garbage_collection` + `caml_find_frame_descr` ≈ 21% of fft@128, ≈ 32% of fannkuchredux;
@@ -68,12 +72,14 @@ question is **structural** — STW root-scan cost (and its growth with domain co
 maintenance, and young-object throughput vs vanilla's minor collector — plus the standing **#A1** (bytecode has
 no TLAB). M8 effort goes there, not into more micro-tuning.
 
-**Branches (to reconcile).** Two competing integrations exist, neither ideal: `perf-basic-overheads`
-@`19a07ea8` (correct/current base `c2560f1596` but **missing C1-sftbound**, the one win) and
-`perf-basic-overheads-integrated` @`cac434f7b` (has all five but on the **stale** base `8122989c4`). The clean
-move is C1-sftbound (`6607a3f93`) cherry-picked onto current mainline (`perf-c1-sftbound`, in flight); the five
-neutral cleanups are safe-but-optional. None merged to `5.5+mmtk`. Fuller logs on turing: `~/perf_opt_findings.md`,
-`~/optbase_results/`, `~/perf-basic-overheads-findings.md`.
+**Branches.** The one lever worth landing is now isolated: **`perf-c1-sftbound`** @`b953a50e4` — C1-sftbound
+cherry-picked clean onto current mainline `c2560f1596`, correctness-gated (sanity 0-invalid-ref across
+Immix/StickyImmix incl. typecore 2.47 M copied; CLBG byte-identical), ~+1% on binarytrees. The two earlier
+lever-integration branches are superseded and can be deleted: `perf-basic-overheads` @`19a07ea8` (current base
+but missing C1-sftbound) and `perf-basic-overheads-integrated` @`cac434f7b` (all five but stale base
+`8122989c4`); the five neutral cleanups (C2/C4/B2/B3/A3) remain on their `perf-lever-*` branches if ever wanted.
+Nothing merged to `5.5+mmtk` — landing `perf-c1-sftbound` is a maintainer call. Fuller logs on turing:
+`~/postfix-baseline-findings.md`, `~/perf_opt_findings.md`, `~/optbase_results/`.
 
 ---
 

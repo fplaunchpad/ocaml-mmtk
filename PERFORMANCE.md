@@ -275,12 +275,16 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 > **Takeaway: micro-levers buy ~1.5%; the gap is structural** — STW root-scan (`caml_call_gc` /
 > `caml_garbage_collection` / `caml_find_frame_descr` ≈21% of fft@128, ≈32% of fannkuchredux), Immix
 > sweep/metadata (spectralnorm), young-object throughput vs vanilla's minor collector, and #A1 (bytecode TLAB).
-> The write barrier is hot in **zero** profiles (why #B2/#B3 are neutral). Vanilla-vs-MMTk baseline (pre-fft-fix
-> base `8122989c4`): nbody 1.00×, fft@128 1.69× *(poll storm — the landed fft fix `46cb3253f2` closes it to
-> ≈parity; post-fix re-measure in flight)*, spectralnorm 1.75×, fannkuchredux 1.65×, **binarytrees 0.51× (MMTk
-> 2× faster on parallel alloc-heavy)**. Detail: `gc/mmtk/NOTES.md` (2026-06-24); `~/perf_opt_findings.md`,
-> `~/optbase_results/` on turing. Branches `perf-basic-overheads` (@`19a07ea8`, missing C1-sftbound) and
-> `perf-basic-overheads-integrated` (@`cac434f7b`, stale base) pending reconcile; **none merged** to `5.5+mmtk`.
+> The write barrier is hot in **zero** profiles (why #B2/#B3 are neutral). **Definitive vanilla-vs-MMTk-Immix
+> baseline (post-fft-fix `c2560f1596`, native):** nbody 1.005×, fft@128 **1.115×**, fft@default 1.079×,
+> spectralnorm **1.738×**, fannkuchredux **0.985×**, binarytrees **0.661×**. The landed fft fix (`46cb3253f2`)
+> closed BOTH fft@128 (was 1.69×) and fannkuchredux (was 1.65×) — both were the post-GC poll storm (fannkuchredux
+> perf: ~37% of cycles in `caml_call_gc`/`caml_garbage_collection`/`caml_find_frame_descr` PRE → ~0% POST).
+> **5 of 6 configs are now parity-or-better; spectralnorm (1.74×, Immix sweep/metadata) is the lone structural
+> loss and the genuine M8 target. MMTk wins 1.5× on parallel alloc-heavy (binarytrees).** The one lever worth
+> landing is isolated on **`perf-c1-sftbound`** @`b953a50e4` (C1-sftbound on current mainline, ~+1% binarytrees,
+> correctness-gated); the neutral cleanups live on `perf-lever-*`. Detail: `gc/mmtk/NOTES.md` (2026-06-24);
+> `~/postfix-baseline-findings.md`, `~/perf_opt_findings.md` on turing. **Nothing merged** to `5.5+mmtk`.
 
 ## #17 / M8 — ranked optimization backlog (perf work)
 
