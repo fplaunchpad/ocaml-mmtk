@@ -133,7 +133,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      StickyImmix closes much of the gap; GC-thread-count `nproc` oversized). → full ranked
      backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
 
-8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode, 2026-06-23; `lazy`-clean; continuation Q3 + native SATB open).**
+8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode, 2026-06-23; `lazy`-clean; Q3 continuations fixed; native SATB open).**
    The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make
    read-barrier-free concurrent GC unusually cheap?). **De-risked:** OCaml's *stock* major
    barrier is *already* SATB (Yuasa grey-old-referent) — bug-#3 rewired `caml_modify` to
@@ -149,9 +149,10 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    each break as fixable (missing barrier) or open (protocol conflict). **Gate:** re-enable the
    disabled `lazy/…force` testsuite test. **Status: availability confirmed** (`ConcurrentImmix` is a real
    mmtk-core 0.32 `PlanSelector` with `SATBBarrier`); **SATB barrier wired (~82 lines, bytecode) and
-   `lazy` is clean** (force-vs-mark + force-vs-relocate, FAQ Q2). **Open:** Q3 — continuation fiber stacks
-   scanned concurrently vs a resume (FAQ Q3; fix = vanilla's per-continuation lock, in progress); native
-   SATB fast-path + an UNLOG-bit barrier gate. → RESEARCH_QUESTIONS RQ1;
+   `lazy` is clean** (force-vs-mark + force-vs-relocate, FAQ Q2). **Q3 (continuation scan vs resume) FIXED**
+   (commit `55ab6ce40b`: per-continuation lock `cont_lock.rs` + resume SATB-snapshot — deterministic crash
+   gone, STW flat in fiber count). **Open:** native SATB fast-path + an UNLOG-bit barrier gate (+ a
+   sanity-build-only ~10 MB deadlock, `rr` follow-up). → RESEARCH_QUESTIONS RQ1;
    NOTES (2026-06-23).
 
 ### Shipped (done — one line each; depth in NOTES)
@@ -200,7 +201,7 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode; native **infeasible** — VO bit + reserved header word) |
 | `PageProtect` | debug — page-granularity alloc | no | ✅ (bytecode, manual — exceeds CI time cap) |
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
-| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (bytecode) — SATB; `lazy`-clean; **Q3 continuations open** |
+| `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (bytecode) — SATB; `lazy`-clean; **Q3 fixed**; native SATB open |
 
 **Native** runs **6 plans** — `Immix`/`StickyImmix` (in-place Immix-block TLAB), `GenImmix`/`GenCopy`
 (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) — i.e. every plan
@@ -221,9 +222,9 @@ word the gapless TLAB can't produce), and `PageProtect` abort at startup on nati
   low-latency line (`RESEARCH_QUESTIONS.md` RQ1). The SATB deletion barrier is wired (~82 lines)
   by re-using OCaml's *stock* SATB-shaped barrier (its major barrier is already Yuasa) via
   mmtk-core's slot-granularity `memory_region_copy_pre`, gated on the concurrent plan — inert
-  off it. **`lazy` is clean** (force-vs-mark + force-vs-relocate; FAQ Q2). **Open:** Q3 —
-  continuation fiber stacks scanned concurrently vs a resume (FAQ Q3; fix = vanilla's
-  per-continuation lock, in progress); plus the native SATB fast-path + an UNLOG-bit gate.
+  off it. **`lazy` is clean**, and **Q3 (continuation scan vs resume) is fixed** (per-continuation lock +
+  resume SATB-snapshot, commit `55ab6ce40b`; FAQ Q2/Q3). **Open:** the native SATB fast-path + an UNLOG-bit
+  gate (+ a sanity-build-only ~10 MB deadlock, `rr` follow-up).
   → open work #8; RESEARCH_QUESTIONS RQ1; FAQ Q1–Q4; NOTES (2026-06-23).
 
 ---

@@ -60,7 +60,7 @@ does not exist because the collector never moves concurrently.
 
 ---
 
-## Q3. Can the concurrent marker race a **continuation resume** while scanning its fiber stack? — **OPEN**
+## Q3. Can the concurrent marker race a **continuation resume** while scanning its fiber stack? — **FIXED (bytecode; 2026-06-23)**
 
 **The hazard.** A continuation is a heap object pointing at a captured fiber stack. During concurrent
 marking a GC thread traces the continuation and scans that fiber stack as roots (`scan_object` →
@@ -74,8 +74,16 @@ resume but do not remove the race.
 mutable regions the marker must walk slot-by-slot. Vanilla OCaml scans stacks only at **STW safepoints**;
 this binding scans continuation fiber stacks **inline during concurrent heap tracing** — that is the gap.
 
-**Status:** real, and in the current ConcurrentImmix prototype **unhandled and untested** — the SATB work
-targeted the write barrier and `lazy`; no effect/continuation workload has been run under ConcurrentImmix.
+**Status: FIXED (2026-06-23, bytecode; commit `55ab6ce40b`).** Confirmed real first — a multi-domain
+effect/continuation stressor **deterministically SIGSEGV'd** under ConcurrentImmix (Immix/STW clean). The
+per-continuation lock below was implemented (`gc/mmtk/binding/src/cont_lock.rs` + `scan_object` try-lock +
+resume lock/snapshot in `fiber.c`, gated on `caml_mmtk_concurrent`): the stressor is now clean (checksum ==
+Immix/StickyImmix), and **STW stays flat ~1 ms as live continuations grow 0→6000** (vs Immix's 2.7→314 ms) —
+STW does NOT scale with fiber count, the whole goal. Inert outside the concurrent plan (no regression). Native
+ConcurrentImmix remains the separate documented native-SATB gap. **One residual, debug-only:** under the
+`sanity` build (full-heap re-trace) at ~10 MB the run intermittently *deadlocks* (28 threads in `futex_wait`)
+— a sanity-instrumentation × cont-lock interaction, **not** a production miss (the production collector is
+clean at ≤12 MB, 18/18); needs `rr` + a lock-ordering audit, tracked separately.
 
 **Fix — mirror vanilla's per-continuation lock (defer-to-STW is REJECTED).** The naive fix — queue every
 fiber stack and scan them all at FinalMark (STW) — is wrong: with many live fibers it dumps an unbounded
@@ -89,10 +97,12 @@ Mirror that:
   worker) → **skip** the stack scan; if acquired → scan the fiber stack → unlock. Scanning a *suspended*
   fiber is safe and concurrent (no STW cost) — the common case.
 - **Resume** (`caml_continuation_use*` / runstack switch): acquire the lock **blocking** before switching.
-- **Skipped (resumed) case:** a continuation resumed mid-cycle becomes the resuming domain's *running*
-  stack → a normal domain root → scanned at FinalMark (STW). So no roots are lost, **and STW does not scale
-  with fiber count** — only continuations *actually resumed this cycle* fall to FinalMark (bounded by resume
-  rate, not the total number of live fibers).
+- **Resumed case (as implemented):** mmtk-core's ConcurrentImmix FinalMark does *not* re-scan mutator roots
+  (`new_no_scan_roots`), so a resumed continuation can't rely on being picked up there. Instead the resume
+  path takes an **SATB stack-snapshot before switching** (`caml_mmtk_cont_snapshot`) — greying the
+  about-to-run stack's roots once, which SATB then keeps. So no roots are lost, **and STW does not scale with
+  fiber count** — suspended fibers are scanned concurrently; only the (bounded) per-resume snapshot cost is
+  borne by the mutator.
 
 The stock lock primitive lives in `runtime/fiber.c` (`git show 5.5.0:runtime/fiber.c`); if M9's neutering
 disconnected it from the deleted stock marker, re-connect it to the MMTk marker + resume path rather than
