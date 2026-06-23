@@ -345,6 +345,14 @@ CAMLprim value caml_atomic_exchange_field (value obj, value vfield, value v)
 {
   value ret;
   intnat field = Long_val(vfield);
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the OLD
+     referent BEFORE the store, while the slot still holds it. Unlike caml_modify,
+     the atomic store below happens BEFORE write_barrier runs, so write_barrier's
+     own (slot-reading) SATB call would see the NEW value and miss the deleted edge.
+     Grey it here instead. Self-gated; no-op for every non-concurrent plan. The slot
+     read is conservative under a concurrent store from another domain (greying a
+     stale referent is harmless), and a single Atomic field is the sync point. */
+  caml_mmtk_satb_barrier(&Field(obj, field), 1);
   if (caml_domain_alone()) {
     ret = Field(obj, field);
     Field(obj, field) = v;
@@ -370,6 +378,11 @@ CAMLprim value caml_atomic_cas_field (
     /* non-atomic CAS since only this thread can access the object */
     volatile value* p = &Field(obj, field);
     if (*p == oldval) {
+      /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the
+         OLD referent (still in the slot) BEFORE the store; write_barrier below runs
+         AFTER the store and would miss it. Self-gated; no-op off the concurrent
+         plan. Only on a successful CAS -- a failed CAS deletes no edge. */
+      caml_mmtk_satb_barrier(p, 1);
       *p = newval;
       write_barrier(obj, field, oldval, newval);
       return Val_true;
@@ -377,8 +390,13 @@ CAMLprim value caml_atomic_cas_field (
       return Val_false;
     }
   } else {
-    /* need a real CAS */
+    /* need a real CAS. Snapshot the old referent for the concurrent SATB barrier
+       BEFORE the store; the atomic exchange below stores before write_barrier runs,
+       so write_barrier's slot-reading SATB call would see newval and miss the
+       deleted edge. The slot read is conservative under a concurrent store (greying
+       a stale referent is harmless). Self-gated; no-op off the concurrent plan. */
     atomic_value* p = &Op_atomic_val(obj)[field];
+    caml_mmtk_satb_barrier((volatile value *)p, 1);
     int cas_ret = atomic_compare_exchange_strong(p, &oldval, newval);
     atomic_thread_fence(memory_order_release); /* generates `dmb ish` on Arm64*/
     if (cas_ret) {

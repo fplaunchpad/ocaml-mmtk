@@ -758,8 +758,9 @@ CAMLprim value caml_uniform_array_fill(
      elements BEFORE overwriting them, so concurrent marking still reaches objects
      reachable only through the edges this fill deletes. Must precede the fill loop
      (post-fill the old referents are gone). Self-gated; no-op for other plans.
-     (Native code inlines array fill and does not reach this C helper -- a known gap
-     for a future native ConcurrentImmix, as with the generational barrier below.) */
+     Both runtimes reach this barrier: Array.fill is the C primitive caml_array_fill
+     (stdlib/array.ml: external "caml_array_fill", NOT a %-builtin), so native code
+     also calls in here -- there is no inlined array-fill fast path to bypass it. */
   caml_mmtk_satb_barrier(fp, len);
   /* MMTk owns the heap: fill the range, then (bytecode) remember it via the MMTk
      region barrier for generational plans (no-op otherwise). OCaml's stock
