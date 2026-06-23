@@ -31,7 +31,11 @@ BENCHES="$ARG_BENCHES $STDIN_BENCHES"
 # All plans run in bytecode (allocation goes through real C calls). ALL_PLANS is
 # the two groups concatenated.
 IMMIX_FAMILY="Immix StickyImmix GenImmix"     # Immix-based plans
-BYTECODE_ONLY_PLANS="NoGC MarkSweep"          # free-list / contiguous-bump defaults
+# Non-Immix plans (validated bytecode-only): the free-list / semi-space / mark-compact
+# families wired in addition to the defaults. PageProtect is correct too but is a
+# page-per-object debug plan that exceeds the CI time cap (e.g. mandelbrot > TIMEOUT),
+# so it is intentionally NOT in the CI set — run it manually with a larger TIMEOUT/heap.
+BYTECODE_ONLY_PLANS="NoGC MarkSweep SemiSpace GenCopy MarkCompact"
 ALL_PLANS="$BYTECODE_ONLY_PLANS $IMMIX_FAMILY"
 
 # Native uses TLAB nursery-aliasing, which needs an *Immix* Default allocator.
