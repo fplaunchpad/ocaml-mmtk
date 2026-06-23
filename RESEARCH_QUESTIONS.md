@@ -210,6 +210,24 @@ than OCaml's bespoke one) is genuinely open. A clean composition strengthens RQ1
 itself a publishable finding about language-runtime/GC-framework impedance, extending the RQ4 contrast story
 into the *concurrent* regime.
 
+**Preliminary result (2026-06-23 — bytecode, non-moving concurrent regime): SATB composes cleanly; no lazy
+breakage found.** ConcurrentImmix (shipped in mmtk-core 0.32; `PlanSelector::ConcurrentImmix`) + an SATB
+deletion barrier were implemented in ~82 lines, *reusing OCaml's existing slot-granularity barrier shape*
+via mmtk-core's `memory_region_copy_pre` (the object-granularity `object_reference_write_pre` was the wrong
+fit — `caml_modify` has no src object); `caml_modify` and `Array.fill` fire it **pre-store**, gated on the
+concurrent plan; `needs_prepare_mutator` needed zero binding work. Under MMTk `sanity`, a multi-domain lazy
+stressor (4 domains × 200k thunks × 6 rounds) gave a checksum *identical* to Immix and StickyImmix — no
+forced result lost across the force-vs-mark window — reproduced twice. **Mechanism (why it's safe):** the
+only edge-deletion in forcing (clearing the thunk's field, `Obj.set_field b 0 ()`) routes through
+`caml_modify` → SATB-covered; the lazy *retag* only CASes the header tag (deletes no edge), and MMTk holds
+mark state in *side-metadata*, so the tag flip cannot corrupt the marker's view. So OCaml's lazy/SATB
+protocol *does* compose with a third-party concurrent marker — a positive RQ1 signal. **Residual open
+corner (the real remaining "can it break"):** lazy-forcing *jointly* with a moving (defragging) Full pause
+was not hit — lazy blocks are short-lived / line-recycled so `objects_copied` stayed 0 in the stressor (the
+moving path was validated separately on `parser.ml`). That joint case is **force-vs-relocate**, not just
+force-vs-mark, and is the next experiment. Also unwired (bytecode-only, correctness-first): the native-code
+SATB fast-path and an UNLOG-bit barrier gate (every concurrent-plan `caml_modify` currently buffers).
+
 **Related work / what's genuinely new.** LXR established the read-barrier-free low-latency design *on
 Java*; the concurrent compactors established the latency line *with* read barriers. **No one has tested
 the language-property prediction** — that a low-mutation, immutable-by-default language makes this design
