@@ -197,6 +197,13 @@ Caml_inline void write_barrier(
      until a generational plan binds the mutator), so on the default native Immix
      fast path the cost is a single predictable branch. */
   caml_mmtk_region_barrier(Op_val(obj) + field, 1);
+
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix). write_barrier
+     runs BEFORE the actual store (see caml_modify), so the slot still holds the OLD
+     referent here: grey it so concurrent marking does not lose an object reachable
+     only through the edge we are about to overwrite. Self-gated; no-op for every
+     non-concurrent plan. Op_val(obj)+field is the slot (field==0 for caml_modify). */
+  caml_mmtk_satb_barrier(Op_val(obj) + field, 1);
 }
 
 CAMLno_tsan /* We remove the ThreadSanitizer instrumentation of memory accesses

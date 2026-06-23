@@ -111,6 +111,15 @@ void mmtk_ocaml_wait_collection_done(void);
  */
 void mmtk_ocaml_region_barrier(MMTk_Mutator mutator, uintptr_t start, size_t count);
 
+/**
+ * SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
+ * plan (ConcurrentImmix). Greys the OLD referents currently held in `count`
+ * value-sized slots at `start`. MUST be called BEFORE the store, while the slots
+ * still hold the old values. No effect outside concurrent marking. The C side
+ * gates this on the concurrent plan (caml_mmtk_concurrent).
+ */
+void mmtk_ocaml_satb_barrier(MMTk_Mutator mutator, uintptr_t start, size_t count);
+
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);

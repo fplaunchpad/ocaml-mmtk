@@ -292,6 +292,39 @@ pub extern "C" fn mmtk_ocaml_region_barrier(
     memory_manager::memory_region_copy_post::<OCamlVM>(mutator, src, dst);
 }
 
+/// SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
+/// plan (ConcurrentImmix). Greys the OLD referents currently held in `count`
+/// value-sized slots starting at `start`, so concurrent marking still reaches an
+/// object whose only live edge is about to be overwritten. **MUST be called
+/// BEFORE the store**, while the slots still hold the old values.
+///
+/// We use mmtk-core's `memory_region_copy_pre` slot-granularity path
+/// (`SATBBarrier::memory_region_copy_pre` -> `memory_region_copy_slow`), which for
+/// each slot loads the old value via `FieldSlot::load` (filtering immediates /
+/// foreign / null and redirecting infix pointers to their parent) and pushes it to
+/// this mutator's SATB buffer. OCaml's `caml_modify` hands a field address, not the
+/// containing object, so the object-granularity `object_reference_write_pre` path
+/// does not fit; the slot path needs only `(start, count)` -- exactly OCaml's
+/// existing region-barrier shape.
+///
+/// Outside concurrent marking the buffered values are simply discarded
+/// (`should_create_satb_packets` is false), so the call is cheap when no GC is in
+/// the marking phase. It is the binding's job to call this only on the concurrent
+/// plan; the C side gates on `caml_mmtk_concurrent`.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_satb_barrier(
+    mutator: *mut libc::c_void,
+    start: usize,
+    count: usize,
+) {
+    let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
+    let start = unsafe { Address::from_usize(start) };
+    let dst = OCamlMemorySlice::from_slots(start, count);
+    // SATB pre-write path ignores `src`; pass an empty slice.
+    let src = OCamlMemorySlice::from_slots(start, 0);
+    memory_manager::memory_region_copy_pre::<OCamlVM>(mutator, src, dst);
+}
+
 /// Deregister a terminating domain (by its caml_domain_state address) so the
 /// stop-the-world code no longer waits for it.
 #[no_mangle]

@@ -142,6 +142,13 @@ extern uintnat caml_mmtk_heap_size_bytes(void);
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */
 extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
+
+/* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
+ * plan (ConcurrentImmix). Greys the OLD referents in `count` value-sized slots at
+ * `start`. MUST be called BEFORE the store (while the slots still hold the old
+ * values). Self-gated (no-op unless the concurrent plan is active). Called from
+ * write_barrier (caml_modify) and, pre-store, from the array-fill paths. */
+extern void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 

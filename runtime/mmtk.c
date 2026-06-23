@@ -85,6 +85,10 @@ static int caml_mmtk_collects = 0;
 /* Whether the active plan is generational (needs the mutator write barrier).
    Read on every mutable pointer write, so keep it a plain int. */
 static int caml_mmtk_generational = 0;
+/* Whether the active plan is the concurrent collector (ConcurrentImmix), which
+   needs the SATB (snapshot-at-the-beginning) deletion write barrier. Read on
+   every mutable pointer write, so keep it a plain int. */
+static int caml_mmtk_concurrent = 0;
 static int caml_mmtk_collection_started = 0;
 
 /* M6: MMTk-native weak-reference / ephemeron / finaliser processing via the
@@ -131,6 +135,7 @@ void caml_mmtk_init(void)
   caml_mmtk_generational = (strcmp(plan, "GenImmix") == 0
                            || strcmp(plan, "StickyImmix") == 0
                            || strcmp(plan, "GenCopy") == 0);
+  caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0);
 
   {
     /* On by default; MMTK_WEAK_REFS=0 opts out to the conservative scheme. */
@@ -565,6 +570,20 @@ void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
   if (caml_mmtk_generational)
     mmtk_ocaml_region_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                               (size_t) count);
+}
+
+/* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
+   plan (ConcurrentImmix). Greys the OLD referents held in `count` value-sized
+   slots at `start` so concurrent marking still reaches an object whose only live
+   edge is about to be overwritten. MUST be called BEFORE the store, while the
+   slots still hold the old values (the snapshot). Self-gated: a no-op unless the
+   concurrent plan is active. Called from write_barrier (caml_modify, count 1) and
+   the array-fill paths (before the fill loop). */
+void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
+{
+  if (caml_mmtk_concurrent)
+    mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
+                            (size_t) count);
 }
 
 /* ── Stop-the-world ──────────────────────────────────────────────────── */

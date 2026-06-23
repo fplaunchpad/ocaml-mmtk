@@ -754,6 +754,13 @@ CAMLprim value caml_uniform_array_fill(
      implementation of that function for a description of GC
      invariants we need to enforce.*/
   fp = &Field(array, ofs);
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the OLD
+     elements BEFORE overwriting them, so concurrent marking still reaches objects
+     reachable only through the edges this fill deletes. Must precede the fill loop
+     (post-fill the old referents are gone). Self-gated; no-op for other plans.
+     (Native code inlines array fill and does not reach this C helper -- a known gap
+     for a future native ConcurrentImmix, as with the generational barrier below.) */
+  caml_mmtk_satb_barrier(fp, len);
   /* MMTk owns the heap: fill the range, then (bytecode) remember it via the MMTk
      region barrier for generational plans (no-op otherwise). OCaml's stock
      remembered-set / SATB fill is bypassed. Native takes no barrier here (see
