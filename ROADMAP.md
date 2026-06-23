@@ -182,9 +182,10 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
     (NOT_TRACEABLE / 0 / infix byte-offset) at scan time so `store` can re-derive an
     interior pointer as `new_parent + offset` after the parent is forwarded; `classify`
     consults forwarding-bits side metadata before trusting an `Infix_tag` header.
-  - STW coordination: `collection.rs` (the global stop-counter being rearchitected to
-    per-mutator state — open work #1; `caml_mmtk_park` hands a parked domain's OCaml-STW
-    duty to its backup thread).
+  - STW coordination: `collection.rs` — a per-mutator **RUNNING set** (`stop_all_mutators`
+    waits for `running.is_empty()`); STOPPED→RUNNING via `caml_mmtk_become_running`, which
+    parks cooperatively via the backup thread if a GC is active; a terminate fence on
+    deregister. (Replaced the old global stop-counter — bug #3b.)
 - **Runtime glue** (`runtime/`): `mmtk.c` + `caml/mmtk.h` (init, alloc, STW poll/park,
   blocking-section + termination hooks, native TLAB refill), allocation redirection in
   `caml/memory.h` (`Alloc_small`) and `memory.c` (`alloc_shr`), TLAB refill / minor-GC
