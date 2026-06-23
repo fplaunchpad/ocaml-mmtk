@@ -411,6 +411,40 @@ plan + an API change). **Novelty: strong.**
 
 ---
 
+### RQ7 — Can MMTk express OCaml's own collector? A vanilla-faithful plan as a construction problem *(framework expressiveness + the clean MMTk-vs-vanilla comparison)*
+
+No mmtk-core 0.32 plan matches OCaml's GC: vanilla is **generational** (per-domain **copying** minor, promoting
+into a **shared, non-moving, mostly-concurrent / incremental mark-and-sweep major**) with a **SATB** write
+barrier and **no read barrier**. The pieces are split across plans — **GenImmix** has the copying-minor→promote
+structure (but a *moving*, *STW* Immix major); **ConcurrentImmix** has the concurrent SATB marking (but is
+*non-generational* and Immix-moving; only its marking is concurrent, evacuation is STW). The union —
+**generational + copying-minor + incremental/concurrent + (near-)non-moving major + SATB + read-barrier-free**
+— is **not a plan MMTk ships.**
+
+**Why building it is a research problem, not configuration.** It composes MMTk components (generational nursery
++ concurrent marking + a *non-moving* mature) in a combination mmtk-core does not pre-compose, and asks whether
+a general GC framework can *express* a host runtime's bespoke, hand-tuned collector. Three payoffs:
+1. **Framework expressiveness (RQ4-adjacent).** Can a third-party framework re-create the host's own collector,
+   or does the host design resist it? Where it resists is itself a finding — the converse of the Julia/CRuby
+   "the framework forced runtime changes" reports.
+2. **The cleanest MMTk-vs-vanilla comparison.** A *same-design* MMTk plan vs vanilla isolates
+   **framework/implementation overhead from collector-design choice** — answering "is MMTk slower because of
+   MMTk, or because it's a *different* collector?", which the current Immix/GenImmix-vs-vanilla numbers cannot
+   separate.
+3. **It converges with RQ1.** A generational, concurrent, SATB, read-barrier-free collector *is* the
+   read-barrier-free low-latency target — so the most vanilla-faithful plan and RQ1's flagship vehicle are the
+   **same artifact**. We already have the two halves landed natively (GenImmix's copying-minor; ConcurrentImmix's
+   SATB marking); the open work is composing them with a (near-)non-moving, incremental mature.
+
+**Sharpest sub-questions:** can mmtk-core give a *non-moving* concurrent mature (its concurrent support is
+Immix-based / moving)? Is the major *incremental* (bounded slices) or only mostly-concurrent? Does composing
+generational + concurrent need binding changes or a new mmtk-core plan? **Venue:** ISMM (expressiveness) →
+PLDI (if the low-latency result lands). **Risk:** high (a new plan, likely mmtk-core work). **Novelty: strong**
+— re-implementing the host's own GC in a general framework, then measuring design-vs-implementation, is a
+question the practitioner reports gestured at but no one has built.
+
+---
+
 ## What each question needs from the platform
 
 - **Common prerequisite:** finish M9 (ROADMAP #8 — retire the always-false `Is_young` reservation +

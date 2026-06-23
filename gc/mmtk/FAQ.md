@@ -192,3 +192,27 @@ barrier — is *exactly* OCaml's immutable-by-default regime, only more so; and 
 Versus the `ConcurrentImmix` we have (trace-based: concurrent mark + STW move), LXR is RC-based (prompt
 incremental reclamation + an infrequent backup trace), so it should deliver more *consistent* low latency.
 Both are read-barrier-free; LXR is RQ1's second vehicle alongside ConcurrentImmix.
+
+---
+
+## Q8. Which plan is closest to vanilla OCaml's GC, and is GenImmix incremental? — **reference (closest = GenImmix; no full match; the true match is a research problem)**
+
+Vanilla OCaml 5: per-domain **copying** minor heap (bump-pointer, STW-parallel, survivors promoted) over a
+**shared, non-moving, mostly-concurrent / incremental mark-and-sweep** major, with a **SATB** write barrier, **no
+read barrier**, and an optional STW compaction.
+
+**Closest single plan: `GenImmix`** — it matches the defining feature, a **copying nursery that promotes into a
+separate mature space**. (`StickyImmix` is generational too, but its nursery is *in-place* — sticky mark-bit, no
+copy/promote — so it's less faithful.) GenImmix differs on two axes: its mature is **moving** (Immix defrag)
+where vanilla's is non-moving, and its collection is **STW** where vanilla's major is mostly-concurrent.
+
+**Is Immix / GenImmix incremental? No.** Immix is full STW (mark + defrag in one pause). GenImmix is
+**generational but not incremental**: short STW *minor* pauses (bounded by the small nursery) + a full STW
+*major*. Generational ≠ incremental — the low *average* pause comes from frequent small nurseries, not from
+slicing a collection across the mutator; the *worst-case* pause is still a whole-heap STW major. **`ConcurrentImmix`**
+is the one with concurrent (incremental-in-spirit) *marking* — but its evacuation is still STW. Vanilla's major
+is genuinely incremental + mostly-concurrent (and non-moving, so no evacuation pause at all).
+
+**The true match** — generational + copying-minor + incremental/concurrent + (near-)non-moving major + SATB +
+read-barrier-free — **is not an mmtk-core 0.32 plan, and building it is a research problem** (`RESEARCH_QUESTIONS.md`
+RQ7); it coincides with the RQ1 low-latency target.
