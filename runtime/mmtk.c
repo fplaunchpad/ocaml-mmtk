@@ -178,26 +178,33 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 
 #ifdef NATIVE_CODE
   /* Native code inlines a bump allocator over the young region, so MMTk owns the
-     nursery via TLAB nursery-aliasing. This requires the plan to expose a
-     bump/Immix Default allocator: Immix/StickyImmix (an in-place Immix block) or
-     GenImmix/GenCopy (the copy-nursery CopySpace bump buffer). The C side is
-     allocator-agnostic — caml_mmtk_refill_tlab just receives [start,end) — and the
-     binding (mmtk_ocaml_refill_tlab) picks the right allocator from the plan's
-     Default mapping. For a generational plan, refilling drives a NURSERY GC that
-     evacuates survivors and hands back a fresh nursery; native young objects move
-     at that minor GC, fixed up via the usual updatable-root scan. (Bytecode
-     allocates through C entry points and is all-MMTk directly, so this is
-     native-only.) */
+     nursery via TLAB nursery-aliasing. This requires the plan's Default allocator
+     to be an Immix or a plain bump allocator, which OCaml can bump-fill directly:
+       - Immix/StickyImmix — an in-place Immix block (young objects don't move);
+       - GenImmix/GenCopy  — the copy-nursery CopySpace bump buffer (a minor GC
+         evacuates survivors and hands back a fresh nursery, so young objects move);
+       - SemiSpace         — the to-space CopySpace bump buffer (whole-heap copy);
+       - NoGC              — the never-collected bump space.
+     The C side is allocator-agnostic — caml_mmtk_refill_tlab just receives
+     [start,end) — and the binding (mmtk_ocaml_refill_tlab) picks the right
+     allocator from the plan's Default mapping. For a moving plan, young objects
+     move at a collection, fixed up via the usual updatable-root scan.
+     MarkSweep (free-list) and MarkCompact (its bump allocator reserves a
+     per-object header word and the space relies on per-object VO bits, neither of
+     which the inlined fast path produces) are NOT supported native — they abort
+     below. (Bytecode allocates through C entry points and is all-MMTk directly, so
+     this is native-only.) */
   if (caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
     caml_mmtk_tlab = 1;
     if (getenv("MMTK_VERBOSE") != NULL)
       fprintf(stderr, "[mmtk] native nursery: TLAB (MMTk-owned %s block)\n",
-              caml_mmtk_generational ? "copy-nursery" : "Immix");
+              caml_mmtk_generational ? "copy-nursery" : "Immix/bump");
   } else {
     caml_fatal_error(
-      "MMTk native code requires a bump/Immix-family plan "
-      "(Immix/StickyImmix/GenImmix/GenCopy); "
-      "MMTK_PLAN=%s has no bump/Immix Default allocator",
+      "MMTk native code requires a plan whose Default allocator is an Immix or "
+      "bump allocator (Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/NoGC); "
+      "MMTK_PLAN=%s has no bump/Immix Default allocator (e.g. MarkSweep's "
+      "free-list or MarkCompact's per-object-header bump allocator)",
       getenv("MMTK_PLAN") ? getenv("MMTK_PLAN") : "Immix");
   }
 #endif

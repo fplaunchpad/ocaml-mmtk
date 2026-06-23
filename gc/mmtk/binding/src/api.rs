@@ -174,15 +174,27 @@ pub extern "C" fn mmtk_ocaml_alloc(
 ///   - **`Immix(_)`** (Immix / StickyImmix): the region is an *in-place* Immix
 ///     block; nursery objects are ordinary Immix-space objects that do not move at
 ///     a (sticky) collection. Reclaimed by Immix's mark-region sweep.
-///   - **`BumpPointer(_)`** (GenImmix / GenCopy): the region is the generational
-///     plan's **copy-nursery** (`CopySpace`) bump buffer. At a *minor* GC the
+///   - **`BumpPointer(_)`** (GenImmix / GenCopy / SemiSpace / NoGC): the region is
+///     a plain bump buffer over a `CopySpace`/nursery (or NoGC's never-collected
+///     space). For GenImmix/GenCopy it is the **copy-nursery**; at a *minor* GC the
 ///     nursery survivors are **evacuated** to the mature space and the nursery is
-///     reset wholesale; the next refill hands a fresh nursery block. Native young
-///     objects therefore MOVE at a minor GC — they are managed objects traced from
-///     the domain's roots (registers/stack/`gc_regs` via `caml_scan_stack`), and
-///     those roots are reported as updatable `FieldSlot`s on every collection (the
-///     same machinery Immix defrag uses for mature objects), so the moving-root
-///     fixup already covers the native minor-GC evacuation path.
+///     reset wholesale; the next refill hands a fresh nursery block. For SemiSpace
+///     it is the to-space; a (whole-heap) collection evacuates survivors to the
+///     other semispace. Native young objects therefore MOVE at such a collection —
+///     they are managed objects traced from the domain's roots (registers/stack/
+///     `gc_regs` via `caml_scan_stack`), and those roots are reported as updatable
+///     `FieldSlot`s on every collection (the same machinery Immix defrag uses for
+///     mature objects), so the moving-root fixup already covers these evacuation
+///     paths. (NoGC never collects, so nothing moves.)
+///
+/// `MarkCompact(_)` is deliberately NOT matched even though it bump-allocates
+/// internally: its `MarkCompactAllocator` reserves a per-object header word (the
+/// allocator requests `size + HEADER_RESERVED_IN_BYTES` and returns the cell at
+/// `+HEADER_RESERVED`, leaving a word before each object for a forwarding pointer)
+/// and the space finds/relocates objects by linear-scanning per-object VO bits.
+/// The inlined native fast path bump-fills objects back-to-back with neither the
+/// reserved word nor a VO bit (it bypasses `post_alloc`), so an aliased MarkCompact
+/// region would be unscannable/uncompactable. See `caml_mmtk_domain_init`.
 ///
 /// Either way we drive the Default allocator's small/bump path to acquire fresh
 /// space of at least `min_bytes` (its slow path polls for a GC on exhaustion —
@@ -199,8 +211,9 @@ pub extern "C" fn mmtk_ocaml_alloc(
 ///
 /// Returns `true` and fills the out-params on success. Returns `false` on heap
 /// exhaustion (caller raises `Out_of_memory`) or if the Default allocator is
-/// neither an Immix nor a bump allocator (e.g. MarkSweep's free-list — bytecode
-/// falls back to the per-object alloc path; native aborts at startup).
+/// neither an Immix nor a plain bump allocator (MarkSweep's free-list, or
+/// MarkCompact's header-reserving bump allocator — see above; bytecode falls back
+/// to the per-object alloc path; native aborts at startup).
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_refill_tlab(
     mutator: *mut libc::c_void,
@@ -260,15 +273,19 @@ pub extern "C" fn mmtk_ocaml_refill_tlab(
         // Immix / StickyImmix: in-place Immix block (nursery objects don't move at
         // a collection).
         AllocatorSelector::Immix(_) => refill_with!(ImmixAllocator<OCamlVM>),
-        // GenImmix / GenCopy: the copy-nursery CopySpace bump buffer. Nursery
-        // survivors are evacuated at a minor GC; the next refill hands a fresh
-        // nursery. Native young objects move at the minor GC — their roots
+        // GenImmix / GenCopy / SemiSpace / NoGC: a plain BumpAllocator over a
+        // CopySpace/nursery (or NoGC's never-collected space). For the moving
+        // plans, native young objects move at a collection (minor GC for the
+        // generational ones, whole-heap copy for SemiSpace); their roots
         // (registers/stack/gc_regs) are reported as updatable FieldSlots on every
         // collection, the same machinery Immix defrag uses, so the moving-root
-        // fixup already covers this minor-GC evacuation path.
+        // fixup already covers these evacuation paths. NoGC never collects.
         AllocatorSelector::BumpPointer(_) => refill_with!(BumpAllocator<OCamlVM>),
-        // No bump/Immix Default allocator (e.g. MarkSweep's free-list): bytecode
-        // falls back to the per-object alloc path; native aborts at startup.
+        // No bump/Immix Default allocator: MarkSweep's free-list, or MarkCompact's
+        // MarkCompactAllocator (a header-reserving bump allocator whose objects need
+        // a per-object reserved word + VO bit the inlined fast path can't produce;
+        // see the doc comment). Bytecode falls back to the per-object alloc path;
+        // native aborts at startup.
         _ => false,
     }
 }
