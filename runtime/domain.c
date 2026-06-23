@@ -1152,8 +1152,34 @@ static void sync_result(value term_sync, value res)
 static void sync_and_terminate(struct domain_ml_values *ml_values,
                                caml_result res)
 {
+  CAMLparam0();
+  CAMLlocal1(v);
   /* Allocate the result value. */
-  value v = make_finished(res);
+  v = make_finished(res);
+  /* MMTk (issue #31): promote the just-allocated result to stable MMTk-traced
+     space BEFORE we publish it to the joiner and tear this domain down.
+
+     `make_finished` allocates the `Finished(Ok v)` chain on THIS (terminating)
+     domain's young TLAB region. Stock OCaml's domain-terminate minor collection
+     (caml_empty_minor_heap_promote) used to oldify all young survivors into the
+     major heap, so the result was stable before teardown. Under always-on MMTk
+     that routine is neutered to a bare `young_ptr = young_start` discard (it does
+     NOT promote — see runtime/minor_gc.c), so without help the result stays YOUNG
+     while it is published to the joiner and the domain proceeds to deregister and
+     tear down its young region. A collection on another domain landing in that
+     window relocates/reclaims the result's young block out from under the joiner,
+     which then dereferences a corrupted `Finished` chain -> SIGSEGV in
+     Domain.join (issue #31; intermittent, all moving Immix-family plans).
+
+     Forcing a collection here, while the result is rooted (CAMLlocal1) and this
+     domain is still a registered, running STW participant, traces the result into
+     stable space (and, for the generational plans, promotes it out of the
+     nursery). After this the result survives the deregister/teardown edge. A
+     whole-heap collection per domain-terminate is acceptable: termination is
+     infrequent and heavyweight, and stock OCaml likewise did non-trivial GC work
+     here. Self-gated: caml_mmtk_collect is a no-op for NoGC / when MMTk cannot
+     collect. */
+  caml_mmtk_collect();
   sync_result(ml_values->term_sync, v);
   /* This domain currently holds a lock for [mut], which is kept alive
      by a global root inside ml_values. */
@@ -1167,6 +1193,7 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      this point but we can use [caml_plat_unlock]. */
   caml_plat_unlock(mut);
   caml_plat_assert_all_locks_unlocked();
+  CAMLreturn0;
 }
 
 static CAML_THREAD_FUNCTION
