@@ -264,18 +264,39 @@ impl Scanning<OCamlVM> for VMScanning {
         // caml_darken_cont — feeding each stack slot to the slot visitor. Without
         // this, a GC taken while a callback/continuation has detached the parent
         // fiber chain reclaims live stack objects (crash on resume; cf. nested_fiber).
-        if let Some(stack) = continuation_stack(object) {
-            let mut dyn_visitor: &mut dyn SlotVisitor<FieldSlot> = slot_visitor;
-            let data = (&mut dyn_visitor as *mut &mut dyn SlotVisitor<FieldSlot>)
-                .cast::<c_void>();
-            unsafe {
-                caml_scan_stack(
-                    visit_cont_stack_slot,
-                    0,
-                    data,
-                    stack.to_mut_ptr::<c_void>(),
-                    core::ptr::null_mut(),
-                );
+        // Per-continuation scan lock (mirrors vanilla's NOT_MARKABLE header lock in
+        // caml_darken_cont). Under ConcurrentImmix this scan runs on a GC worker
+        // DURING concurrent marking, while another domain may resume this very
+        // continuation (caml_continuation_use_noexc -> switch onto the fiber and
+        // mutate it). We must TRY-LOCK the cont FIRST, then read field 0 UNDER the
+        // lock: that closes the window where the worker reads the stack pointer and
+        // begins scanning just as a resume takes the stack (nulls field 0) and
+        // switches onto it. If we win the lock and field 0 still holds a stack, scan
+        // it (suspended/immutable while locked); if we lose the lock (a resuming
+        // mutator or another worker holds it) -> SKIP. A skipped-because-resumed cont
+        // becomes the resuming domain's RUNNING stack + is snapshotted by the resume
+        // path's SATB scan, so no root is lost; and STW does not scale with fiber
+        // count (suspended fibers are scanned here, concurrently). (STW collectors
+        // scan at a safepoint with mutators stopped, so try_lock always wins -> inert.)
+        if continuation_stack(object).is_some() {
+            let cont_addr = object.to_raw_address().as_usize();
+            if crate::cont_lock::try_lock(cont_addr) {
+                // Re-read field 0 under the lock: a resume cannot have taken it now.
+                if let Some(stack) = continuation_stack(object) {
+                    let mut dyn_visitor: &mut dyn SlotVisitor<FieldSlot> = slot_visitor;
+                    let data = (&mut dyn_visitor as *mut &mut dyn SlotVisitor<FieldSlot>)
+                        .cast::<c_void>();
+                    unsafe {
+                        caml_scan_stack(
+                            visit_cont_stack_slot,
+                            0,
+                            data,
+                            stack.to_mut_ptr::<c_void>(),
+                            core::ptr::null_mut(),
+                        );
+                    }
+                }
+                crate::cont_lock::unlock(cont_addr);
             }
         }
         scan_ocaml_object(object, slot_visitor);

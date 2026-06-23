@@ -149,6 +149,20 @@ extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
  * values). Self-gated (no-op unless the concurrent plan is active). Called from
  * write_barrier (caml_modify) and, pre-store, from the array-fill paths. */
 extern void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count);
+
+/* Per-continuation scan lock (concurrent plan). caml_mmtk_cont_lock is called from
+ * the continuation resume path (caml_continuation_use_noexc) BEFORE the fiber stack
+ * is taken/switched-onto, so a resume cannot race a GC worker concurrently scanning
+ * that continuation's stack. Self-gated: a no-op unless the concurrent plan is
+ * active. Pair lock/unlock. `cont` is the continuation block. */
+extern void caml_mmtk_cont_lock(value cont);
+extern void caml_mmtk_cont_unlock(value cont);
+
+/* SATB snapshot of a continuation's fiber stack, called on the resume path (under
+ * the concurrent plan + active marking) BEFORE the cont->stack edge is deleted, so
+ * the stack's snapshot roots are greyed into the SATB buffer and survive the cycle.
+ * Self-gated; a no-op off the concurrent marking window. */
+extern void caml_mmtk_cont_snapshot(value cont);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 

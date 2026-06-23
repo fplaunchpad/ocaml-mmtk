@@ -14,6 +14,7 @@ use mmtk::MMTK;
 pub mod active_plan;
 pub mod api;
 pub mod collection;
+pub mod cont_lock;
 pub mod object_model;
 pub mod reference_glue;
 pub mod scanning;
