@@ -5,6 +5,39 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## fft differential perf debugging — MMTk's fft slowdown is GC, not locality (and not a flambda artifact)
+
+*2026-06-23*
+
+"Why is a compute-bound float benchmark 1.66× slower under MMTk if it barely allocates?" Differential
+`perf stat`/`perf record` on `fft.vanilla` vs `fft.fork` (`MMTK_PLAN=Immix`, 128 MB), same core, governor
+=performance:
+
+- **`perf stat`:** instructions **1.80×** (6.0e10 → 10.8e10), task-clock 1.61×, but **IPC is *higher*
+  under MMTk (1.33 vs 1.20) and cache-misses/refs are identical** → it is *not* a locality/cache regression;
+  MMTk simply executes ~4.8e9 **more instructions** (does more work).
+- **`perf record`:** vanilla is ~81% `Fft.code_begin` (the FFT math), GC **invisible**. MMTk: `caml_call_gc`
+  **10%** + `caml_garbage_collection` **5.6%** + `caml_find_frame_descr` **3.5%** ≈ **19%+** in GC machinery
+  (plus mark/sweep below the 1% cutoff).
+- **Not a compilation artifact:** both compilers are `flambda: false` (fair). So fft genuinely **boxes
+  floats** (non-flambda) → allocation churn.
+
+**Mechanism.** Vanilla's minor GC sweeps the short-lived boxed-float churn nearly for free (0 survivors,
+cheap bump-reset). MMTk pays a **full STW + complete root scan every collection** — `caml_find_frame_descr`
+walking stack frame descriptors, then each root through the `FieldSlot` classify/SFT machinery — plus
+mark/sweep. The **generational plans don't help** (all ≈1.66×) because they *still* do a full STW root scan
+per nursery GC; the per-collection fixed cost dominates for this small-live-set / high-churn workload, where
+vanilla's minor GC is much cheaper per cycle.
+
+**Levers / takeaways.** (1) MMTk per-GC root-scan cost is a real target — PERFORMANCE.md **#C1** (`FieldSlot`
+per-slot SFT lookup + double load) applied to *root* slots, and the STW-every-GC model. (2) **Methodology:**
+non-flambda over-boxes floats and inflates GC's role; numeric benchmarks should be built with **flambda**
+(what real numeric OCaml uses) — that would cut the allocation and shrink this gap, so the 1.66× over-states
+MMTk's disadvantage on numeric code. This is a clean example of "differential performance debugging" (the
+PERFORMANCE.md §9 funnel: `perf stat` → which counter moved → `perf record` → which function).
+
+---
+
 ## M8 first baseline (PRELIMINARY) — MMTk vs vanilla OCaml 5.5.0
 
 *2026-06-23*
