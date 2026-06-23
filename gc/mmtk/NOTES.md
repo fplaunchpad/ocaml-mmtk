@@ -14,31 +14,39 @@ First directional numbers (NOT the campaign — see PERFORMANCE.md for the real 
 iso-memory rule). Detail + commands in `~/baseline_findings.md` on turing (vanilla built at
 `~/vanilla-5.5.0-prefix`, benches in `~/bench_work/`).
 
-| bench | heap | vanilla | Immix | StickyImmix | GenImmix |
+Results (wall = hyperfine median; maxRSS = `/usr/bin/time -v`). **All three benchmarks are NATIVE binaries.**
+
+| bench (all native) | heap | vanilla | Immix | StickyImmix | GenImmix |
 |---|---|---|---|---|---|
-| binary_trees d19 (native, GC-stress) | 128 MB | 8.32 s | 11.30 s (1.36×) | **7.29 s (0.88×)** | 8.31 s (1.00×) |
-| fft (native, numeric) | 128 MB | 2.21 s | 3.68 s | 3.64 s | 3.67 s (~1.66×) |
-| ocamlc self-compile (bytecode) | 4096 MB | 12.0 s | 25.9 s (2.16×) | 23.1 s (1.93×) | **20.9 s (1.74×)** |
+| binary_trees d19 — alloc/GC-stress (`ocamlopt`) | 128 MB | 8.32 s / 105 MB | 11.30 s (1.36×) / 153 MB | **7.29 s (0.88×)** / 195 MB | 8.31 s (1.00×) / 186 MB |
+| fft — numeric (`ocamlopt`) | 128 MB | 2.21 s / 68 MB | 3.68 s (1.66×) / 139 MB | 3.64 s (1.65×) / 139 MB | 3.67 s (1.66×) / 139 MB |
+| `ocamlc.opt` compiling ~400k lines → bytecode | iso 1088 MB | 12.0 s / 1031 MB | **OOM** | **thrash** | 41.9 s / 1.5 GB (overran heap) |
+| ″ (working heap) | 4096 MB | 11.98 s / 1031 MB | 25.88 s (2.16×) / 4.1 GB | 23.06 s (1.93×) / 5.2 GB | **20.87 s (1.74×)** / 3.2 GB |
 
-**Directional findings:**
-- **MMTk can beat stock:** StickyImmix is **12% faster than vanilla** on the GC-stress native bench — but
-  at **+86% RSS**. The real story is time-vs-memory, so this needs the heap-multiple *curve* (PERFORMANCE.md
-  §2), not this single point.
-- **The shipped default (`Immix`) is dominated on every workload measured** → reconsider the default
-  (GenImmix is the most robust / general champion here; StickyImmix wins pure high-churn).
-- **Bytecode is the weak spot:** ~1.7–2.2× and it **OOMs/thrashes at iso-memory** — structural (fixed heap +
-  *no bytecode TLAB*), empirically confirming backlog **#A1 (bytecode TLAB / inline alloc)** as the top lever.
-- **"iso-memory" isn't truly iso:** MMTk total RSS = reserved heap + binary/metadata overhead ≈ **1.5–2×
-  vanilla** even at heap=vanilla-RSS. So the heap=maxRSS rule gives MMTk a memory premium; true equal-RSS
-  needs heap = vanilla_RSS − overhead (which then runs tighter). Memory overhead is a first-class cost.
+The third row is the macro-benches `ocamlc-self-compile` workload — native **`ocamlc.opt`** (the bytecode
+compiler, built native) compiling a generated unit of the **20 JSOO classic benchmarks × 30 replicas** to
+bytecode `.cmo`. "self-compile" is a misnomer (it does NOT compile the compiler's own source), and the output
+being bytecode does NOT make it a bytecode-*run* program.
 
-**Caveats:** powersave governor (no sudo → absolute seconds soft, relative factors OK); single heap point;
-3-program hand-built subset; no workload fingerprints / pause distributions yet.
+**Findings (corrected):**
+- **All three benches are NATIVE → they all exercise the native TLAB alloc path. #A1 (bytecode alloc / no-TLAB)
+  is UNTESTED here.** The first pass wrongly cited `ocamlc` as confirming #A1; `ocamlc.opt` is native, so its
+  cost is general GC overhead, not the bytecode path. Testing #A1 needs a genuinely bytecode-executed workload
+  (run under `ocamlrun`), which this baseline lacks.
+- **MMTk can beat stock on TIME for GC-stress** — StickyImmix binary_trees **0.88× (12% faster)** — but at
+  **+86% RSS** (195 vs 105 MB). Default **Immix is worst** on binary_trees and ocamlc.
+- **The native compiler workload is the weak spot:** ~1.7–2.2× slower AND **3–5× the memory**; OOMs at
+  iso-memory. Alloc-heavy real app (AST/typing, ephemerons, Hashtbl, Marshal) — GC overhead, not #A1.
+- **Memory premium across the board:** MMTk reserves its heap, so RSS ≈ heap + overhead ≈ **1.5–5× vanilla** →
+  never truly iso-memory; the time-vs-memory *curve* (PERFORMANCE.md §2) is the real comparison.
 
-**BLOCKER for the full campaign:** opam's bwrap sandbox is broken on turing (`RTM_NEWADDR: Operation not
-permitted`, restricted user namespaces) → `opam switch create vanilla-5.5.0` and `opam install opam-monorepo`
-both fail → the full `macro-benches make setup` can't run. Worked around with a from-source vanilla + a hand-
-built 3-bench subset. Unblock with `opam init --disable-sandboxing` (or fix userns / grant sudo) on turing.
+**Caveats:** single heap point (+ a 4× point for ocamlc); 3-bench **native-only** subset; this first pass ran
+under the **powersave** governor (relative factors valid, absolute soft).
+
+**Blockers now CLEARED:** opam updated to **2.5.1** with sandboxing disabled (the bwrap/userns failure is gone)
+and the governor set to **performance** — so the full `macro-benches` campaign (proper protocol: heap-multiple
+sweeps, workload fingerprints, ~8–12 benches, two-stage bake-off, incl. a real bytecode-run workload for #A1)
+is now running.
 
 ---
 
