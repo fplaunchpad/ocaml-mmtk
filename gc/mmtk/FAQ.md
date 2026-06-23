@@ -152,3 +152,33 @@ exactly why it's RQ1's vehicle. Supporting a true read-barrier plan would requir
 either a read barrier in the accessor macros (breaks all existing stubs) or object **pinning** across FFI
 calls (the VO-bit machinery the Julia/CRuby reports needed and OCaml has so far avoided — RQ4). Whether
 that's worth doing is `RESEARCH_QUESTIONS.md` RQ6.
+
+---
+
+## Q7. What is the LXR plan, and is it in MMTk? — **reference: not in mmtk-core 0.32 (research branch); the read-barrier-free low-latency candidate for OCaml**
+
+**What it is.** LXR (Zhao, Blackburn & McKinley, *Low-Latency, High-Throughput Garbage Collection*, PLDI'22)
+is a collector built on the MMTk framework over a hierarchical **Immix** heap. It combines **reference
+counting** (coalescing RC via a cheap field-logging *write* barrier, ~1.6% mutator overhead) for prompt
+incremental reclamation, an **infrequent concurrent backup trace** (SATB mark) to collect cycles and correct
+RC's conservatism, and **bounded Immix evacuation** (defrag) at short STW pauses. Defining choice: **no read
+barrier** — it bets stores are ~an order of magnitude rarer than loads, so a write barrier beats a read
+barrier; low latency comes from RC's promptness + bounded pause work + the *non-moving* concurrent backup
+trace, not from concurrent read-barrier evacuation (the ZGC/C4/Shenandoah route LXR avoids). Reported: tight
+heap 7.8× throughput + 10× better p99.99 tail latency vs Shenandoah; moderate heap +4% vs G1, +43% vs
+Shenandoah.
+
+**Is it in MMTk?** It was implemented *in* MMTk (the paper's artifact, on OpenJDK) but is **NOT a plan in
+mainline / released mmtk-core** — 0.32's `PlanSelector` has 11 plans (NoGC, MarkSweep, Immix, GenImmix,
+StickyImmix, SemiSpace, GenCopy, MarkCompact, PageProtect, Compressor, ConcurrentImmix); LXR is not among
+them, and there is no RC/refcount plan module. It lives on a research branch/fork. So `MMTK_PLAN=LXR` does
+not work against crates.io mmtk 0.32 — using it on OCaml means **porting the LXR plan + its RC write barrier**
+into our binding (real work, flagged by RESEARCH_QUESTIONS RQ1).
+
+**Why it's the read-barrier-free low-latency candidate for OCaml.** Read-barrier-free ⇒ C-API-compatible
+(Q6). Its core bet — low store/mutation frequency keeps the write barrier cheap and lets you skip the read
+barrier — is *exactly* OCaml's immutable-by-default regime, only more so; and RC suits OCaml's profile
+(immutable objects set their references once at init → cheap RC; short-lived objects die promptly at RC=0).
+Versus the `ConcurrentImmix` we have (trace-based: concurrent mark + STW move), LXR is RC-based (prompt
+incremental reclamation + an infrequent backup trace), so it should deliver more *consistent* low latency.
+Both are read-barrier-free; LXR is RQ1's second vehicle alongside ConcurrentImmix.
