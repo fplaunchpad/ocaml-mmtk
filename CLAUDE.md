@@ -16,9 +16,11 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
     fast-forward) into `5.5+mmtk`. (The former `m9-mmtk-only` integration branch was
     redundant — always kept identical to `5.5+mmtk`, and it doubled CI — so it was
     removed; consolidation is done.)
-  - **`upstream-5.5.0-rc1`** pins pristine OCaml 5.5.0-rc1 (the fork point, commit
-    `4090d6db95`) so the fork's full diff is reviewable via a self-PR against it. Don't
-    build or commit on it.
+  - **Base = OCaml `5.5.0` final.** The fork was advanced rc1→5.5.0 by merging the upstream
+    `5.5.0` tag (commit `f5238509d`, a 6-commit release-plumbing delta) — so the vanilla
+    perf baseline must be released 5.5.0, not rc1. The `5.5.0` tag is the reviewable base
+    for the fork's full diff. (`upstream-5.5.0-rc1` pins the historical fork point
+    `4090d6db95`; don't build or commit on it.)
   - **`benchmarks`** is an **orphan branch** (no mainline history) holding the CLBG
     benchmark suite (`benchmarks/clbg/` — the Domain.spawn-ported Benchmarks Game
     programs + golden outputs). Kept off the mainline so the OCaml tree carries no

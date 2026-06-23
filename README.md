@@ -12,7 +12,7 @@ multicore, effect-handler language on which MMTk's many collectors can be compar
 on a common substrate. The research agenda lives in
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md).
 
-- **Base:** OCaml `5.5.0-rc1`. **Collector:** MMTk, always on, default plan **Immix**.
+- **Base:** OCaml `5.5.0` (final). **Collector:** MMTk, always on, default plan **Immix**.
 - **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
   [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
 - Collection is multi-domain, parallel, and stop-the-world; moving plans relocate
@@ -77,28 +77,32 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 
 ### GC plans
 
-`MMTK_PLAN` selects the collector at startup. Nine of mmtk-core 0.32's eleven plans are
-wired and validated in **bytecode**; **native** runs the four that have a bump-pointer
-nursery the TLAB can alias — `Immix`/`StickyImmix` (in-place) and `GenImmix`/`GenCopy`
-(copy-nursery). `GenImmix` is the stock-faithful generational native default candidate.
+`MMTK_PLAN` selects the collector at startup. **Ten** of mmtk-core 0.32's eleven plans are
+wired in **bytecode**; **native** runs the **six** whose Default allocator is a bump/Immix
+region the inlined TLAB can alias — `Immix`/`StickyImmix` (in-place), `GenImmix`/`GenCopy`
+(copy-nursery), and `SemiSpace`/`NoGC`. `GenImmix` is the stock-faithful generational native
+default.
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
 | `Immix` *(default)* | mark-region, moving (defragments) | bytecode + native |
 | `StickyImmix` | generational, in-place nursery | bytecode + native |
 | `GenImmix` | generational, copying nursery | bytecode + native |
-| `MarkSweep` | non-moving free-list | bytecode |
-| `NoGC` | bump-only; never reclaims (short programs only) | bytecode |
-| `SemiSpace` | classic two-space copying | bytecode |
 | `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode + native |
-| `MarkCompact` | sliding compaction (Lisp-2) | bytecode |
+| `SemiSpace` | classic two-space copying | bytecode + native |
+| `NoGC` | bump-only; never reclaims (short programs only) | bytecode + native |
+| `MarkSweep` | non-moving free-list | bytecode (native infeasible — free-list) |
+| `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
+| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode (RQ1; `lazy`-clean, continuations open) |
 
-Two plans remain unwired: **`Compressor`** needs a unified object-reference model
-(incompatible with OCaml's value/header layout) and **`ConcurrentImmix`** needs an SATB
-write barrier — both need deeper changes (see [`ROADMAP.md`](ROADMAP.md)). Extending native
-beyond the Immix family to the other bump-pointer plans (`SemiSpace`/`GenCopy`/`MarkCompact`)
-is performance-milestone (M8) work.
+`ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
+write barrier is wired in bytecode and `lazy` is proven clean, with one open hazard —
+continuation stacks scanned concurrently with a resume (see [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3).
+The one **unwired** plan is **`Compressor`**, which needs a unified object-reference model
+incompatible with OCaml's value/header layout (see [`ROADMAP.md`](ROADMAP.md)).
+`MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only — their allocators can't back the
+inlined native TLAB.
 
 ## Repository layout
 

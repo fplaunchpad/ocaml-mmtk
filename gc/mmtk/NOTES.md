@@ -5,6 +5,39 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Consolidation onto OCaml 5.5.0 — ConcurrentImmix (bytecode) landed; native plan set finalized
+
+*2026-06-23*
+
+Three workstreams consolidated onto a verified branch and landed on `5.5+mmtk` (fast-forward; `4fbe8c1755`
+is an ancestor of the 5.5.0 merge):
+
+- **Base advanced rc1 → OCaml 5.5.0 final.** Merged the upstream `5.5.0` tag (6 commits, pure release
+  plumbing: VERSION/Changes/Makefile.cross/ocaml_version.m4/regenerated boot+configure/ocaml-variants.opam;
+  *zero* runtime/gc/asmcomp changes; only `configure` overlapped, regenerated with autoconf 2.72). Zero
+  conflicts; `world`/`bootstrap`/`world.opt` green; compilers report 5.5.0. The vanilla perf baseline is
+  now **released 5.5.0** (see PERFORMANCE.md §3).
+- **`ConcurrentImmix` + SATB barrier landed (bytecode).** ~82 lines: `mmtk_ocaml_satb_barrier` →
+  mmtk-core's slot-granularity `memory_region_copy_pre` (re-using OCaml's existing `(start,count)` barrier
+  shape — *not* the object-granularity path, which needs a src object `caml_modify` lacks); `caml_modify` /
+  `Array.fill` fire it pre-store, gated on `caml_mmtk_concurrent`, inert off the concurrent plan.
+  Availability confirmed (real `PlanSelector` in 0.32; `needs_prepare_mutator` = zero binding work). `lazy`
+  proven clean (force-vs-mark + force-vs-relocate; FAQ Q2 / RESEARCH_QUESTIONS RQ1). **Open:** FAQ Q3
+  (continuation fiber stacks scanned concurrently vs a resume — fix = vanilla's per-continuation lock, in
+  progress); native SATB fast-path + an UNLOG-bit barrier gate.
+- **Native plan set finalized at 6** (Immix/StickyImmix/GenImmix/GenCopy/**SemiSpace**/**NoGC**) — SemiSpace
+  blessed `sanity`-clean (0 Invalid, 3M+ copied); NoGC native is moot (never reclaims). **`MarkCompact`
+  native is INFEASIBLE via TLAB aliasing** (confirmed by two independent agents): it needs a per-object
+  reserved Lisp-2 header word + a VO bit that the inlined *gapless* TLAB bump can't produce — first
+  compaction panics *"does not have a forwarding pointer"*. `mmtk.c`'s native-abort message updated to name
+  the real 6 supported plans + why MarkSweep/MarkCompact are out. (Supersedes the earlier ROADMAP note that
+  guessed MarkCompact native was "a small refill-match extension" — it is not.)
+
+All commits authored `KC Sivaramakrishnan <kc@kcsrk.info>` (the main ID; both that and `kc@tarides.com` map
+to GH `kayceesrk`, but kcsrk.info is canonical). FAQ.md added — mechanism-level Q&A for these hazards.
+
+---
+
 ## Performance work — method of record (`PERFORMANCE.md`) + fast-path audit findings
 
 *2026-06-23*
