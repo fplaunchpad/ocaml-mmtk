@@ -118,6 +118,7 @@ initialization all go through MMTk; the C glue lives in `runtime/mmtk.c`.
 
 - [`ROADMAP.md`](ROADMAP.md) — the live plan and milestone status.
 - [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) — dated design notes and investigations.
+- [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) — correctness & concurrency hazards (mechanism-level Q&A).
 - [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) — the GC-research agenda.
 - [`PERFORMANCE.md`](PERFORMANCE.md) — the GC-performance measurement method of record (M8).
 - [`fork-handoff.md`](fork-handoff.md) — original cold-start brief.
