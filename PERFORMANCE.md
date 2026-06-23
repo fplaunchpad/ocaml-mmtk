@@ -77,20 +77,31 @@ Dynamic sizing is itself a variable. A small-min `DynamicHeapSize` experiment *r
 
 ---
 
-## 3. Fair comparison against stock OCaml 5.5
+## 3. Fair comparison against vanilla OCaml 5.5.0
 
-Stock OCaml has a generational hybrid (per-domain bump-pointer **minor heap** copying into a non-moving mostly-concurrent **major heap**; *Retrofitting Parallelism onto OCaml*, ICFP'20). `ocaml-mmtk` has **no separate minor heap** — young objects live in MMTk's own heap; the only STW is MMTk's. The heap models genuinely differ, so apples-to-apples requires care.
+Vanilla OCaml has a generational hybrid (per-domain bump-pointer **minor heap** copying into a non-moving mostly-concurrent **major heap**; *Retrofitting Parallelism onto OCaml*, ICFP'20). `ocaml-mmtk` has **no separate minor heap** — young objects live in MMTk's own heap; the only STW is MMTk's. The heap models genuinely differ, so apples-to-apples requires care.
+
+### 3.0 Two-stage comparison strategy (the headline metric is MMTk-vs-vanilla)
+
+The thing we ultimately care about is **MMTk vs the vanilla OCaml GC**, not an N×N plan tournament re-run against vanilla every time. So split it:
+
+1. **Stage 1 — intra-MMTk bake-off.** Run the MMTk plans against *each other* (full §2 heap-multiple sweeps, §1 workload fingerprints) across the suite to determine the **champion plan** — the one that performs best for MMTk *generally* (expected contenders: Immix, StickyImmix, GenImmix; the champion may differ bytecode vs native). MMTk plans are **one opam switch** differing only by `MMTK_PLAN`, so this stage is cheap. Pick the champion (and note where a runner-up wins a workload class).
+2. **Stage 2 — champion vs vanilla.** Carry *only* the champion forward into the rigorous head-to-head against vanilla OCaml 5.5.0 (equal-RSS + iso-headroom curves, §3.4). This is the headline result and the one we maintain over time; re-run the full Stage-1 bake-off only when the binding changes materially (a new plan, an alloc/barrier/scan change).
+
+Day-to-day regression tracking watches the **champion vs vanilla** number; the full bake-off is periodic, not per-commit.
 
 ### 3.1 Subjects
 
 | Runtime id | What | Switch source |
 |---|---|---|
-| `stock-5.5` | vanilla OCaml 5.5 (auto-sizing 2-gen GC) | normal opam switch |
+| `vanilla-5.5.0` | **released** OCaml 5.5.0 (auto-sizing 2-gen GC) — the baseline | normal opam switch (`ocaml-base-compiler.5.5.0`) |
 | `mmtk-immix` | fork, `MMTK_PLAN=Immix` (default, native) | pin the fork |
 | `mmtk-stickyimmix` | fork, `StickyImmix` (gen, in-place nursery) | same switch, env only |
 | `mmtk-genimmix` | fork, `GenImmix` (stock-faithful gen, copy nursery) | same switch, env only |
 
-Efficiency: the three MMTk plans are **one opam switch** differing only by `MMTK_PLAN` — no rebuild between plans.
+**Version-match the baseline.** The fork is being advanced to **5.5.0 final** (from 5.5.0-rc1; the rc1→5.5.0 delta is 6 release-plumbing commits — see ROADMAP), so the vanilla baseline must be **released 5.5.0**, not rc1 and not trunk — otherwise an OCaml-version delta confounds the GC comparison. Do not start the Stage-2 campaign until both sides are 5.5.0. Build the *same* program with both the `vanilla-5.5.0` switch and the fork switch.
+
+Efficiency: the MMTk plans are **one opam switch** differing only by `MMTK_PLAN` — no rebuild between plans (this is what makes Stage 1 cheap). **olly** consumes `runtime_events` from a built program, so each measured subject needs a real compiler switch (`vanilla-5.5.0` for the baseline; the fork switch for MMTk); install `runtime_events_tools` into a *separate* tooling switch — but note olly-on-MMTk is broken until backlog #R1–#R4 (§7).
 
 ### 3.2 Setup invariants (hold constant)
 
@@ -221,7 +232,7 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 - [ ] Workload fingerprint published first: alloc rate, survival, mutation rate, lifetime-dispersion Gini (§1)
 - [ ] Heap swept as a **multiple of live size**, not absolute MiB; results are **curves**, not points (§2)
 - [ ] PRIMARY = macro-benches; benches/multicore for scaling; gcbench for fast iteration (§1)
-- [ ] Stock baseline = separate vanilla OCaml 5.5 switch; same source/deps/flags; compared at equal total RSS (§3)
+- [ ] Stage 1 (intra-MMTk bake-off → champion) then Stage 2 (champion vs **vanilla 5.5.0**); baseline = separate released-5.5.0 switch, same source/deps/flags, compared at equal total RSS (§3)
 - [ ] `setarch x86_64 -R` on **both** sides; governor=performance; `MMTK_PLAN`+`MMTK_HEAP_SIZE_MB`+`MMTK_THREADS`+(domains,workers,cores) recorded (§5)
 - [ ] ≥10 fresh-process invocations; **median + dispersion + CI**; counters normalized per byte/instruction (§4)
 - [ ] GC-time vs mutator-time split reported; pause distribution (p99/p99.9/max) for any latency claim (§4,§7)
