@@ -195,10 +195,6 @@ struct dom_internal {
   caml_plat_mutex domain_lock;
   caml_plat_cond domain_cond;
   bool domain_canceled;
-
-  /* modified only during STW sections */
-  uintnat minor_heap_reservation_start;
-  uintnat minor_heap_reservation_end;
 };
 typedef struct dom_internal dom_internal;
 
@@ -458,61 +454,28 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   return Wsize_bsize(bs);
 }
 
-/* Note [minor heap layout]:
+/* Note [minor heap layout] (always-on MMTk):
 
-- The 'minor heaps reservation' is a contiguous address space of size
-    [caml_minor_heap_max_wsz * caml_params->max_domains]
-  reserved by [caml_init_domains]. Its boundaries are
-    [caml_minor_heaps_start]
-  and
-    [caml_minor_heaps_end].
+  The stock per-domain minor heap and the global minor-heaps address-space
+  reservation are GONE. Under always-on MMTk the "minor heap" is an MMTk TLAB
+  block (an Immix nursery block) that [caml_mmtk_refill_tlab] hands the domain;
+  [young_start/young_end/young_ptr] alias that MMTk-owned block. Bytecode
+  allocates straight into MMTk. Nothing is allocated in a reserved
+  [caml_minor_heaps_start, caml_minor_heaps_end) range — that range and its
+  per-domain segments no longer exist — so [Is_young] is always false
+  (address_class.h) and the reservation machinery
+  (reserve/unreserve/resize_minor_heaps_reservation, the per-domain
+  minor_heap_reservation_{start,end} fields, the [caml_mem_map]/[caml_mem_unmap]
+  of the reservation) has been retired.
 
-- Each domain gets a 'minor heap reservation', a segment of the global
-  reservation of size [caml_minor_heap_max_wsz], whose boundaries are
-    [domain_self->minor_heap_reservation_start]
-  and
-    [domain_self->minor_heap_reservation_end]
-
-  These variables are accessed in [stw_resize_minor_heaps_reservation],
-  synchronized by a global barrier.
-
-- STW-participating domains have a 'minor heap arena', a memory block
-  used for the minor heap, which is committed within its minor heap
-  reservation. The arena has size [domain_state->minor_heap_wsz], and
-  its boundaries are
-     [domain_state->young_start]
-   and
-     [domain_state->young_end].
-
-  Those [young_{start,end}] variables are never accessed by another
-  domain, so they need no synchronization.
-
-  New domains are created with a minor heap arena of size
-  [caml_params->init_minor_heap_wsz].
-
-  Domains commit their minor heap arena in
-    [allocate_minor_heap_arena]
-  which is called both at domain-initialization (by [domain_create])
-  and if a request comes to change the size of the arena.
-
-  They decommit their minor heap arena by calling
-    [free_minor_heap_arena]
-  before leaving the set of STW participants.
-
-  If a domain uses [Gc.set] to change the size of its memory area, and
-  the requested size is larger than its minor heap reservation, then
-  we need to change the global minor heaps reservation. This is done
-  by a STW section that first performs a minor collection and
-  deallocates the arena of each domain. See
-  [stw_resize_minor_heap_reservation].
+  [caml_minor_heap_max_wsz] survives as a plain scalar cap on the per-domain
+  minor-heap word size requestable via [Gc.set] (it sizes the minor tables and
+  is asserted against in gc_ctrl.c). [caml_update_minor_heap_max] raises it; no
+  memory is reserved.
 */
 
-/* Size of the virtual memory reservation for the minor heap, per domain. */
+/* Size of the (nominal) minor heap, per domain — a scalar cap; see above. */
 uintnat caml_minor_heap_max_wsz;
-
-/* The boundaries of the reserved address space for all minor heaps. */
-CAMLexport uintnat caml_minor_heaps_start;
-CAMLexport uintnat caml_minor_heaps_end;
 
 Caml_inline void check_minor_heap(void) {
   caml_domain_state* domain_state = Caml_state;
@@ -520,136 +483,30 @@ Caml_inline void check_minor_heap(void) {
   caml_gc_log(
       "young_start: %p,"
       " young_end: %p,"
-      " minor_heap_reservation_start: %p,"
-      " minor_heap_reservation_end: %p,"
       " minor_heap_wsz: %" CAML_PRIuSZT " words",
       domain_state->young_start,
       domain_state->young_end,
-      (value*)domain_self->minor_heap_reservation_start,
-      (value*)domain_self->minor_heap_reservation_end,
       domain_state->minor_heap_wsz);
 
   /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix nursery),
      not the stock per-domain minor arena. caml_mmtk_refill_tlab repoints
-     young_start/young_end/young_ptr at the MMTk-owned block, which is unrelated to
-     domain_self->minor_heap_reservation_{start,end} (the stock reservation MMTk
-     never allocates from), and after a minor collection young_ptr is reset to
-     young_start (not young_end). So BOTH stock invariants this DEBUG-only check
-     asserts — "minor heap fully drained" (young_ptr == young_end) and
-     "young_{start,end} lie within the stock reservation" — are stock-GC arena
-     invariants that do not hold here. check_minor_heap is reached from
-     free_minor_heap_arena / allocate_minor_heap_arena on the domain-terminate and
-     Gc.set-resize paths, so every native domain teardown in the parallel tests
-     trips it under the debug runtime. The asserts are skipped under MMTk; the
-     caml_gc_log above is kept for diagnostics. (DEBUG-only; release and all-plans
-     behaviour unchanged.) */
+     young_start/young_end/young_ptr at the MMTk-owned block, and after a minor
+     collection young_ptr is reset to young_start (not young_end). So the stock
+     "minor heap fully drained" invariant (young_ptr == young_end) does not hold
+     here, and there is no longer any reservation to bounds-check against. The
+     stock asserts are gone; the caml_gc_log above is kept for diagnostics.
+     (DEBUG-only; release and all-plans behaviour unchanged.) */
 }
 
 
-/* The stock per-domain minor-heap arena is gone under always-on MMTk: the minor
-   heap is an MMTk TLAB block set up by caml_mmtk_refill_tlab (called from
-   caml_mmtk_domain_init), so allocate/free/reallocate_minor_heap_arena are removed.
-   The address-space reservation below is KEPT only because it still bounds Is_young
-   (address_class.h) — its removal is part of the header/metadata reconciliation. */
+/* The stock per-domain minor-heap arena AND the minor-heaps address-space
+   reservation are gone under always-on MMTk: the minor heap is an MMTk TLAB
+   block set up by caml_mmtk_refill_tlab (called from caml_mmtk_domain_init), so
+   allocate/free/reallocate_minor_heap_arena and the
+   reserve/unreserve/resize_minor_heaps_reservation machinery are removed.
+   Is_young is now a folded constant false (address_class.h). */
 
-/* Minor heaps reservation: initialization and resizing */
-
-static void reserve_minor_heaps_reservation_from_stw_single(void) {
-  void* heaps_base;
-  uintnat minor_heaps_reservation_bsize;
-  uintnat minor_heap_max_bsz;
-
-  CAMLassert (caml_mem_round_up_pages(Bsize_wsize(caml_minor_heap_max_wsz))
-          == Bsize_wsize(caml_minor_heap_max_wsz));
-
-  minor_heap_max_bsz = (uintnat)Bsize_wsize(caml_minor_heap_max_wsz);
-  minor_heaps_reservation_bsize = minor_heap_max_bsz * caml_params->max_domains;
-
-  /* reserve memory space for minor heaps */
-  heaps_base = caml_mem_map(minor_heaps_reservation_bsize, 1/* reserve_only */);
-  if (heaps_base == NULL)
-    caml_fatal_error("Not enough heap memory to reserve minor heaps");
-
-  caml_minor_heaps_start = (uintnat) heaps_base;
-  caml_minor_heaps_end =
-    (uintnat) heaps_base + minor_heaps_reservation_bsize;
-
-  caml_gc_log("new minor heaps reservation from %p to %p",
-              (value*)caml_minor_heaps_start,
-              (value*)caml_minor_heaps_end);
-
-  for (int i = 0; i < caml_params->max_domains; i++) {
-    struct dom_internal* dom = &all_domains[i];
-
-    uintnat domain_minor_heap_reservation =
-      caml_minor_heaps_start
-      + minor_heap_max_bsz * (uintnat)i;
-
-    dom->minor_heap_reservation_start = domain_minor_heap_reservation;
-    dom->minor_heap_reservation_end =
-      domain_minor_heap_reservation + minor_heap_max_bsz;
-
-    CAMLassert(dom->minor_heap_reservation_end
-               <= caml_minor_heaps_end);
-  }
-}
-
-static void unreserve_minor_heaps_reservation_from_stw_single(void) {
-  uintnat size;
-
-  caml_gc_log("unreserve_minor_heaps_reservation");
-
-  for (int i = 0; i < caml_params->max_domains; i++) {
-    struct dom_internal* dom = &all_domains[i];
-
-    CAMLassert(
-      /* this domain is not running */
-      !dom->interruptor.running
-      || (
-        /* or its minor heap must already be uninitialized */
-        dom->state != NULL
-        && dom->state->young_start == NULL
-        && dom->state->young_end == NULL
-      ));
-    /* Note: interruptor.running does not guarantee that dom->state is
-       correctly initialized, but domain initialization cannot run
-       concurrently with STW sections so we cannot observe partial
-       initialization states. */
-
-    /* uninitialize the minor heap reservation. */
-    dom->minor_heap_reservation_start = dom->minor_heap_reservation_end = 0;
-  }
-
-  size = caml_minor_heaps_end - caml_minor_heaps_start;
-  CAMLassert (Bsize_wsize(caml_minor_heap_max_wsz) * caml_params->max_domains
-              == size);
-  caml_mem_unmap((void *) caml_minor_heaps_start, size);
-}
-
-static
-void domain_resize_heaps_reservation_from_stw_single(uintnat new_minor_wsz)
-{
-  CAML_EV_BEGIN(EV_DOMAIN_RESIZE_HEAP_RESERVATION);
-  caml_gc_log("stw_resize_minor_heaps_reservation: unreserve");
-
-  unreserve_minor_heaps_reservation_from_stw_single();
-  /* new_minor_wsz is page-aligned because caml_norm_minor_heap_size has
-     been called to normalize it earlier.
-  */
-  caml_minor_heap_max_wsz = new_minor_wsz;
-  caml_gc_log("stw_resize_minor_heaps_reservation: reserve");
-  reserve_minor_heaps_reservation_from_stw_single();
-  /* The call to [reserve_minor_heaps_reservation_from_stw_single] makes a new
-     reservation, and it also updates the reservation boundaries of each
-     domain by mutating its [minor_heap_reservation_start{,_end}] variables.
-
-     These variables are synchronized by the fact that we are inside
-     a STW section: no other domains are running in parallel, and
-     the participating domains will synchronize with this write by
-     exiting the barrier, before they read those variables in
-     [allocate_minor_heap_arena] below. */
-  CAML_EV_END(EV_DOMAIN_RESIZE_HEAP_RESERVATION);
-}
+/* Minor heap max-size cap: resize (no memory is reserved). */
 
 static void
 stw_resize_minor_heaps_reservation(caml_domain_state* domain,
@@ -660,12 +517,15 @@ stw_resize_minor_heaps_reservation(caml_domain_state* domain,
   caml_empty_minor_heap_no_major_slice_from_stw(
     domain, NULL, participating_count, participating);
 
-  /* Under always-on MMTk there is no stock minor-heap arena to free / re-commit
-     (the minor heap is an MMTk TLAB block, refilled per domain from MMTk). We only
-     resize the address-space reservation, which still bounds Is_young. */
+  /* Under always-on MMTk there is no stock minor-heap arena and no address-space
+     reservation to re-map: raising the per-domain minor-heap word cap is just a
+     scalar store, done by the final domain under the global barrier so all
+     domains observe the new cap on exit. new_minor_wsz is page-aligned
+     (caml_norm_minor_heap_size normalized it earlier). */
   Caml_global_barrier_if_final(participating_count) {
-    uintnat new_minor_wsz = (uintnat) minor_wsz_data;
-    domain_resize_heaps_reservation_from_stw_single(new_minor_wsz);
+    caml_minor_heap_max_wsz = (uintnat) minor_wsz_data;
+    caml_gc_log("stw_resize_minor_heaps_reservation: new max %" CAML_PRIuNAT
+                " words", caml_minor_heap_max_wsz);
   }
 }
 
@@ -1001,8 +861,8 @@ void caml_init_domains(uintnat max_domains, uintnat minor_heap_wsz)
   if (stw_domains.domains == NULL)
     caml_fatal_error("Failed to allocate stw_domains.domains");
 
-  reserve_minor_heaps_reservation_from_stw_single();
-  /* stw_single: mutators and domains have not started yet. */
+  /* No minor-heaps address-space reservation under always-on MMTk: the minor
+     heap is an MMTk TLAB block per domain (see Note [minor heap layout]). */
 
   for (int i = 0; i < max_domains; i++) {
     struct dom_internal* dom = &all_domains[i];

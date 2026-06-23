@@ -47,17 +47,21 @@
 extern "C" {
 #endif
 
-CAMLextern uintnat caml_minor_heaps_start;
-CAMLextern uintnat caml_minor_heaps_end;
-
-/* Is_young(val) is true iff val is in the reserved area for minor heaps */
+/* Under always-on MMTk there is no stock per-domain minor heap and no
+   minor-heaps address-space reservation: native code allocates from a TLAB
+   aliased onto an MMTk Immix block and bytecode allocates straight into MMTk,
+   both OUTSIDE any reserved [caml_minor_heaps_start, caml_minor_heaps_end)
+   range. So no live object is ever "young" in the stock sense and Is_young(val)
+   is always false. We fold the constant here (the reservation + its bounding
+   variables have been removed from domain.c); every former consumer therefore
+   runs its always-false branch, which has been audited to be the MMTk-correct
+   behaviour (MMTk owns the whole heap; the young/old split was the stock minor
+   remembered set). The Is_block assertion side effect is retained. */
 
 #define Is_young(val) \
-  (CAMLassert (Is_block (val)), \
-   (char *)(val) < (char *)caml_minor_heaps_end && \
-   (char *)(val) > (char *)caml_minor_heaps_start)
+  (CAMLassert (Is_block (val)), 0)
 
-#define Is_block_and_young(val) (Is_block(val) && Is_young(val))
+#define Is_block_and_young(val) (Is_block(val) && 0)
 
 /* These definitions are retained for backwards compatibility with OCaml 4 */
 #define Is_in_heap_or_young(a) 1

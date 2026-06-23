@@ -5,6 +5,46 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M9 #8: Is_young address-space reservation retired + header-colour audit — M9 cleanup complete
+
+*2026-06-23*
+
+The last M9 cleanup item: **retired the `Is_young` address-space reservation** (the counterpart #6
+deliberately KEPT). Under TLAB nursery-aliasing nothing is ever allocated in
+`[caml_minor_heaps_start, caml_minor_heaps_end)` — young objects live in MMTk Immix blocks outside
+it — so `Is_young(v)` is **always false** at all ~8 call sites (`weak.c`, `finalise.c`, `memprof.c`,
+`globroots.c`, `obj.c`, `intern.c`, `fiber.c`, `minor_gc.c`, `array.c`). Audited each; the
+always-false branch is the MMTk-correct behaviour. Folded `Is_young(val)` →
+`(CAMLassert(Is_block(val)), 0)` and `Is_block_and_young` → `(Is_block(val) && 0)` — a **constant-fold
+of an already-false macro, byte-identical to prior runtime behaviour** (the safest way to remove the
+dead machinery, esp. for the #11-entangled weak.c/finalise.c, whose semantics are unchanged). Removed
+`caml_minor_heaps_start/_end`, the `minor_heap_reservation_{start,end}` per-domain fields,
+`reserve_/unreserve_/domain_resize_minor_heaps_reservation_from_stw_single` (incl. the reservation
+`caml_mem_map`/`unmap`), and simplified `stw_resize_minor_heaps_reservation` to bump the scalar cap
+`caml_minor_heap_max_wsz` under the global barrier. −190/+54 lines; **no binding change**.
+
+**Synergy with #21:** deleting `unreserve_minor_heaps_reservation_from_stw_single` removes the
+`domain.c:605` debug assert (`young_start/end == NULL` for a running domain — a stock-arena invariant
+invalid under MMTk TLAB) that was reddening the CI debug-matrix Build.
+
+**Header colour/mark audit (task a) — no code change.** No *live* runtime-C path reads the stock
+header colour for liveness under MMTk: `caml_gc_phase` never advances past `Phase_sweep_main`, the
+`caml_darken`/major-slice drivers are inert, and the M6 weak/finaliser path queries MMTk reachability,
+not colour bits. Colour *construction* (`Make_header(…, NOT_MARKABLE)`, `caml_allocation_status`) is
+correct and kept. **Flagged (out of scope):** `memprof.c:1558` reads the stock colour for liveness —
+latent if memprof is ever wired to MMTk (memprof is currently unsupported).
+
+Verified (agent + an independent main-agent re-check on a forced-fresh build): forced `world.opt`
+clean; MMTk `sanity` (full-heap re-trace) at small heaps (24–64 MB), bytecode + native, Immix +
+StickyImmix, heapstress + gc-roots — no panic; multidomain stress 13/13 identical checksums across
+Immix/StickyImmix (independent re-run); gc-roots 4/4; weak-ephe-final 14/14 (Immix). One pre-existing
+failure (NOT a regression, A/B-proven by reverting): `weak-ephe-final/weaklifetime.ml` asserts under
+StickyImmix (line 53) — weak-clear timing tied to stock generational promotion pacing MMTk doesn't
+reproduce (#11). **M9's stock-GC excision is now complete bar #11 (weak semantics) + the memprof
+colour flag.**
+
+---
+
 ## bug #4: gc_regs bucket leak on OOM-raise inside caml_call_gc — FIXED
 
 *2026-06-23*
@@ -158,9 +198,11 @@ just sets `minor_heap_wsz` to the nominal size (for `Gc.stat`/`Gc.get` + minor-t
 and leaves `young_*` NULL until the refill — verified nothing allocates an OCaml value in the
 create window before `caml_mmtk_domain_init` (it's all `caml_stat`/mmap). domain terminate,
 `caml_set_minor_heap_size`, and `stw_resize_minor_heaps_reservation` no longer touch an arena.
-**KEPT (not removed): the address-space reservation** (`caml_minor_heaps_start/end`), because
-`Is_young(v)` (address_class.h) is `v ∈ [start,end)` — so retiring the reservation is
-entangled with young-object classification (header/metadata reconciliation, #8). Verified on
+At the time, **KEPT the address-space reservation** (`caml_minor_heaps_start/end`) because
+`Is_young(v)` (address_class.h) is `v ∈ [start,end)` — retiring it was entangled with
+young-object classification. **(Later RETIRED by #8, 2026-06-23: the consumers were audited,
+`Is_young` was confirmed always-false everywhere and folded to a constant, and the reservation +
+its STW machinery removed — see the #8 entry above.)** Verified on
 turing: multidomain spawn/terminate (Immix+StickyImmix), gc-roots, native old→young
 (StickyImmix), simple programs.
 
