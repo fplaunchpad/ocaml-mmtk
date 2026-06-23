@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Workstreams archive (migrated from ROADMAP, 2026-06-23)
+
+*2026-06-23*
+
+When ROADMAP.md was slimmed (718→~214 lines) its `## Workstreams (A–I)` section and the
+three overlapping status views were removed: almost all of that content was already
+covered by the dated entries in this file (bugs #1–#4, #15, the M9 stages, opam
+relocatability, native TLAB, parallel collection, pinning, weak/ephemeron/finaliser,
+plan matrix, etc. — see the entries below). This entry preserves the **one piece that
+was ROADMAP-unique and not already here**: the M8 benchmark baseline + optimisation
+levers (ROADMAP Workstream H). Everything else from Workstreams A–I is unchanged in
+substance and lives in the dated entries below; ROADMAP now points here.
+
+**M8 first benchmark baseline (2026-06-20, `gcbench` native, single-domain, large
+persistent live set ~192 MB + heavy churn — a GC-heavy worst-ish case):**
+
+| Config | wall | RSS |
+|---|---|---|
+| stock GC | **3.85 s** | 440 MB |
+| MMTk Immix 512 MB | 14.1 s | 524 MB |
+| MMTk Immix 1024 MB | 7.0 s | 1.0 GB |
+| MMTk Immix 2048 MB | 5.9 s | 2.1 GB |
+| MMTk StickyImmix 1024 MB | **5.4 s** | 1.25 GB |
+
+So today MMTk is **~1.4–1.8× slower and uses more memory** here. Two structural reasons
+(not bugs): (1) **fixed heap** — MMTk reserves the whole `MMTK_HEAP_SIZE_MB` (RSS ≈ heap;
+tight heaps thrash: 512 MB → 14 s) where stock auto-sizes; (2) stock is **generational**,
+so its frequent collections don't re-trace the old set, whereas non-gen **Immix re-traces
+the whole 192 MB live set every GC**. A *generational* MMTk plan (**StickyImmix**) already
+closes much of the gap, and more heap headroom helps.
+
+**Optimisation levers + first-round results (2026-06-20):**
+
+1. **Dynamic heap sizing — TRIED, REGRESSED, reverted.** Switched `gc_trigger` to
+   `DynamicHeapSize:32M,cap`. On `gcbench` it *thrashed* — one run took >190 s (vs 5.9 s
+   fixed) because it starts at 32 MB against a ~192 MB live set and mmtk 0.32's grow
+   heuristic ramps too slowly. A small-min dynamic heap is *worse* for large-live-set
+   programs. Reverted to `FixedHeapSize`. Future: a much larger/auto min, or investigate
+   mmtk's MemBalancer trigger.
+2. **Generational plan (StickyImmix) — faster** (`gcbench` 5.4 s vs Immix 7.0 s, ≈1.4×
+   stock; TLAB-compatible). The StickyImmix bootstrap SEGV and CI bug #2 that once blocked
+   making it the default are both fixed (see the `slot.rs` Infix_tag and bug #2 entries
+   below); Immix remains the default for now.
+3. **Inline the bytecode allocation fast path** — bytecode all-MMTk calls
+   `mmtk_ocaml_alloc` per object (vs stock's inlined bump); inline a bump fast path.
+4. **GC-thread count** — default is `nproc` (e.g. 28) *per process* (a big chunk of the
+   slow self-hosting bootstrap); a smaller default helps short programs but a long
+   GC-heavy run wants parallel marking — needs a balanced default.
+5. **Immix defrag/policy tuning** — reduce TLAB-refill overhead; revisit the LOS
+   threshold.
+
+(All of these are M8 / ROADMAP open-work #17, and tie to `RESEARCH_QUESTIONS.md`.)
+
+---
+
 ## bug #3b: multidomain spawn/STW deadlock — root cause + an MMTk-native STW rearchitecture (in progress)
 
 *2026-06-23*
