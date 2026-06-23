@@ -5,6 +5,51 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Performance work — method of record (`PERFORMANCE.md`) + fast-path audit findings
+
+*2026-06-23*
+
+A multi-agent perf-planning pass (5 parallel read-only audits + synthesis) produced
+**`PERFORMANCE.md`** (the measurement method of record — heap-size-multiple sweeps not single
+numbers, workload fingerprint first, median+dispersion, GC-vs-mutator split; grounded in
+MemBalancer / Distilling-the-Real-Cost / Myths-and-Realities) and a ranked optimization backlog
+(`PERFORMANCE.md` Appendix A; summarized in ROADMAP #17). Standing order from the maintainer:
+**obvious fast-path removals first, then measure, then deeper levers.**
+
+**Headline static findings (two spot-verified against the tree):**
+- **Native small-alloc is byte-for-byte stock** (`asmcomp/amd64/emit.mlp:607-636`, `runtime/amd64.S`)
+  — same `sub/cmp/jb` poison-safepoint, no extra branch / dead check / zeroing. **Do not touch it;**
+  all native MMTk cost is in slow paths.
+- **Bytecode has NO TLAB (the dominant lever, #A1).** `Alloc_small_with_reserved` is `#undef`'d and
+  redefined as a per-object `caml_mmtk_alloc_small()` C-call wrapped in the `Setup_for_gc`/`Restore`
+  root-publish dance (`runtime/caml/memory.h:263-277`) — where stock/native do a 3-instruction inline
+  bump. *Verified.*
+- **Double slot-load on every traced edge (#C1).** `FieldSlot::from_address` loads the slot word
+  (`slot.rs:92` → `classify`), then `load()` re-reads it via `raw_value()` (`slot.rs:179`/`:103`);
+  plus a per-slot `is_in_mmtk_spaces` SFT lookup. *Verified.* Caching the word is a clean quick win
+  (care under moving plans where the word can change between classify and trace).
+- **Native write barrier is a no-op *call* under the default Immix plan (#B1).** Every pointer store is
+  an unconditional out-of-line `caml_modify` (`cmm_helpers.ml:2290`) → `caml_mmtk_region_barrier`,
+  which returns immediately when `caml_mmtk_generational==0`. Stock inlines the test.
+
+**GOTCHA — `runtime_events` is BROKEN under MMTk (blocks olly).** The real STW window
+(`gc/mmtk/binding/src/collection.rs:224-287`, pause-start `:230`, elapsed `:287`) emits **zero**
+`caml_ev_*` events — nothing in `gc/mmtk/` or `mmtk.c` writes the ring. Meanwhile the *surviving*
+stock spans wrap neutered no-ops: `EV_MAJOR` brackets the inert `caml_major_collection_slice`
+(`domain.c:1951`, `major_gc.c:1012`); `EV_MINOR`/`EV_EMPTY_MINOR` wrap the dead minor; the words
+counters read stock fields that are 0 under MMTk (`EV_C_MINOR_ALLOCATED_WORDS` =
+`young_end-young_ptr` = 0 in bytecode; `EV_C_MINOR_PROMOTED_WORDS` structurally always 0). **So olly
+reports fictional tiny pauses + zero/wrong words.** Until the fix (backlog #R1–#R4: emit a real
+GC-STW span around the MMTk pause from a domain with a ring slot, source words from the MMTk
+odometer, stop the phantom spans), **get pause times from `bpftrace` uprobes, not olly.** The true
+numbers live in `MMTK_VERBOSE=1` (`GCs / GC time / objects copied`) and `caml_mmtk_gc_stats`.
+
+**Prereqs that don't exist yet:** a lifetime-dispersion (Gini) profiler + a per-GC survival/mutation
+meter — RQ2's per-benchmark workload fingerprint needs both (backlog #P1/#P2). Host `turing`:
+governor is `powersave` (set `performance` before timing); olly not installed; perf/turbo already OK.
+
+---
+
 ## ConcurrentImmix / SATB — the `lazy` hazard (open research question; implement-and-test-breakage)
 
 *2026-06-23*

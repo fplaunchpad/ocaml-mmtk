@@ -105,13 +105,32 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `MarkSweep` (free-list — no bump region) and `PageProtect` (page-per-object debug) have no bump
    allocator the inlined native fast-path can alias → bytecode-only without a codegen change.
 
-7. **#17 — benchmarking + perf tuning (M8).** The open milestone; ties directly to
-   `RESEARCH_QUESTIONS.md`. Levers identified (first-round results in NOTES): dynamic
-   heap sizing (a small-min `DynamicHeapSize` *regressed* on large live sets — needs a
-   larger/auto min or MemBalancer), generational default (StickyImmix closes much of the
-   gap), inline the bytecode alloc fast-path (vs per-object `mmtk_ocaml_alloc`),
-   GC-thread-count balance (default `nproc` per process), Immix defrag/LOS tuning. →
-   NOTES `Workstreams archive` (benchmark baseline + levers).
+7. **#17 — benchmarking + perf tuning (M8).** The open milestone; ties to
+   `RESEARCH_QUESTIONS.md` RQ2. **Method of record: [`PERFORMANCE.md`](PERFORMANCE.md)**
+   (heap-size-multiple sweeps not single numbers; workload fingerprint first; median +
+   dispersion; GC-vs-mutator split) — adopt it before publishing any number. Standing
+   order: **obvious fast-path removals first, then measure, then deeper levers.**
+   - **Dominant levers (static hypotheses, measure-gated):** #A1 give *bytecode* a TLAB /
+     inline its alloc fast-path (it has none — every object is a C-call + root-publish vs
+     stock/native's 3-insn bump, `memory.h:263`); #C1 per-slot SFT lookup + a verified
+     double slot-load on every traced edge (`slot.rs:92`/`:179`); #B1 inline the native
+     write barrier (a no-op *call* under the default Immix plan, `cmm_helpers.ml:2290`).
+     **Native small-alloc is byte-for-byte stock — do NOT touch it** (all MMTk cost is in
+     slow paths).
+   - **Obvious removals (low-risk quick pass):** cache the classified slot word (kill the
+     double load), single header read in `scan_object`, hoist the per-root debug branch,
+     drop the dead `match semantics` small-alloc arm, drop the empty-`src` slice in the
+     scalar barrier.
+   - **Measurement blocker:** `runtime_events` is **broken under MMTk** — the real STW
+     window (`collection.rs:224-287`) emits *zero* events while surviving stock spans wrap
+     neutered no-ops, so **olly currently reports fictional tiny pauses**; use `bpftrace`
+     uprobes until #R1–#R4 land. Host `turing`: set governor=performance + `opam install
+     runtime_events_tools` (perf/turbo already OK).
+   - **Prereqs that don't exist yet:** a lifetime-dispersion (Gini) profiler (#P1) + a
+     per-GC survival/mutation meter (#P2) — RQ2's workload fingerprint needs them.
+   - Earlier first-round levers (heap sizing — small-min `DynamicHeapSize` *regressed*;
+     StickyImmix closes much of the gap; GC-thread-count `nproc` oversized). → full ranked
+     backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
 
 8. **`ConcurrentImmix` + SATB write barrier — the RQ1 research flagship (in progress).**
    The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make

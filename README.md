@@ -22,8 +22,8 @@ on a common substrate. The research agenda lives in
 
 > Supported on **x86-64 Linux**; native code on macOS is untested. On GC-heavy
 > workloads MMTk currently runs at ~1.4–1.8× the stock GC and uses more memory —
-> performance tuning is the open milestone (M8). Benchmark against a vanilla OCaml
-> 5.5 opam switch.
+> performance tuning is the open milestone (M8); the measurement methodology is
+> [`PERFORMANCE.md`](PERFORMANCE.md). Benchmark against a vanilla OCaml 5.5 opam switch.
 
 ## Status at a glance
 
@@ -119,6 +119,7 @@ initialization all go through MMTk; the C glue lives in `runtime/mmtk.c`.
 - [`ROADMAP.md`](ROADMAP.md) — the live plan and milestone status.
 - [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) — dated design notes and investigations.
 - [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) — the GC-research agenda.
+- [`PERFORMANCE.md`](PERFORMANCE.md) — the GC-performance measurement method of record (M8).
 - [`fork-handoff.md`](fork-handoff.md) — original cold-start brief.
 - [`README.upstream.adoc`](README.upstream.adoc) — the upstream OCaml README.
 
