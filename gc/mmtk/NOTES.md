@@ -79,36 +79,50 @@ job structure tripped the 600 s watchdog).
 
 ---
 
-## fft differential perf debugging — MMTk's fft slowdown is GC, not locality (and not a flambda artifact)
+## fft → parity (1.66× → 1.05×): the cause was a post-GC POLL STORM, not per-GC root scan — fixed by refill-at-resume
 
-*2026-06-23*
+*2026-06-23* — **this supersedes an earlier wrong diagnosis in this same entry** (kept as a cautionary record).
 
-"Why is a compute-bound float benchmark 1.66× slower under MMTk if it barely allocates?" Differential
-`perf stat`/`perf record` on `fft.vanilla` vs `fft.fork` (`MMTK_PLAN=Immix`, 128 MB), same core, governor
-=performance:
+fft was 1.66× slower under MMTk-Immix; it is now **1.05× (parity)** via a 1-line fix
+(`46cb3253f2`, branch `fft-refill-after-gc`). My earlier reading here — "a full STW + root scan every
+collection; gen plans don't help because they still root-scan per nursery GC" — **was wrong**, and the
+correction is the lesson.
 
-- **`perf stat`:** instructions **1.80×** (6.0e10 → 10.8e10), task-clock 1.61×, but **IPC is *higher*
-  under MMTk (1.33 vs 1.20) and cache-misses/refs are identical** → it is *not* a locality/cache regression;
-  MMTk simply executes ~4.8e9 **more instructions** (does more work).
-- **`perf record`:** vanilla is ~81% `Fft.code_begin` (the FFT math), GC **invisible**. MMTk: `caml_call_gc`
-  **10%** + `caml_garbage_collection` **5.6%** + `caml_find_frame_descr` **3.5%** ≈ **19%+** in GC machinery
-  (plus mark/sweep below the 1% cutoff).
-- **Not a compilation artifact:** both compilers are `flambda: false` (fair). So fft genuinely **boxes
-  floats** (non-flambda) → allocation churn.
+**What fft actually does.** It barely allocates (`minor_words: 1013`) and does **NOT box floats** (they stay
+unboxed/in-register even *without* flambda); its memory is a few **large float arrays** (~33.5 MB each,
+~67 MB live). Under `MMTK_VERBOSE`: **1 GC at heap ≤128 MB (0 ms STW, 0 objects copied), 0 GCs at ≥130 MB.**
+The 128 MB iso heap sits exactly on a cliff (peak-live + the next array pair overflow → 1 GC); at ≥130 MB fft
+was already ~1.05×. So there is essentially **no collection** — the root-scan-per-GC story cannot apply.
 
-**Mechanism.** Vanilla's minor GC sweeps the short-lived boxed-float churn nearly for free (0 survivors,
-cheap bump-reset). MMTk pays a **full STW + complete root scan every collection** — `caml_find_frame_descr`
-walking stack frame descriptors, then each root through the `FieldSlot` classify/SFT machinery — plus
-mark/sweep. The **generational plans don't help** (all ≈1.66×) because they *still* do a full STW root scan
-per nursery GC; the per-collection fixed cost dominates for this small-live-set / high-churn workload, where
-vanilla's minor GC is much cheaper per cycle.
+**The real cause — a post-GC poll storm.** After that one GC, `caml_mmtk_uninterrupt` collapsed the domain's
+young region to zero (`young_start == young_end == young_ptr`) so the *next* alloc would refill. But a
+collapsed region leaves `young_ptr == young_limit`, so the inlined native fast path **traps into
+`caml_call_gc` at every poll/alloc safepoint until a refill happens**. fft's post-GC hot loop seldom
+allocates → never refills promptly → **35.9M spurious `caml_garbage_collection` entries** (all `nallocs==0`
+polls), each a full `caml_find_frame_descr` stack-walk + pending-action check. So the `caml_call_gc` 10% /
+`caml_garbage_collection` 5.6% / `caml_find_frame_descr` 3.5% in the profile were **the poll storm, not
+collection** — I misread those symbols as per-GC root scanning. (124 MB: 35.9M entries; 256 MB: 1.
+`MMTK_THREADS` irrelevant — mutator-thread cost, not marking.)
 
-**Levers / takeaways.** (1) MMTk per-GC root-scan cost is a real target — PERFORMANCE.md **#C1** (`FieldSlot`
-per-slot SFT lookup + double load) applied to *root* slots, and the STW-every-GC model. (2) **Methodology:**
-non-flambda over-boxes floats and inflates GC's role; numeric benchmarks should be built with **flambda**
-(what real numeric OCaml uses) — that would cut the allocation and shrink this gap, so the 1.66× over-states
-MMTk's disadvantage on numeric code. This is a clean example of "differential performance debugging" (the
-PERFORMANCE.md §9 funnel: `perf stat` → which counter moved → `perf record` → which function).
+**The fix (1 line, `runtime/mmtk.c:caml_mmtk_uninterrupt`).** After the collapse, immediately
+`caml_mmtk_refill_tlab(d, …)` — hand the domain a fresh young region (all mutators are stopped in the
+GC-worker resume; the same call `caml_mmtk_domain_init` already makes). `young_ptr` is then above
+`young_limit`, so the fast path runs straight through — no poll storm. On true OOM the refill returns 0 →
+falls back to collapse-then-trap → `Out_of_memory` still raises. Minor-words accounting unchanged. **This is
+a general win** — *any* post-GC low-allocation phase paid the storm, not just fft.
+
+**Verified:** fft Immix @128 MB 3.91→2.51 s (1.63×→**1.05×**; vanilla 2.40); all gen plans ~1.05×; the cliff
+is gone (124–1024 MB all ~2.5 s). Checksum correct; MMTk `sanity` clean across Immix/Sticky/GenImmix/GenCopy
+(+ a heavy typecore compile @64 MB); **no regression on GC-heavy binary_trees d19** (96 real GCs — refill
+runs every collection — StickyImmix 8.24→8.10, Immix 20.5→19.7, both slightly *faster*); bug #3c crash-rate
+unchanged (orthogonal).
+
+**Corrections to the prior reading.** (1) **#C1 / per-GC root-scan was a red herring *for fft*** (1 GC, 0 ms
+STW) — it stays a real lever for genuinely GC-heavy workloads (binary_trees), just not this one. (2) fft does
+**not** over-box floats, so a flambda build changes little here (the cost was the large-array GC cliff + poll
+storm, not float churn). The residual ~5% is general per-edge/safepoint overhead (#C1/#A1 territory),
+orthogonal to this fix. **Lesson:** a profile symbol (`caml_garbage_collection`) can be dominated by *spurious
+safepoint polls*, not real collections — confirm GC *count* (`MMTK_VERBOSE`) before attributing cost to GC.
 
 ---
 
