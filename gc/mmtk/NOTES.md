@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M8 macro-benches campaign — partial results (7 of 8 benches, SALVAGED)
+
+*2026-06-23*
+
+The full-campaign agent died twice (a 529, then a watchdog stall on the slow maxRSS pass) but **captured 61
+hyperfine cells across 7 benches** — salvaged, not re-run. Only **menhir** is missing entirely; **sedlex** has
+only one cell. Subjects: vanilla-5.5.0 vs the fork's Immix/StickyImmix/GenImmix/GenCopy; heap1× = ⌈vanilla
+maxRSS⌉ (iso-memory), heap2× = 2×; socket-1 pinned; **non-flambda** switches (fine for these parser/compiler/
+data benches). Raw JSONs on turing `~/campaign_results/`.
+
+| bench | vanilla | best @ iso (h1) | best @ 2× (h2) | notes |
+|---|---|---|---|---|
+| **yojson** | 7.94 s | **GenCopy 7.74 (0.97×, faster)** | GenImmix 7.92 | short-lived, 0-copy — MMTk wins |
+| **zarith** | 10.84 s | **StickyImmix 10.33 (0.95×, faster)** | ~10.9 | bignum — MMTk wins |
+| **decompress** | 12.92 s | Immix 15.17 (1.17×) | Immix 15.23 | modest |
+| **cpdf** | 12.86 s | GenImmix 16.47 (1.28×) | **Immix 13.33 (1.04×)** | near-parity at 2× |
+| **ocamlformat** | 6.96 s | GenImmix 13.29 (1.91×) | GenImmix 9.68 (1.39×) | iso cells OOM (others) |
+| **merlin** | 10.05 s | StickyImmix 21.94 (2.18×) | **GenImmix 12.46 (1.24×)** | multicore typer; iso thrash |
+| **sedlex** | 10.12 s | (iso OOM) | StickyImmix 27.90 | mostly OOM at iso |
+
+**Findings:**
+- **MMTk beats vanilla at iso-memory on short-lived / bignum workloads** (yojson 0.97×, zarith 0.95×).
+- **Several iso (h1) cells OOM** — MMTk can't fit in vanilla's RSS (the §3.4 memory-premium finding); GenImmix
+  is the most heap-tolerant (it often survives iso where Immix/StickyImmix/GenCopy OOM).
+- **The gap is heap-pressure, not fundamental:** at 2× heap it largely closes — cpdf Immix **1.04×**, merlin
+  GenImmix **1.24×** (vs 2.18× at iso), ocamlformat 1.39× (vs 1.91×). This is exactly the time-vs-heap story
+  PERFORMANCE.md §2 predicts — the single iso point understates MMTk.
+- **Champion is workload-dependent (RQ2):** GenCopy / StickyImmix / GenImmix / Immix each win somewhere; plain
+  **Immix is rarely best**.
+
+**Gaps to fill (do NOT re-run the 7 done):** menhir (entirely), sedlex's iso cells, the maxRSS pass (the agent
+stalled mid-pass), and the per-bench fingerprints. **Add for the full native set:** SemiSpace + **native
+ConcurrentImmix** (now working). The robust re-run should run cells as background jobs (the one-long-blocking-
+job structure tripped the 600 s watchdog).
+
+---
+
 ## fft differential perf debugging — MMTk's fft slowdown is GC, not locality (and not a flambda artifact)
 
 *2026-06-23*
