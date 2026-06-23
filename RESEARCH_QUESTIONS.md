@@ -221,12 +221,29 @@ forced result lost across the force-vs-mark window — reproduced twice. **Mecha
 only edge-deletion in forcing (clearing the thunk's field, `Obj.set_field b 0 ()`) routes through
 `caml_modify` → SATB-covered; the lazy *retag* only CASes the header tag (deletes no edge), and MMTk holds
 mark state in *side-metadata*, so the tag flip cannot corrupt the marker's view. So OCaml's lazy/SATB
-protocol *does* compose with a third-party concurrent marker — a positive RQ1 signal. **Residual open
-corner (the real remaining "can it break"):** lazy-forcing *jointly* with a moving (defragging) Full pause
-was not hit — lazy blocks are short-lived / line-recycled so `objects_copied` stayed 0 in the stressor (the
-moving path was validated separately on `parser.ml`). That joint case is **force-vs-relocate**, not just
-force-vs-mark, and is the next experiment. Also unwired (bytecode-only, correctness-first): the native-code
-SATB fast-path and an UNLOG-bit barrier gate (every concurrent-plan `caml_modify` currently buffers).
+protocol *does* compose with a third-party concurrent marker — a positive RQ1 signal.
+
+**Force-vs-relocate — now tested, also clean, and the reason why is the interesting part (2026-06-23).** The
+first stressor only exercised force-vs-*mark* (`objects_copied` stayed 0 — lazy blocks are short-lived /
+line-recycled). A second stressor (200k-cell persistent mature set; 60k forces/round × 40; thunks capturing
+long-lived cells; results stored back to fragment mature Immix blocks) drove **defragging Full pauses with
+`objects_copied > 0` *during the forcing window*** — genuinely hitting force-vs-relocate. Result:
+ConcurrentImmix (80/96/128 MB), Immix, and StickyImmix all produce the *identical* checksum, EXIT 0, zero
+sanity `Invalid reference`. **Mechanism (confirmed in mmtk-core source):** ConcurrentImmix's concurrent
+phases are *strictly non-moving* (`ConcurrentTraceObjects::trace_object` asserts `object == new_object`);
+relocation happens *only* on STW Full pauses with the SATB barrier *deactivated*, via the ordinary
+moving-Immix trace + the binding's existing forwarding path. Liveness (SATB) and movement (forwarding) are
+**disjoint, already-validated paths that never combine.** **The sharp implication for RQ1:** the truly hard
+hazard — a lazy forced *during a concurrent relocation* — **does not exist for this collector, because it
+never moves concurrently.** Concurrent *compaction* is exactly the design point that demands a *read*
+barrier (C4 / ZGC / Shenandoah) — the cost OCaml's designers refused. So OCaml/MMTk gets cheap concurrent
+*marking* (SATB, no read barrier) with lazy correctness for free, and the lazy-vs-concurrent-move hazard is
+moot *precisely because* the design stays read-barrier-free. **A concurrent-compacting plan would reopen
+it** — and that is exactly where RQ1's immutability bet would meet its real test (and where an LXR/RC-style
+or read-barrier design becomes the interesting comparison). Net: the lazy question is **closed for
+ConcurrentImmix** (clean, mechanism-explained). Still unwired (bytecode-only, correctness-first): the
+native-code SATB fast-path and an UNLOG-bit barrier gate (every concurrent-plan `caml_modify` currently
+buffers).
 
 **Related work / what's genuinely new.** LXR established the read-barrier-free low-latency design *on
 Java*; the concurrent compactors established the latency line *with* read barriers. **No one has tested
