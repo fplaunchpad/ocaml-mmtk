@@ -78,18 +78,19 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 ### GC plans
 
 `MMTK_PLAN` selects the collector at startup. Nine of mmtk-core 0.32's eleven plans are
-wired and validated in **bytecode**; **native** runs the Immix family only (the TLAB
-aliases an MMTk Immix block, so native needs an Immix nursery allocator):
+wired and validated in **bytecode**; **native** runs the four that have a bump-pointer
+nursery the TLAB can alias — `Immix`/`StickyImmix` (in-place) and `GenImmix`/`GenCopy`
+(copy-nursery). `GenImmix` is the stock-faithful generational native default candidate.
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
 | `Immix` *(default)* | mark-region, moving (defragments) | bytecode + native |
 | `StickyImmix` | generational, in-place nursery | bytecode + native |
-| `GenImmix` | generational, copying nursery | bytecode |
+| `GenImmix` | generational, copying nursery | bytecode + native |
 | `MarkSweep` | non-moving free-list | bytecode |
 | `NoGC` | bump-only; never reclaims (short programs only) | bytecode |
 | `SemiSpace` | classic two-space copying | bytecode |
-| `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode |
+| `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode + native |
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode |
 | `PageProtect` | one page per object (debugging) | bytecode |
 

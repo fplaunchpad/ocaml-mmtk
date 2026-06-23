@@ -6,7 +6,7 @@
 use std::ffi::CStr;
 
 use mmtk::memory_manager;
-use mmtk::util::alloc::{Allocator, AllocatorSelector, ImmixAllocator};
+use mmtk::util::alloc::{Allocator, AllocatorSelector, BumpAllocator, ImmixAllocator};
 use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread};
 use mmtk::util::{Address, ObjectReference};
 use mmtk::AllocationSemantics;
@@ -164,28 +164,43 @@ pub extern "C" fn mmtk_ocaml_alloc(
 
 /// Native TLAB refill (nursery aliasing).
 ///
-/// Hands the OCaml runtime a contiguous region `[*out_start, *out_end)` to use
-/// as its "young" nursery — the region *is* (part of) an MMTk Immix block.
-/// Called from `caml_alloc_small_dispatch` in place of a minor GC when the
-/// inlined native fast-path exhausts the current young region.
+/// Hands the OCaml runtime a contiguous region `[*out_start, *out_end)` to use as
+/// its "young" nursery — the region *is* (part of) an MMTk block backing the
+/// plan's **Default** allocator. Called from `caml_alloc_small_dispatch` in place
+/// of a minor GC when the inlined native fast-path exhausts the current region.
 ///
-/// We drive the mutator's **Default** Immix allocator to acquire fresh space of
-/// at least `min_bytes` (its fast/slow path acquires recyclable lines or a clean
-/// block, polling for a GC on exhaustion), then **advance the allocator's cursor
-/// to the block limit** so MMTk treats the whole region as consumed. This is
-/// essential: direct MMTk allocations (`caml_alloc_shr` → `mmtk_ocaml_alloc`)
-/// share this same Default allocator, so ejecting the block prevents them from
-/// bumping into the region OCaml fills top-down.
+/// Two TLAB-capable allocator shapes are supported, selected by the active plan's
+/// `Default` allocator mapping:
+///   - **`Immix(_)`** (Immix / StickyImmix): the region is an *in-place* Immix
+///     block; nursery objects are ordinary Immix-space objects that do not move at
+///     a (sticky) collection. Reclaimed by Immix's mark-region sweep.
+///   - **`BumpPointer(_)`** (GenImmix / GenCopy): the region is the generational
+///     plan's **copy-nursery** (`CopySpace`) bump buffer. At a *minor* GC the
+///     nursery survivors are **evacuated** to the mature space and the nursery is
+///     reset wholesale; the next refill hands a fresh nursery block. Native young
+///     objects therefore MOVE at a minor GC — they are managed objects traced from
+///     the domain's roots (registers/stack/`gc_regs` via `caml_scan_stack`), and
+///     those roots are reported as updatable `FieldSlot`s on every collection (the
+///     same machinery Immix defrag uses for mature objects), so the moving-root
+///     fixup already covers the native minor-GC evacuation path.
 ///
-/// No per-object `post_alloc` is needed: objects OCaml writes into the region
-/// are ordinary Immix-space objects, traced from roots, with lines marked per
-/// live object at GC time (we don't enable the `vo_bit` feature, so Immix's
-/// `post_alloc` is a no-op anyway). Bump direction is irrelevant to Immix's
-/// mark-region reclamation.
+/// Either way we drive the Default allocator's small/bump path to acquire fresh
+/// space of at least `min_bytes` (its slow path polls for a GC on exhaustion —
+/// for a generational plan that GC is a nursery evacuation), then advance the
+/// allocator's cursor to the region limit so MMTk treats the whole region as
+/// consumed and direct MMTk allocations (`caml_alloc_shr` → `mmtk_ocaml_alloc`),
+/// which share this same Default allocator, do not bump into the region OCaml
+/// fills top-down.
+///
+/// No per-object `post_alloc` is needed: objects OCaml writes into the region are
+/// ordinary managed objects, traced from roots (we don't enable the `vo_bit`
+/// feature, so `post_alloc` is a no-op anyway). Bump direction is irrelevant to
+/// both reclamation models.
 ///
 /// Returns `true` and fills the out-params on success. Returns `false` on heap
-/// exhaustion (caller raises `Out_of_memory`) or if the Default allocator is not
-/// an Immix allocator (TLAB nursery aliasing requires an Immix-family plan).
+/// exhaustion (caller raises `Out_of_memory`) or if the Default allocator is
+/// neither an Immix nor a bump allocator (e.g. MarkSweep's free-list — bytecode
+/// falls back to the per-object alloc path; native aborts at startup).
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_refill_tlab(
     mutator: *mut libc::c_void,
@@ -197,48 +212,64 @@ pub extern "C" fn mmtk_ocaml_refill_tlab(
 
     let selector =
         memory_manager::get_allocator_mapping::<OCamlVM>(mmtk(), AllocationSemantics::Default);
-    if !matches!(selector, AllocatorSelector::Immix(_)) {
-        // TLAB nursery aliasing is only supported when Default is a bump/Immix
-        // allocator. Other plans (e.g. MarkSweep's free-list) fall back to the
-        // vanilla-minor model on the C side.
-        return false;
+
+    // The acquisition logic is identical for both TLAB-capable allocator shapes —
+    // probe one word to take the small/bump slow path (its block acquisition polls
+    // for a GC on exhaustion; for a generational plan that GC is a nursery
+    // evacuation), read `bump_pointer.{cursor,limit}`, eject the rest of the run,
+    // and retry if it was too small for the triggering object. The only difference
+    // is the concrete allocator type, so a macro stamps out the same loop for each.
+    //
+    // Why a one-word probe, not `min_bytes`: for `ImmixAllocator` an allocation
+    // larger than a line takes the `overflow_alloc` path, which populates the
+    // inaccessible `large_bump_pointer` instead of the `pub bump_pointer` we read,
+    // handing OCaml a bogus region. A one-word probe always stays on the small
+    // path. `BumpAllocator` (GenImmix/GenCopy nursery) has a single `bump_pointer`
+    // and no overflow path, but the one-word probe is correct for it too.
+    macro_rules! refill_with {
+        ($ty:ty) => {{
+            let allocator =
+                unsafe { mutator.allocator_impl_mut::<$ty>(selector) };
+            const PROBE: usize = WORD_SIZE;
+            loop {
+                let result = Allocator::alloc(allocator, PROBE, WORD_SIZE, 0);
+                if result.is_zero() {
+                    return false; // heap exhausted after a GC
+                }
+                let limit = allocator.bump_pointer.limit;
+                // Eject the rest of this block/run from MMTk's bump view either
+                // way: OCaml owns [result, limit) exclusively if we take it, and a
+                // too-small run must be abandoned so the next probe slow-paths to
+                // fresh space.
+                allocator.bump_pointer.cursor = limit;
+                if limit - result >= min_bytes {
+                    unsafe {
+                        *out_start = result.as_usize();
+                        *out_end = limit.as_usize();
+                    }
+                    return true;
+                }
+                // Region too small for the triggering object: retry for a larger
+                // one. A clean block (32 KiB) satisfies any Max_young_wosize
+                // object, so the loop terminates (or returns false on OOM above).
+            }
+        }};
     }
 
-    let allocator = unsafe { mutator.allocator_impl_mut::<ImmixAllocator<OCamlVM>>(selector) };
-
-    // Acquire the nursery region by driving the Immix allocator's *small*
-    // (`bump_pointer`) path. We deliberately request a tiny probe size, never
-    // `min_bytes`: an allocation larger than a line takes Immix's `overflow_alloc`
-    // path, which populates the inaccessible `large_bump_pointer` instead of the
-    // `pub bump_pointer` we read — handing OCaml a bogus region. A probe of one
-    // word always stays on the small path, so `bump_pointer.{cursor,limit}` are
-    // the region we want.
-    //
-    // The small slow path returns either a run of recyclable lines (post-GC) or a
-    // clean block. If the run is smaller than the object that triggered the
-    // refill, consume it and retry; a clean block (32 KiB) always satisfies any
-    // Max_young_wosize object, so the loop terminates (or returns false on OOM).
-    const PROBE: usize = WORD_SIZE;
-    loop {
-        let result = Allocator::alloc(allocator, PROBE, WORD_SIZE, 0);
-        if result.is_zero() {
-            // Heap exhausted after a GC.
-            return false;
-        }
-        let limit = allocator.bump_pointer.limit;
-        // Eject the rest of this block/run from MMTk's bump view either way:
-        // OCaml owns [result, limit) exclusively if we take it, and a too-small
-        // run must be abandoned so the next probe slow-paths to fresh space.
-        allocator.bump_pointer.cursor = limit;
-
-        if limit - result >= min_bytes {
-            unsafe {
-                *out_start = result.as_usize();
-                *out_end = limit.as_usize();
-            }
-            return true;
-        }
-        // Region too small for the triggering object: retry for a larger one.
+    match selector {
+        // Immix / StickyImmix: in-place Immix block (nursery objects don't move at
+        // a collection).
+        AllocatorSelector::Immix(_) => refill_with!(ImmixAllocator<OCamlVM>),
+        // GenImmix / GenCopy: the copy-nursery CopySpace bump buffer. Nursery
+        // survivors are evacuated at a minor GC; the next refill hands a fresh
+        // nursery. Native young objects move at the minor GC — their roots
+        // (registers/stack/gc_regs) are reported as updatable FieldSlots on every
+        // collection, the same machinery Immix defrag uses, so the moving-root
+        // fixup already covers this minor-GC evacuation path.
+        AllocatorSelector::BumpPointer(_) => refill_with!(BumpAllocator<OCamlVM>),
+        // No bump/Immix Default allocator (e.g. MarkSweep's free-list): bytecode
+        // falls back to the per-object alloc path; native aborts at startup.
+        _ => false,
     }
 }
 

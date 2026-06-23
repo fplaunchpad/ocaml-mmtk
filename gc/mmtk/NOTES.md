@@ -5,6 +5,41 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native GenImmix + GenCopy (copy-nursery TLAB aliasing) — the stock-faithful native default
+
+*2026-06-23*
+
+Native code now runs **GenImmix** (and **GenCopy**), not just Immix/StickyImmix. GenImmix is the
+stock-faithful model for OCaml (copying nursery + mark mature ≈ OCaml's own copying-minor +
+mark-major; generational fits the high-rate, mostly-short-lived allocation profile) → the candidate
+native default.
+
+**Why it was a 2-file change (the key finding).** The binding has **no minor-vs-major root path**:
+*every* MMTk collection — a GenImmix nursery (`CopySpace`) evacuation or a full GC — runs the same
+`stop_all_mutators → scan_roots_in_mutator_thread → caml_do_roots → scan_stack_frames` (fiber.c),
+reporting each native `gc_regs`/stack root as an **updatable `FieldSlot`** (`create_process_roots_work`).
+That is the identical machinery Immix opportunistic defrag already uses to move *mature* objects and
+fix native roots, so a GenImmix minor evacuation — which moves the native young objects — reuses it
+verbatim. **No new moving-root machinery was needed.**
+
+**The only gap: TLAB allocator selection.** `mmtk_ocaml_refill_tlab` (api.rs) hard-required
+`AllocatorSelector::Immix`. GenImmix/GenCopy's Default allocator is a `BumpAllocator` over the nursery
+`CopySpace` (`BumpPointer(_)`). Generalized the refill to match `Immix(_)` → `ImmixAllocator` (in-place)
+**and** `BumpPointer(_)` → `BumpAllocator` (copy-nursery), via a macro stamping the same proven
+probe / eject-cursor / retry loop for each (both expose `pub bump_pointer: BumpPointer{cursor,limit}`).
+The in-place Immix path is unchanged; `mmtk.c` only got comment / fatal-error / `MMTK_VERBOSE` wording
+("copy-nursery" vs "Immix"). 2 files, native-only. Native MarkSweep (free-list) / PageProtect (no
+bump) still abort native by design; native `SemiSpace`/`MarkCompact` deferred.
+
+**Verified:** native GenImmix + GenCopy boot; `ocamlopt.opt -c typing/typecore.ml` compiles; a proper
+**old→young A/B** (young POINTERS held in a mature array across 4000 nursery-evacuation rounds at a
+tight 64 MB heap) is correct for GenImmix + GenCopy (+ Immix/StickyImmix regression — all four clean);
+MMTk `sanity` under native GenImmix (typecore, 300 MB) — **3,054,450 objects copied, 0 Invalid
+reference**; byte-identical exit-0 across all plans; clean `world.opt`. (A rare 4-domain/tiny-heap
+sanity crash is the pre-existing bug #3c — StickyImmix crashes identically — not a GenImmix defect.)
+
+---
+
 ## Workstreams archive (migrated from ROADMAP, 2026-06-23)
 
 *2026-06-23*

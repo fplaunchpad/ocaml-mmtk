@@ -90,20 +90,14 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    on whole-tree non-ASCII/long-lines — scope it to changed files, keep new C/build
    comments ASCII ≤80 col. → NOTES various; ROADMAP archive entry.
 
-6. **#16 — native GenImmix (copy-nursery TLAB aliasing) — the native priority.** GenImmix
-   is the **stock-faithful model for OCaml**: a copying nursery + mark mature mirrors
-   OCaml's own copying-minor + mark-major, and generational fits OCaml's high-rate,
-   mostly-short-lived allocation — so it is the **candidate native default** (we need
-   native GenImmix). Today native runs only `Immix`/`StickyImmix` (the TLAB aliases an
-   *in-place* Immix block). GenImmix's nursery is a **CopySpace**, evacuated at minor GC,
-   so native GenImmix needs: (a) alias the native TLAB onto the copy-nursery bump
-   allocator; (b) drive a nursery GC + hand a fresh nursery on refill; and — **the crux** —
-   (c) the moving-root fixup must cover the **native** young objects (registers/stack:
-   `gc_regs`, `caml_scan_stack`) on the minor-GC *evacuation* path (Immix/StickyImmix
-   don't move the nursery, so this path is new). Likely stresses bug #3c (heavy minor-GC
-   path). Native `SemiSpace`/`GenCopy`/`MarkCompact` are **deferred** — each nursery's
-   semantics differ ("lots of issues" for less payoff); GenImmix is the one that matters.
-   Write barrier already done (#3). → NOTES native-TLAB.
+6. **#16 — native bump-pointer plans.** **GenImmix + GenCopy native: DONE** (2026-06-23) —
+   the copy-nursery `BumpPointer` TLAB aliasing; the anticipated "lots of issues" didn't
+   materialise because the moving-root fixup is already general (no minor-vs-major root path —
+   reused from the major/defrag path), so it was a 2-file change. **GenImmix is the
+   stock-faithful generational native default.** → Shipped / NOTES (2026-06-23).
+   **Remaining (deferred, low-priority):** native `SemiSpace`/`MarkCompact` (each space differs —
+   payoff doesn't justify it; GenImmix is the one that matters); `MarkSweep` (free-list) and
+   `PageProtect` have no bump allocator → native would need a codegen change, else bytecode-only.
 
 7. **#17 — benchmarking + perf tuning (M8).** The open milestone; ties directly to
    `RESEARCH_QUESTIONS.md`. Levers identified (first-round results in NOTES): dynamic
@@ -129,6 +123,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 - **caml_mmtk_enabled removed** — ~35 dual-path sites collapsed to unconditional MMTk (153 lines).
 - **shared_heap.c / .h deleted** — −1665 lines; colour-machinery/`caml_atom`/`caml_compactions_count` relocated to `major_gc.{c,h}`; `mmtk.c` link anchor keeps `roots.o` (`caml_do_roots`) linking.
 - **#15 — 9 plans wired (bytecode)** — `SemiSpace`/`GenCopy`/`MarkCompact`/`PageProtect` added behind the generic forwarding-spec gate; CLBG byte-identical.
+- **#16 — native GenImmix + GenCopy** — generalized the TLAB refill to alias the copy-nursery `BumpPointer` (not just an in-place Immix block); the moving-root fixup was reused from the major/defrag path (no minor-vs-major root path → 2-file change). GenImmix = the stock-faithful generational native default. old→young pointer A/B + `sanity` (3.05M copied, 0 Invalid) clean.
 - **linux-O0 debug runtime** — stale stock-GC asserts removed; a real domain-terminate lock-drop race fixed (`caml_mmtk_park_terminating` parks without dropping `domain_lock`).
 - **opam relocatability** — `libmmtk_ocaml.a` referenced as `-lmmtk_ocaml` (symlinked into `stdlib/`, installed into `$(LIBDIR)`); DWARF build-root stripped via `--remap-path-prefix`. `test-in-prefix` exit 0.
 - **CI hygiene** — x86-64 Build green; CLBG cross-plan correctness gate green; all-plans testsuite workflow (deliberately red — surfaces per-plan breakage).
@@ -152,16 +147,18 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `MarkSweep` | free-list mark-sweep | no | ✅ (bytecode) |
 | `Immix` | mark-region w/ opportunistic defrag | yes | ✅ **default** (byte + native) |
 | `StickyImmix` | Immix + sticky mark-bit (gen, in-place nursery) | yes | ✅ (byte + native) |
-| `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ (bytecode) |
+| `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ (byte + native) |
 | `SemiSpace` | classic copying (two spaces) | yes | ✅ (bytecode) |
-| `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ✅ (bytecode) |
+| `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ✅ (byte + native) |
 | `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode) |
 | `PageProtect` | debug — page-granularity alloc | no | ✅ (bytecode, manual — exceeds CI time cap) |
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
 | `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ❌ **deferred** (SATB write barrier) |
 
-**Native** runs only `Immix`/`StickyImmix` — TLAB nursery-aliasing needs an Immix
-`Default` allocator; the other plans abort at startup on native (bytecode-only).
+**Native** runs `Immix`/`StickyImmix` (in-place Immix-block TLAB) **and `GenImmix`/`GenCopy`**
+(copy-nursery `BumpPointer` TLAB — the moving-root fixup is reused from the major path). The rest
+(free-list `MarkSweep`, `PageProtect`, the deferred plans) abort at startup on native (bytecode-only).
+`GenImmix` is the stock-faithful generational native default.
 
 **The two deferrals:**
 
