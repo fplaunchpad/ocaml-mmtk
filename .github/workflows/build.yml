@@ -95,7 +95,11 @@ jobs:
             name: extra (debug)
           - id: debug-s4096
             name: extra (debug-s4096)
-      fail-fast: true
+      # fail-fast disabled so every matrix entry reports: the fork has known-red
+      # entries (i386 skipped; the debug matrix hits the bug #3b spawn/STW hangs)
+      # and cancelling the rest hides whether release / macOS / arm64 actually pass.
+      # Visibility during the M9 / plan-wiring integration outweighs the CI minutes.
+      fail-fast: false
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
