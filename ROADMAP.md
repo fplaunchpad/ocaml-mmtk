@@ -90,12 +90,20 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    on whole-tree non-ASCII/long-lines — scope it to changed files, keep new C/build
    comments ASCII ≤80 col. → NOTES various; ROADMAP archive entry.
 
-6. **#16 — native bump-pointer plans (M8).** Extend native beyond `Immix`/`StickyImmix`
-   to the copying/compacting plans (`SemiSpace`/`GenCopy`/`MarkCompact`, and **native
-   GenImmix** copy-nursery TLAB aliasing — the stock-faithful generational model, a
-   candidate native default) via generalized TLAB nursery-aliasing. Today TLAB needs an
-   Immix `Default` allocator; a copying nursery needs its own handling. Depends on #1
-   (native write barrier already done). → NOTES native-TLAB entry.
+6. **#16 — native GenImmix (copy-nursery TLAB aliasing) — the native priority.** GenImmix
+   is the **stock-faithful model for OCaml**: a copying nursery + mark mature mirrors
+   OCaml's own copying-minor + mark-major, and generational fits OCaml's high-rate,
+   mostly-short-lived allocation — so it is the **candidate native default** (we need
+   native GenImmix). Today native runs only `Immix`/`StickyImmix` (the TLAB aliases an
+   *in-place* Immix block). GenImmix's nursery is a **CopySpace**, evacuated at minor GC,
+   so native GenImmix needs: (a) alias the native TLAB onto the copy-nursery bump
+   allocator; (b) drive a nursery GC + hand a fresh nursery on refill; and — **the crux** —
+   (c) the moving-root fixup must cover the **native** young objects (registers/stack:
+   `gc_regs`, `caml_scan_stack`) on the minor-GC *evacuation* path (Immix/StickyImmix
+   don't move the nursery, so this path is new). Likely stresses bug #3c (heavy minor-GC
+   path). Native `SemiSpace`/`GenCopy`/`MarkCompact` are **deferred** — each nursery's
+   semantics differ ("lots of issues" for less payoff); GenImmix is the one that matters.
+   Write barrier already done (#3). → NOTES native-TLAB.
 
 7. **#17 — benchmarking + perf tuning (M8).** The open milestone; ties directly to
    `RESEARCH_QUESTIONS.md`. Levers identified (first-round results in NOTES): dynamic
