@@ -747,6 +747,24 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
     d->young_ptr             = d->young_start;
     d->young_trigger         = d->young_start;
     d->memprof_young_trigger = d->young_start;
+    /* Immediately hand the domain a fresh young region instead of leaving it
+       collapsed (young_start == young_end == young_ptr) until the next allocation
+       refills. A collapsed region keeps young_ptr at young_limit, so the inlined
+       native fast-path traps into caml_call_gc at EVERY poll/alloc safepoint until
+       a refill happens. For an allocation-light hot loop that runs after a GC but
+       seldom allocates (e.g. fft, whose float work is unboxed and whose live set is
+       a few large arrays), that refill may not come for a very long time, so the
+       domain pays a full stack-frame-descriptor walk + pending-action check at
+       every loop-back-edge poll — measured at ~36M spurious caml_garbage_collection
+       entries and ~1.4s (a 1.6x slowdown) on fft at an iso-sized heap, even though
+       only ONE real collection occurred. Refilling here keeps young_ptr above
+       young_limit so the fast path runs straight through. All mutators are stopped
+       (GC-worker resume context), so driving the allocator is safe; this is the
+       same call caml_mmtk_domain_init makes at domain creation. On true heap
+       exhaustion the refill returns 0 and we fall back to the collapsed state (the
+       next allocation then traps and raises Out_of_memory as before). The
+       caml_reset_young_limit below re-establishes young_limit for the new region. */
+    caml_mmtk_refill_tlab(d, Whsize_wosize(0));
   }
   /* A GC just finished — MMTk's finalizer queue may now hold dead custom blocks.
      Flag pending actions so this domain drains + runs them (caml_final_do_calls →
