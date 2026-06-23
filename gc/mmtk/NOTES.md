@@ -5,52 +5,75 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## perf: the "obvious-overhead" fast-path levers are sub-noise — the MMTk-vs-vanilla gap is structural, not death-by-a-thousand-cuts
+## perf: the obvious-removal micro-levers buy ~1.5% (one load-bearing: C1-sftbound) — the MMTk-vs-vanilla gap is structural
 
 *2026-06-24*
 
-The overnight optimization sweep ("use the night to optimise … avoid basic overheads") consolidated the four
-**obvious-removal** levers from the PERFORMANCE Appendix A backlog onto branch `perf-basic-overheads` (off
-`5.5+mmtk` @ `c2560f1596`; pushed, tip `19a07ea8`, **not merged to mainline**):
+The overnight optimization workflow implemented each **obvious-removal** lever from the PERFORMANCE Appendix A
+backlog in isolation on turing, ran a 4-gate correctness check (build / mmtk `sanity` small-heap 0-invalid-ref /
+CLBG byte-identical / native compile-repro), and benchmarked native-Immix. Of **seven** attempted, **six passed
+and were pushed** as `perf-lever-*` branches; **one was rejected**:
 
-- **#C2** — read the block header once in `scan_object` (was loaded twice).
-- **#C4** — hoist the per-root `debug_check_enabled()` branch out of the root-scan inner loop.
-- **#B3** — drop the throwaway empty-src slice in the write barriers.
-- **#B2** — `Is_long(new_val)` short-circuit on the **region** (new-value) barrier only; the SATB **deletion**
-  barrier (depends on the OLD slot value) still fires unconditionally, so no ConcurrentImmix interaction.
+| lever | what | verdict |
+|---|---|---|
+| **#C1-sftbound** | cached `[heap_start,heap_end)` bounds pre-check before the per-edge `is_in_mmtk_spaces` SFT lookup in `FieldSlot::classify` | **the only load-bearing lever: +1.26% on fannkuchredux (outside noise); halves the SFT-lookup self% cluster.** ✅ |
+| #C2-header | read the block header once in `scan_object` (was read twice) | neutral (L1 hit, ≤ noise) ✅ |
+| #C4-debugbranch | hoist per-root `debug_check_enabled()` out of the STW root-scan inner loop | neutral (≤ sampling floor) ✅ |
+| #B2-islong | `Is_long(new_val)` short-circuit on the **region** (new-value) barrier; SATB deletion barrier left unguarded (depends on OLD value) | neutral ✅ |
+| #B3-emptyslice | drop the throwaway empty-src slice in the barrier shims (also fixes a latent debug-assert) | neutral (barrier gated off under Immix) ✅ |
+| #A3-allocdefault | `mmtk_ocaml_alloc_default` skipping the 5-arm `match semantics` (bytecode alloc path only) | neutral (native never reaches it — TLAB fast path) ✅ |
+| **#C1-doubleload** | cache the classified slot word in `FieldSlot`, drop the re-read in `load()` | **REJECTED — the second load is semantically required.** ❌ |
 
-**Result: correctness-clean but perf-neutral.** Native, Immix, pinned core, hyperfine warmup=3 runs=12, vs
-baseline `c2560f1596`:
+**#C1-doubleload is NOT an obvious removal — correction to the backlog.** Caching the slot word breaks the
+moving-GC sanity checker: `cache_roots_for_sanity_gc` *clones* root `FieldSlot`s and the SanityGC re-calls
+`load()` on the clones **after** the real GC has stored forwarded refs into the live slot words; a cached value
+then returns stale pre-GC pointers into moved/freed regions → dangling edge (`Invalid reference` / SIGSEGV in
+`scan_ocaml_object`). Production happens never to re-load a stored slot (so CLBG passed) but it is not
+guaranteed and it breaks our primary correctness tool. So `Slot::load()` must reflect *current* slot memory;
+only the **SFT-bounds pre-check** (C1-sftbound) — purely additive, never approves a trace — is a safe
+classify-path win. (My session-spawned consolidation agent independently tested only C2/C4/B2/B3 and called
+them all neutral; correct as far as it went, but it **missed C1-sftbound**, the one real win.)
 
-| bench | heap | ratio perf/base | GCs |
+**Vanilla-vs-MMTk-Immix baseline (workflow, native, `MMTK_THREADS=4`).** ⚠️ Measured on the **pre-fft-fix** base
+`8122989c4`, so fft (and likely fannkuchredux) are stale — see the caveat:
+
+| bench | kind | heap | fork/vanilla |
 |---|---|---|---|
-| fft | 128 MB | 0.992 | 1 |
-| binarytrees N=20 | 256 MB | 0.995 | 23 |
-| nbody 5M | 64 MB | 0.999 | 0 |
-| fannkuchredux 11 | 64 MB | 1.000 | 1 |
+| nbody | seq float, ~0 alloc | 256 MB | **1.00× (parity)** |
+| fft | seq float-array | 128 MB | 1.69× *(pre-fix — poll storm)* |
+| fft | (same) | default | 1.02× |
+| spectralnorm | seq float-array alloc | 256 MB | 1.75× |
+| fannkuchredux | multi-domain, light alloc | 256 MB | 1.65× |
+| binarytrees | multi-domain, heavy alloc | 512 MB | **0.51× — MMTk 2× FASTER** |
 
-Every delta is inside σ. binarytrees (the only GC-heavy bench, ~56% of wall in GC) is the sole discriminator
-for the scan/root levers (#C2/#C4); its first-run −4.5% GC-time blip did not survive a 3× replicate (±200 ms
-run-to-run jitter, no consistent edge) → noise. The mutator-barrier levers (#B2/#B3) barely apply here — fft's
-float-array stores bypass `caml_modify` entirely; only binarytrees mutates pointers. Correctness gate clean:
-sanity (StickyImmix 64 MB, 130 K objects copied, **0 Invalid reference**), CLBG byte-identical across
-Immix/StickyImmix/GenImmix/MarkSweep + native Immix/StickyImmix, Immix testsuite slice 1440 passed / 53 failed
-(all documented MMTk-vs-vanilla categories, none in lever-touched code).
+**The fft fix already closed fft's gap.** A post-fix spot-check (mainline `c2560f1596`) puts fft@128 at ~2.33 s
+≈ vanilla (~2.31 s) — the **+67–69% was the post-GC poll storm** the landed refill-at-resume fix (`46cb3253f2`)
+eliminated. The pre-fix `+80%` instruction count on fft@128 (10.78 B vs 6.00 B) was exactly those 35.9 M
+spurious `caml_garbage_collection` poll entries. A **post-fix re-measurement of all five benches vs vanilla is
+in flight** (branch `perf-c1-sftbound` + the current table) to see which other gaps the fix closed:
+fannkuchredux is the same poll-storm class and likely shrank; spectralnorm's overhead is Immix
+**sweep/metadata** (`bzero_metadata`/`SweepChunk`/`side_metadata_access`, IPC 3.65→2.33) — genuinely structural,
+won't move.
 
-The three remaining candidates that were *tried* did **not** clear the workflow's correctness-plausibility gate
-and were not pushed (diffs salvaged to the session scratchpad): **#C1** per-slot double slot-load, a second #C1
-slot variant, and **#A3** `alloc_default`.
+**What the profiles confirm.** (1) The surviving serial overhead is the **STW root scan** —
+`caml_call_gc` + `caml_garbage_collection` + `caml_find_frame_descr` ≈ 21% of fft@128, ≈ 32% of fannkuchredux;
+no micro-lever touches it. (2) The **write barrier is hot in ZERO profiles** — these workloads do initializing
+or unboxed-float stores, never old-pointer mutation — which is *why* #B2/#B3 are neutral. (3) Overhead is
+**GC-frequency-driven, not codegen** (fft 1.69×@128 but 1.02×@default; nbody identical instruction counts). (4)
+On **parallel alloc-heavy** work MMTk already **wins ~2×** — vanilla's cross-domain STW minor GC
+(`caml_try_run_on_all_domains_with_spin_work` 13%, `oldify_one`, `pool_sweep`) loses to MMTk's parallel workers.
 
-**Research implication (the point).** The "basic overhead" in the alloc/scan/barrier fast path is **not** where
-MMTk's overhead-vs-vanilla lives — these are L1-hit / sub-wall-clock-noise removals. The gap (≈1.5–2× on
-compute/alloc-heavy benches, RSS 1.5–5×) is therefore **structural, not death-by-a-thousand-cuts**: it is
-dominated by the *deeper* levers (not "obvious removals") — **#A1** (bytecode has no TLAB; per-object FFI
-alloc), **#B1**/**#A1** on native — and by the costs MMTk pays *by design*: heap **reservation** (→ RSS), STW
-mark/evacuate vs vanilla's **incremental, mostly-concurrent, non-moving** major, and scan/copy cost at scale.
-M8 effort should go there, not into more micro-tuning. This is the honest answer to "remove basic overhead
-first": we did, and it was sub-noise. `perf-basic-overheads` is kept as a pushed branch (clean cleanups,
-one merge away) but landing perf-neutral diff onto a fork we keep reviewable against the 5.5.0 base is a
-maintainer judgment call, deferred. Fuller log: `~/perf-basic-overheads-findings.md` on turing.
+**Research implication.** Micro-levers buy ~1.5% (and only C1-sftbound is real); the publishable overhead
+question is **structural** — STW root-scan cost (and its growth with domain count), Immix sweep/metadata
+maintenance, and young-object throughput vs vanilla's minor collector — plus the standing **#A1** (bytecode has
+no TLAB). M8 effort goes there, not into more micro-tuning.
+
+**Branches (to reconcile).** Two competing integrations exist, neither ideal: `perf-basic-overheads`
+@`19a07ea8` (correct/current base `c2560f1596` but **missing C1-sftbound**, the one win) and
+`perf-basic-overheads-integrated` @`cac434f7b` (has all five but on the **stale** base `8122989c4`). The clean
+move is C1-sftbound (`6607a3f93`) cherry-picked onto current mainline (`perf-c1-sftbound`, in flight); the five
+neutral cleanups are safe-but-optional. None merged to `5.5+mmtk`. Fuller logs on turing: `~/perf_opt_findings.md`,
+`~/optbase_results/`, `~/perf-basic-overheads-findings.md`.
 
 ---
 

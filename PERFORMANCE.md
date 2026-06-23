@@ -263,17 +263,24 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 
 *This is the canonical full backlog; ROADMAP open-work #17 carries the summary. Every "impact" tag is a static hypothesis until measured per §2–§9.*
 
-> **Measured — 2026-06-24 (the obvious-removal pass).** The four obvious-removal levers **#C2, #C4, #B3, #B2**
-> were consolidated on branch `perf-basic-overheads` (off `c2560f1596`; correctness-clean — sanity 0
-> invalid-ref, CLBG byte-identical, Immix testsuite slice clean) and benchmarked native/Immix vs baseline on
-> fft + binarytrees + nbody + fannkuchredux: **all ratios 0.99–1.00, every delta inside σ → perf-neutral**
-> (binarytrees, the only GC-heavy bench, showed no replicable GC-time edge). **#C1-double-load**, a second #C1
-> slot variant, and **#A3** `alloc_default` did not clear correctness-plausibility and were not landed.
-> **Takeaway: the fast-path micro-overhead is sub-noise; the gap is the *deeper* levers (#A1 bytecode TLAB,
-> #B1 native barrier) plus structural costs (RSS from heap reservation; STW mark/evacuate vs vanilla's
-> incremental mostly-concurrent non-moving major). Redirect M8 to #A1/#B1 and the structural questions — not
-> more micro-tuning.** Detail: `gc/mmtk/NOTES.md` (2026-06-24); `~/perf-basic-overheads-findings.md` on turing.
-> Branch pushed (tip `19a07ea8`), **not merged** to `5.5+mmtk`.
+> **Measured — 2026-06-24 (the obvious-removal pass).** Seven obvious-removal levers were implemented and
+> correctness-gated (build / mmtk `sanity` 0-invalid-ref / CLBG byte-identical / native compile-repro); six
+> passed and were pushed as `perf-lever-*`, one was rejected. **Only #C1-sftbound is load-bearing** (cached
+> `[heap_start,heap_end)` pre-check before the per-edge SFT lookup in `FieldSlot::classify`: **+1.26% on
+> fannkuchredux, outside noise**; halves the SFT-lookup self% cluster). **#C2/#C4/#B2/#B3/#A3 are correct +
+> safe but perf-neutral** (≤ noise on fft/binarytrees/nbody/fannkuchredux). **#C1-double-load was REJECTED —
+> the "double load" is NOT removable:** MMTk's sanity GC clones root slots and re-`load()`s them *after* the
+> real GC writes forwarded refs, so a cached slot word returns stale pre-GC pointers (dangling edge). Update
+> this backlog accordingly — #C1's removable part is the SFT-bounds pre-check, not the second load.
+> **Takeaway: micro-levers buy ~1.5%; the gap is structural** — STW root-scan (`caml_call_gc` /
+> `caml_garbage_collection` / `caml_find_frame_descr` ≈21% of fft@128, ≈32% of fannkuchredux), Immix
+> sweep/metadata (spectralnorm), young-object throughput vs vanilla's minor collector, and #A1 (bytecode TLAB).
+> The write barrier is hot in **zero** profiles (why #B2/#B3 are neutral). Vanilla-vs-MMTk baseline (pre-fft-fix
+> base `8122989c4`): nbody 1.00×, fft@128 1.69× *(poll storm — the landed fft fix `46cb3253f2` closes it to
+> ≈parity; post-fix re-measure in flight)*, spectralnorm 1.75×, fannkuchredux 1.65×, **binarytrees 0.51× (MMTk
+> 2× faster on parallel alloc-heavy)**. Detail: `gc/mmtk/NOTES.md` (2026-06-24); `~/perf_opt_findings.md`,
+> `~/optbase_results/` on turing. Branches `perf-basic-overheads` (@`19a07ea8`, missing C1-sftbound) and
+> `perf-basic-overheads-integrated` (@`cac434f7b`, stale base) pending reconcile; **none merged** to `5.5+mmtk`.
 
 ## #17 / M8 — ranked optimization backlog (perf work)
 
