@@ -20,21 +20,24 @@ on a common substrate. The research agenda lives in
   TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
   single- and multi-domain (`Domain.spawn`) programs run.
 
-> Supported on **x86-64 Linux**; native code on macOS is untested. On GC-heavy
-> workloads MMTk currently runs at ~1.4–1.8× the stock GC and uses more memory —
-> performance tuning is the open milestone (M8); the measurement methodology is
-> [`PERFORMANCE.md`](PERFORMANCE.md). Benchmark against a vanilla OCaml 5.5 opam switch.
+> Supported on **x86-64 Linux**; native code on macOS is untested. MMTk's overhead is
+> workload-dependent — early numbers span parity (short-lived / generational workloads) to
+> ~2× (allocation- or compute-heavy), and it uses more memory (it reserves its heap).
+> Performance tuning is the open milestone (M8); the methodology is
+> [`PERFORMANCE.md`](PERFORMANCE.md). Benchmark against a vanilla OCaml 5.5.0 opam switch.
 
 ## Status at a glance
 
 - **Done:** the full bring-up (build, NoGC → MarkSweep → Immix, generational plans,
-  multi-domain, native code, weak/ephemeron/finaliser support, the testsuite) and
-  **excising the stock GC** — no stock minor/major collector, shared heap, or
-  per-domain minor-heap arena remains. (Two tails remain: weak-clear semantics under
-  generational plans, and a flagged memprof colour read.)
-- **In progress:** performance (benchmark + optimise), and a from-first-principles,
-  MMTk-native rework of the multi-domain stop-the-world handshake (see bug #3b in
-  [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md)).
+  multi-domain, native code, weak/ephemeron/finaliser support, the testsuite); **excising
+  the stock GC** (no stock minor/major collector, shared heap, or minor-heap arena remains);
+  advancing the base to **OCaml 5.5.0 final**; the MMTk-native multi-domain stop-the-world
+  handshake (per-mutator RUNNING set, bug #3b); and **`ConcurrentImmix` in bytecode** — SATB
+  write barrier, `lazy`-clean, and the continuation-scan-vs-resume hazard fixed (FAQ Q3).
+- **In progress:** the macro-benchmark performance campaign + analysis (M8); **native
+  `ConcurrentImmix`**; and three rare-crash investigations tracked as GitHub issues.
+- **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
+  read, and `runtime_events` emission under MMTk (broken — see ROADMAP / FAQ).
 
 The milestone-by-milestone plan and current status are in
 [`ROADMAP.md`](ROADMAP.md).
