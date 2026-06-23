@@ -593,6 +593,54 @@ void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
                             (size_t) count);
 }
 
+/* Per-continuation scan lock (concurrent plan). Held by a GC worker while it scans
+   a continuation's suspended fiber stack; the resume path acquires it (blocking)
+   before switching onto that stack, so a resume cannot race the concurrent scan.
+   Self-gated: a no-op for every non-concurrent plan (STW collectors scan stacks at
+   a safepoint with mutators stopped, so no resume can run concurrently). `cont` is
+   the continuation block; we key the lock on its address. */
+void caml_mmtk_cont_lock(value cont)
+{
+  if (caml_mmtk_concurrent)
+    mmtk_ocaml_cont_lock((uintptr_t) cont);
+}
+
+void caml_mmtk_cont_unlock(value cont)
+{
+  if (caml_mmtk_concurrent)
+    mmtk_ocaml_cont_unlock((uintptr_t) cont);
+}
+
+/* SATB snapshot of a continuation's suspended fiber stack, taken on the resume
+   path BEFORE the resume deletes the cont->stack edge (field 0 -> NULL via a raw
+   CAS that bypasses the write barrier). Mirrors vanilla's caml_darken_cont, which
+   scans the stack itself when a resume finds it not-yet-marked. Without this, a
+   continuation resumed during concurrent marking before any GC worker reached it
+   would have its stack roots lost (FinalMark does not re-scan mutator roots under
+   this SATB collector). We walk the stack with caml_scan_stack and grey each slot's
+   value into the SATB buffer (caml_mmtk_satb_barrier), so the marker keeps those
+   snapshot roots live. Greying is idempotent, so a double snapshot (worker + resume)
+   is harmless. Only meaningful while concurrent marking is in flight; the caller
+   gates on mmtk_ocaml_concurrent_marking_active(). */
+static void caml_mmtk_satb_grey_stack_slot(void *fdata, value v,
+                                           volatile value *slot)
+{
+  (void)fdata; (void)v;
+  caml_mmtk_satb_barrier(slot, 1);
+}
+
+void caml_mmtk_cont_snapshot(value cont)
+{
+  if (!caml_mmtk_concurrent) return;
+  if (!mmtk_ocaml_concurrent_marking_active()) return;
+  {
+    value stk = Field(cont, 0);
+    if (Ptr_val(stk) != NULL)
+      caml_scan_stack(caml_mmtk_satb_grey_stack_slot, 0, NULL,
+                      Ptr_val(stk), NULL);
+  }
+}
+
 /* ── Stop-the-world ──────────────────────────────────────────────────── */
 
 /* Park this domain for an MMTk collection, cooperating with OCaml's own

@@ -120,6 +120,19 @@ void mmtk_ocaml_region_barrier(MMTk_Mutator mutator, uintptr_t start, size_t cou
  */
 void mmtk_ocaml_satb_barrier(MMTk_Mutator mutator, uintptr_t start, size_t count);
 
+/**
+ * Per-continuation scan lock for the concurrent plan (ConcurrentImmix). The GC
+ * worker holds this while scanning a continuation's suspended fiber stack; a
+ * resuming domain must acquire it (blocking) before switching onto that stack, so
+ * a resume never races an in-progress concurrent stack scan. lock() blocks until
+ * free; unlock() releases. `cont_addr` is the continuation block's address.
+ */
+void mmtk_ocaml_cont_lock(uintptr_t cont_addr);
+void mmtk_ocaml_cont_unlock(uintptr_t cont_addr);
+
+/** True iff the concurrent plan is currently in its concurrent marking phase. */
+bool mmtk_ocaml_concurrent_marking_active(void);
+
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);

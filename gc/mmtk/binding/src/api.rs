@@ -342,6 +342,40 @@ pub extern "C" fn mmtk_ocaml_satb_barrier(
     memory_manager::memory_region_copy_pre::<OCamlVM>(mutator, src, dst);
 }
 
+/// Acquire the per-continuation scan lock (BLOCKING) for the continuation block at
+/// `cont_addr`. Called from the resume path (`caml_continuation_use_noexc`) BEFORE
+/// it takes the fiber stack and switches onto it, so a resume never races a GC
+/// worker that is concurrently scanning this same continuation's stack (the worker
+/// holds the lock for the duration of its scan; this blocks until it finishes).
+/// Mirrors vanilla `caml_darken_cont`'s SPIN_WAIT on the NOT_MARKABLE header status.
+/// Pair with `mmtk_ocaml_cont_unlock`. Only meaningful on the concurrent plan; the
+/// C caller gates the call on `caml_mmtk_concurrent`.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_cont_lock(cont_addr: usize) {
+    crate::cont_lock::lock(cont_addr);
+}
+
+/// Release the per-continuation scan lock acquired by `mmtk_ocaml_cont_lock`.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_cont_unlock(cont_addr: usize) {
+    crate::cont_lock::unlock(cont_addr);
+}
+
+/// True iff the concurrent plan (ConcurrentImmix) is currently in its concurrent
+/// marking phase (between InitialMark resume and FinalMark). Used by the resume
+/// path to decide whether a continuation's stack needs an SATB snapshot before the
+/// resume deletes the cont->stack edge. Returns false for non-concurrent plans and
+/// when no marking is in flight (cheap branch — no snapshot/lock cost off the
+/// marking window).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_concurrent_marking_active() -> bool {
+    mmtk()
+        .get_plan()
+        .concurrent()
+        .map(|p| p.concurrent_work_in_progress())
+        .unwrap_or(false)
+}
+
 /// Deregister a terminating domain (by its caml_domain_state address) so the
 /// stop-the-world code no longer waits for it.
 #[no_mangle]

@@ -27,6 +27,7 @@
 #include "caml/alloc.h"
 #include "caml/callback.h"
 #include "caml/codefrag.h"
+#include "caml/mmtk.h"
 #include "caml/fail.h"
 #include "caml/fiber.h"
 #include "caml/gc_ctrl.h"
@@ -646,16 +647,37 @@ CAMLprim value caml_continuation_use_noexc (value cont)
   if (!Is_young(cont) && caml_marking_started())
     caml_darken_cont(cont);
 
+  /* MMTk concurrent plan (ConcurrentImmix): a GC worker may be scanning this
+     continuation's suspended fiber stack RIGHT NOW (binding scan_object ->
+     caml_scan_stack) while we are about to take that stack and switch onto it.
+     Acquire the per-continuation scan lock (blocking) so the take below cannot run
+     concurrently with that scan; a worker holds the lock for the duration of its
+     scan, so this waits it out. This re-creates vanilla's NOT_MARKABLE header lock
+     (caml_darken_cont, now inert under MMTk) using an MMTk-side lock. Self-gated:
+     a no-op unless the concurrent plan is active. We hold it across the field-0
+     take; once field 0 is NULL the worker's continuation_stack() reads NULL and
+     scans nothing, so it is safe to release immediately after. */
+  caml_mmtk_cont_lock(cont);
+
+  /* Snapshot this continuation's stack into the SATB buffer before we delete the
+     cont->stack edge below (the field-0 CAS bypasses the write barrier). Mirrors
+     vanilla caml_darken_cont scanning the stack on resume. No-op off the concurrent
+     marking window. Done under the lock so no GC worker scans concurrently. */
+  caml_mmtk_cont_snapshot(cont);
+
   v = Field(cont, 0);
 
   if (caml_domain_alone()) {
     Field(cont, 0) = null_stk;
+    caml_mmtk_cont_unlock(cont);
     return v;
   }
 
   if (atomic_compare_exchange_strong(Op_atomic_val(cont), &v, null_stk)) {
+    caml_mmtk_cont_unlock(cont);
     return v;
   } else {
+    caml_mmtk_cont_unlock(cont);
     return null_stk;
   }
 }
