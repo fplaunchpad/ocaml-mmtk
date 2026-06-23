@@ -77,12 +77,28 @@ this binding scans continuation fiber stacks **inline during concurrent heap tra
 **Status:** real, and in the current ConcurrentImmix prototype **unhandled and untested** — the SATB work
 targeted the write barrier and `lazy`; no effect/continuation workload has been run under ConcurrentImmix.
 
-**Likely fix.** Defer continuation-stack scanning to a STW phase: during concurrent marking, mark the
-continuation object and its fiber reference but **queue** the stack; scan all queued stacks at **FinalMark**
-with mutators stopped. (Alternative: a resume↔scan handshake / per-fiber claim so a resume waits for, or
-forces re-scan after, an in-progress concurrent scan.) Cost: STW work proportional to live continuations.
-Validate with a multi-domain effect stressor that resumes continuations *during* concurrent marking, at a
-small heap under `sanity`. Ties to `RESEARCH_QUESTIONS.md` RQ3 (effect handlers as a GC workload).
+**Fix — mirror vanilla's per-continuation lock (defer-to-STW is REJECTED).** The naive fix — queue every
+fiber stack and scan them all at FinalMark (STW) — is wrong: with many live fibers it dumps an unbounded
+scan into the pause, making STW time scale with *fiber count* and defeating the whole low-pause point.
+Vanilla OCaml already solved this (its major GC is concurrent *and* has first-class continuations): it
+**locks the continuation object for the duration of marking its stack**; a concurrent mutator trying to
+*resume* (switch to) that continuation is **blocked** on the lock until the scan finishes; and other
+concurrent GC threads that reach the same continuation simply **skip** it (already locked / being marked).
+Mirror that:
+- **GC scan** (`scan_object` → continuation): **try-lock**; if not acquired (held by a resume or another
+  worker) → **skip** the stack scan; if acquired → scan the fiber stack → unlock. Scanning a *suspended*
+  fiber is safe and concurrent (no STW cost) — the common case.
+- **Resume** (`caml_continuation_use*` / runstack switch): acquire the lock **blocking** before switching.
+- **Skipped (resumed) case:** a continuation resumed mid-cycle becomes the resuming domain's *running*
+  stack → a normal domain root → scanned at FinalMark (STW). So no roots are lost, **and STW does not scale
+  with fiber count** — only continuations *actually resumed this cycle* fall to FinalMark (bounded by resume
+  rate, not the total number of live fibers).
+
+The stock lock primitive lives in `runtime/fiber.c` (`git show 5.5.0:runtime/fiber.c`); if M9's neutering
+disconnected it from the deleted stock marker, re-connect it to the MMTk marker + resume path rather than
+invent one. Validate: resume-during-concurrent-marking is correct (checksum == Immix) **and** FinalMark
+time stays flat with many live but un-resumed fibers. Ties to `RESEARCH_QUESTIONS.md` RQ3 (effect handlers
+as a GC workload).
 
 ---
 
