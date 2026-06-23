@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## M8 first baseline (PRELIMINARY) — MMTk vs vanilla OCaml 5.5.0
+
+*2026-06-23*
+
+First directional numbers (NOT the campaign — see PERFORMANCE.md for the real protocol). Method: vanilla
+5.5.0 vs the fork's `Immix`/`StickyImmix`/`GenImmix`; per-bench heap = `ceil(vanilla maxRSS)` (the maintainer's
+iso-memory rule). Detail + commands in `~/baseline_findings.md` on turing (vanilla built at
+`~/vanilla-5.5.0-prefix`, benches in `~/bench_work/`).
+
+| bench | heap | vanilla | Immix | StickyImmix | GenImmix |
+|---|---|---|---|---|---|
+| binary_trees d19 (native, GC-stress) | 128 MB | 8.32 s | 11.30 s (1.36×) | **7.29 s (0.88×)** | 8.31 s (1.00×) |
+| fft (native, numeric) | 128 MB | 2.21 s | 3.68 s | 3.64 s | 3.67 s (~1.66×) |
+| ocamlc self-compile (bytecode) | 4096 MB | 12.0 s | 25.9 s (2.16×) | 23.1 s (1.93×) | **20.9 s (1.74×)** |
+
+**Directional findings:**
+- **MMTk can beat stock:** StickyImmix is **12% faster than vanilla** on the GC-stress native bench — but
+  at **+86% RSS**. The real story is time-vs-memory, so this needs the heap-multiple *curve* (PERFORMANCE.md
+  §2), not this single point.
+- **The shipped default (`Immix`) is dominated on every workload measured** → reconsider the default
+  (GenImmix is the most robust / general champion here; StickyImmix wins pure high-churn).
+- **Bytecode is the weak spot:** ~1.7–2.2× and it **OOMs/thrashes at iso-memory** — structural (fixed heap +
+  *no bytecode TLAB*), empirically confirming backlog **#A1 (bytecode TLAB / inline alloc)** as the top lever.
+- **"iso-memory" isn't truly iso:** MMTk total RSS = reserved heap + binary/metadata overhead ≈ **1.5–2×
+  vanilla** even at heap=vanilla-RSS. So the heap=maxRSS rule gives MMTk a memory premium; true equal-RSS
+  needs heap = vanilla_RSS − overhead (which then runs tighter). Memory overhead is a first-class cost.
+
+**Caveats:** powersave governor (no sudo → absolute seconds soft, relative factors OK); single heap point;
+3-program hand-built subset; no workload fingerprints / pause distributions yet.
+
+**BLOCKER for the full campaign:** opam's bwrap sandbox is broken on turing (`RTM_NEWADDR: Operation not
+permitted`, restricted user namespaces) → `opam switch create vanilla-5.5.0` and `opam install opam-monorepo`
+both fail → the full `macro-benches make setup` can't run. Worked around with a from-source vanilla + a hand-
+built 3-bench subset. Unblock with `opam init --disable-sandboxing` (or fix userns / grant sudo) on turing.
+
+---
+
 ## Consolidation onto OCaml 5.5.0 — ConcurrentImmix (bytecode) landed; native plan set finalized
 
 *2026-06-23*
