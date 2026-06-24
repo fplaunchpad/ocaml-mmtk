@@ -260,6 +260,18 @@ upside. **Novelty: strong** — the *prediction-tested-across-the-mutation-spect
 "RC works on OCaml" alone would not be. Serves the charter's reliability/trustworthiness via predictable
 latency.
 
+**Native result (2026-06-24) — first strong positive evidence.** ConcurrentImmix characterized on native CLBG:
+the **SATB write barrier is empirically ~free** (<0.1% self on the heaviest pointer-mutating bench;
+`caml_modify`/`memory_region_copy_slow` barely register) — the central immutability→read-barrier-free
+prediction, *measured*. Throughput is **neutral vs Immix on 5/6 benches** (0.92–1.00; +10% only on binarytrees,
+and that is GC-worker/metadata *contention* on shared cores, not the barrier), while concurrent marking **cuts
+max STW pause 3–4×** (binarytrees 76→20 ms; total STW 760→205 ms; ≈88% of the old pause was reducible marking
+moved off the stop-the-world). The residual pause is **root-scan-bound** — STW in both vanilla and MMTk
+(InitialMark scans roots; FinalMark uses `new_no_scan_roots`) — so the next latency frontier is concurrent/lazy
+root scanning, not marking. This **retires the perf worry behind the UNLOG-bit barrier gate (#30)**: the barrier
+is not a hot path. Caveat for any production low-latency claim: the multidomain init-time `Domain.spawn`
+deadlock (bug #3c / GH#2) must be fixed first. Detail: NOTES 2026-06-24, `~/concurrent-immix-native-perf.md`.
+
 ### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest research risk; precursor to RQ1)*
 
 **The platform.** Finish M9, then ROADMAP #15 wires the rest of MMTk's plans cheaply — *one language,

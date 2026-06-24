@@ -5,6 +5,42 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Native ConcurrentImmix (RQ1) — SATB barrier is ~free, concurrent marking cuts max pause 3–4×, ~0% throughput tax
+
+*2026-06-24*
+
+First native perf characterization of the flagship concurrent plan (`MMTK_PLAN=ConcurrentImmix`, **no extra
+gate**; `runtime/mmtk.c:138` arms `caml_mmtk_concurrent` → SATB deletion barrier + per-continuation scan lock;
+mmtk-core schedules InitialMark(STW) → concurrent mark → FinalMark(STW)). All 5 native CLBG benches run clean
+(rc=0, byte-identical to vanilla, no SIGSEGV) at production heaps.
+
+**Throughput (CI vs Immix):** neutral on 5/6 — nbody 1.000, fft@128 0.996, fft@default 0.925, spectralnorm
+0.972, fannkuchredux 1.000; only binarytrees **+10.4%**. (CI vs vanilla tracks Immix — binarytrees 0.599, i.e.
+CI is also 1.5× *faster* than vanilla there.)
+
+**Latency — the RQ1 metric** (channel: bracketed stop→resume `gc_time` + an instrumented per-pause histogram):
+binarytrees **max pause 76→20 ms (3–4×), total STW 760→205 ms**; spectralnorm max 6.4→3–4 ms (halved), total
+STW barely moves (tiny live set → residual is nearly all root scan). Root scan is **STW in both** (InitialMark
+scans roots; FinalMark `new_no_scan_roots`) — the irreducible floor (~6 ms/pause); the ~44 ms/pause CI sheds on
+binarytrees is heap trace moved concurrent (≈88% of the old Immix pause was reducible marking).
+
+**SATB barrier cost (bears on #30):** empirically **~free** — `SATBBarrierSemantics::memory_region_copy_slow`
+0.01% self, `stw_api_barrier` 0.05%; `caml_modify`/`caml_mmtk_satb_barrier` don't even appear. The +10%
+binarytrees tax is **GC-worker/metadata contention** (`scan_object` 5.8%, `side_metadata_access` ~7.8%,
+`lock_contended` 1.9%) from 4 GC workers sharing the mutator's cores — a scheduling problem (likely recovered
+with dedicated GC cores), **not** the write barrier. **So task #30's UNLOG-bit barrier-gate perf concern is not
+borne out** for these workloads.
+
+**RQ1 takeaway:** strongly favorable — ~0% throughput tax on 5/6, +10% on one (contention, not barrier), for a
+3–4× max-pause cut on the trace-heavy bench. The feared barrier cost is a non-event; this is the first strong
+*native* evidence for the immutability→read-barrier-free-low-latency hypothesis. Next frontiers: concurrent/lazy
+**root scanning** (the residual pause floor), a dedicated-GC-core sweep on the binarytrees tax, and the
+multidomain **`Domain.spawn` init-time deadlock** (bug #3c / GH#2 — a new repro was added; CI was *more* robust
+than Immix, 0/40 vs Immix 1/20) must be fixed before any production low-latency claim. Writeup:
+`~/concurrent-immix-native-perf.md` on turing.
+
+---
+
 ## spectralnorm's 1.74× = MMTk's eager zero-fill double-write + nursery-locality loss — NOT heap-fixable; generational recovers only ~8%
 
 *2026-06-24*
