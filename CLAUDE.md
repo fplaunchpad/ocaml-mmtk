@@ -62,9 +62,17 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 ## Build / run
 
-- **macOS builds fine** for editing and bytecode work. **`rr` reverse-debugging and
-  the GC-correctness repros are Linux x86-64 only** — do that work on a Linux box.
-  Host/path specifics for your build machine go in `CLAUDE.local.md` (gitignored),
+- **macOS (Apple Silicon) is a full local dev host** — native **and** bytecode build,
+  `sanity`, and quick perf runs all work locally, and the M4 Pro beats the (8-year-old
+  Xeon Gold) Linux boxes on single-threaded work, so do day-to-day **build / sanity /
+  perf locally**. (A fresh tree just needs `./configure && make -j world.opt`; if native
+  linking errors with undefined `mmtk_ocaml_*`, the tree is stale-configured — re-run
+  `./configure`. macOS has no `setarch`/ASLR-mmap flake, so drop `setarch x86_64 -R`
+  there.) **Switch to a Linux host (turing / godel / church) when** a failure or perf
+  issue is tough to debug and needs the better tooling — **`rr` reverse-debugging is
+  Linux-only**, plus `perf` / `bpftrace` profiling — or when you need **many cores
+  (28–56)** for parallel / multicore-scalability runs or the heavy macro-benches
+  campaign. Host/path specifics for each machine go in `CLAUDE.local.md` (gitignored),
   not here.
 - Non-interactive shells need: `export PATH="$HOME/.cargo/bin:$HOME/local/bin:$PATH"`
   (cargo + autoconf 2.72).
@@ -148,7 +156,9 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 ## Per-session workflow
 
 1. Read `ROADMAP.md` + `gc/mmtk/NOTES.md` (plan + known issues/repros) before starting.
-2. Edit on your dev machine; build/run/debug on the Linux + `rr` host.
+2. Build / run / `sanity` / quick-perf **locally on macOS** (M4 Pro is fastest for
+   single-threaded); switch to a Linux host (turing / godel / church) for `rr`,
+   `perf`/`bpftrace`, or many-core (parallel / scalability / macro-benches) runs.
 3. Small, focused commits; keep `README.md`/`ROADMAP.md` in sync; no Claude in messages.
 4. Record new design rationale and any new repro (with its `rr` trace path) in
    `gc/mmtk/NOTES.md`.
