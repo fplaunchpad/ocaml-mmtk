@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #3c (rare multidomain spawn hang) — rr-diagnosed: orphaned `gc_active` STW shadow flag
+
+*2026-06-24*
+
+Reverse-debugged the rare bug #3c hang on **church** (rr). **It needs REAL parallelism:** 0/40 hangs
+serialized (`rr record --num-cores=1`), but hung on the FIRST run at `--num-cores=8` (which records cleanly,
+no MMTk meta-mmap abort — the right way to capture it). Cheap repro:
+`MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=512 ./runtime/ocamlrun benchmarks/clbg/build/fannkuchredux.byte 7`
+(the CLBG `Domain.spawn` bench; hangs ~60–75% under Immix bytecode — far cheaper than the burn driver).
+**rr trace: `church:/tmp/rr-bug3c/t1` (packed ~95M); report `church:~/bug3c-rr.md`.**
+
+**Root cause — the binding's `gc_active` / `GC_ACTIVE` STW shadow flag gets orphaned `true`.** At the
+deadlock (the program's first `Domain.spawn`): the main domain is parked in `caml_domain_spawn →
+caml_mmtk_leave_blocking → become_running → cooperative_park → park_until_resumed`, blocked on `STW_COND`
+waiting for `gc_active == false`; all GC workers idle in `poll_slow`. Authoritative reads: MMTk's
+`WorkerMonitor` shows `worker_count = parked = 8, goal = None` — **MMTk is provably idle with no GC
+scheduled** — yet `gc_active` is stuck `true`. The event timeline shows **3 `stop_all_mutators` vs 2
+`resume_mutators`**: GC #3's stop set `gc_active=true` and passed its barrier (reached the mutator-visit
+loop), but its collection never called `resume_mutators` (the last `GC_ACTIVE` write is 0→1). `gc_active`
+is a *shadow* of MMTk's real GC-in-progress state, kept in sync only by "stop sets it / resume clears it";
+the spawn handshake rapidly bounces the parent STOPPED↔RUNNING while allocation trips back-to-back
+collections, opening a window that breaks the pairing → flag orphaned-true. The parker keys ENTIRELY off
+`gc_active`, so it waits forever. StickyImmix hangs identically (binding machinery, not a plan defect).
+
+**Fix directions (not yet implemented):** (a) make the parker consult MMTk's *authoritative* GC state
+(`GlobalState.gc_status`) instead of the shadow flag — needs a small `pub(crate)` accessor; or (b) give
+`park_until_resumed` a bounded, re-validating wait so an orphaned flag self-heals. **Not fully pinned:** the
+exact `on_last_parked` branch by which GC #3's physical collection reached idle without `resume_mutators`.
+
+---
+
 ## `finaliser_handover.ml` multidomain SIGSEGV — rr-diagnosed: use-after-free of a finaliser value
 
 *2026-06-24*
