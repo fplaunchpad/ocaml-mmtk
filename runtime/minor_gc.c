@@ -496,12 +496,37 @@ void caml_empty_minor_heaps_once (void)
 
   CAML_EV_BEGIN(EV_EMPTY_MINOR);
 
+  /* bug #3c - cross-STW rendezvous deadlock. OCaml keeps an all-domains minor
+     STW (this function) as the domain spawn/terminate rendezvous, even though
+     under MMTk it does no promotion (the per-domain work is neutered). That STW
+     and MMTk's own STW could capture each other's domains: the domain leading /
+     joining this minor STW is still RUNNING in MMTk's view, so MMTk's
+     stop_all_mutators waits for it at the running.is_empty() barrier; meanwhile
+     it spins on all_domains_lock waiting for the other domains to rendezvous -
+     but those have been poisoned by MMTk and parked in park_until_resumed
+     (waiting for gc_active==false). Neither STW can finish: each holds domains
+     the other needs.
+
+     Break the cycle by marking this domain STOPPED in MMTk's RUNNING set for the
+     duration of the minor STW (caml_mmtk_enter_blocking), so MMTk's
+     stop_all_mutators does NOT await it - the barrier can drain, the collection
+     finishes, resume_mutators clears gc_active, and the parked participants wake
+     to answer this STW. The domain stays a registered mutator throughout, so its
+     roots are still scanned by the mutator_visitor (heap correctness unaffected).
+     caml_mmtk_become_running re-marks RUNNING afterwards, parking cooperatively
+     if a collection happens to be active by then - the safe STOPPED->RUNNING
+     edge. caml_mmtk_enter_blocking/become_running are idempotent and no-ops when
+     this domain has no MMTk mutator, so this is safe for every caller. */
+  caml_mmtk_enter_blocking((uintnat) Caml_state);
+
   /* To handle the case where multiple domains try to execute a minor gc
      STW section */
   do {
     caml_try_empty_minor_heap_on_all_domains();
   } while (saved_minor_cycle ==
            atomic_load_relaxed(&caml_minor_cycles_started));
+
+  caml_mmtk_become_running((uintnat) Caml_state);
 
   CAML_EV_END(EV_EMPTY_MINOR);
 }
