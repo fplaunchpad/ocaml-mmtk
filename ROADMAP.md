@@ -146,8 +146,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      **adaptive survival-rate (~10%) controller with a per-GC-cost amortization floor** (not
      heap-proportional, not a fixed cap) — future work, isolated as an opt-in *mode* (a
      trigger/policy feature, not a new plan); keep a frozen baseline config. → NOTES 2026-06-24.
-   - Earlier first-round levers (StickyImmix closes much of the gap; GC-thread-count `nproc`
-     oversized). → full ranked backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
+   - **GC worker pool — FIXED 2026-06-24.** The `nproc` default made every worker park/wake on every
+     collection (82% of GC-worker CPU in futex contention); defaulting to **1 worker** is 1.37× faster on
+     single-domain minor GC. Intended policy "workers = running domains" is a gc/mmtk-core-fork follow-up
+     (the pool is fixed at init). Also pending: **#G1** (the binding does full major-root scanning every
+     minor — narrow it to young-only + recent-frames; machinery already in the C runtime).
+   - Earlier first-round levers (StickyImmix closes much of the gap). → full ranked backlog in
+     `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
 
 8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode + native, 2026-06-23; `lazy`-clean; Q3 continuations fixed).**
    The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make

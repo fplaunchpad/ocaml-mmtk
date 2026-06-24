@@ -102,9 +102,22 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // is future work (see gc/mmtk/NOTES.md). Until then we keep the upstream proportional
     // default rather than pin the baseline to a guessed constant. Overridable via
     // MMTK_NURSERY (read by MMTKBuilder::new).
-    // GC worker thread count is set via mmtk-core's own MMTK_THREADS env var
-    // (read automatically by Options::default → read_env_var_settings), along with
-    // the other pass-through knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …).
+    // GC worker count. mmtk-core defaults this to nproc, but EVERY worker parks/wakes on
+    // EVERY collection, contending on a single monitor mutex+condvar; for OCaml's common
+    // single-domain, high-frequency *minor* GC that is pure overhead (measured ~38% slower
+    // at nproc vs 1 on binarytrees; perf: ~82% of GC-worker CPU is park/contend doing zero
+    // work). Default to 1 worker when MMTK_THREADS is unset — the single-domain-optimal
+    // count and a sane start. The intended policy is "workers = number of running domains",
+    // but mmtk-core fixes the pool size at init (no runtime resize), so scaling it to the
+    // live domain count is a gc/mmtk-core-fork follow-up (see gc/mmtk/NOTES.md); until then
+    // parallel/multi-domain workloads should set MMTK_THREADS. Other mmtk-core knobs
+    // (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …) pass through via MMTKBuilder::new.
+    if std::env::var_os("MMTK_THREADS").is_none() {
+        assert!(
+            memory_manager::process(&mut builder, "threads", "1"),
+            "failed to set default GC worker count"
+        );
+    }
 
     let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
     let constraints = mmtk_instance.get_plan().constraints();

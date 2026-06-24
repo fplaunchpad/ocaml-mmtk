@@ -5,6 +5,42 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GC worker pool: default to 1 (was nproc) — the dominant minor-GC fix
+
+*2026-06-24*
+
+The turing perf profile (`~/perfgc-minor.md`) showed the "~1.2 ms minor-GC floor" was two costs:
+(1) a **worker-handshake tax linear in `MMTK_THREADS`** — at the nproc default, every worker parks/wakes on
+EVERY collection contending on one `WorkerMonitor` mutex+condvar; perf attributes **82% of GC-worker CPU to
+`park_and_wait`** doing zero work. Per-GC fixed cost: 0.055 ms (1 worker) → 0.73–0.87 ms (28). (2) a
+survivor-scaling copy+scan cost (~90% on real workloads; ~16% of it side-metadata atomics). **The 1-worker
+floor (~0.055 ms) is 5–7× *cheaper* than stock's 0.3–0.4 ms** — MMTk's minor machinery is lean; the slowdown
+was the oversized pool + atomic metadata, not the algorithm. (Great Bactrian signal.)
+
+**Fix (landed):** default the GC worker count to **1** when `MMTK_THREADS` is unset (`api.rs`), gated so the
+env still overrides. Validated on M4 Pro (hyperfine, 8 runs): binarytrees-20 (2 MiB nursery) **2.86 s ±0.02 (nproc=12) →
+2.09 s ±0.02 (1.37× faster)**, default == `MMTK_THREADS=1`, golden byte-identical. The smoking gun is the
+*system* time — nproc=12 burns **3.75 s in the kernel** (futex park/wake) vs the default's 0.07 s. The intended policy is **workers = number of running
+domains** (KC) — match GC parallelism to mutator parallelism — but **mmtk-core fixes the pool at init**
+(`WorkerGroup::new` once + `spawn_gc_threads`; only stop-all-for-fork / respawn-all, no runtime resize), so
+the dynamic scaling is a **gc/mmtk-core-fork follow-up** (resize-on-domain-spawn, or over-provision + wake-a-
+subset per GC). Interim: parallel/multi-domain workloads set `MMTK_THREADS`.
+
+**Related, from the same investigation:**
+- **#G1 (next to implement):** the binding does *major*-GC root scanning on every *minor* GC —
+  `scan_roots…` calls `caml_do_roots(…, 0 /*scan everything*/)` (`scanning.rs:215`) + `caml_scan_global_roots`
+  (all globals incl. old, `:244`), with no minor-vs-major distinction. The narrow machinery
+  (`caml_scan_global_young_roots`, `SCANNING_ONLY_YOUNG_VALUES|RECENT_FRAMES`) still ships in the C runtime,
+  unused. Small for binarytrees (~1.5%) but `O(all module state)`; correctness-sensitive (recent-frames
+  watermark). → implement gated on a nursery-GC query + sanity + testsuite.
+- **#E1 DROPPED:** non-atomic forwarding is unsafe with >1 GC worker — the SeqCst forwarding CAS is what stops
+  two work-stealing workers double-forwarding the same object. Load-bearing; not removable.
+- **`caml_alloc2` = misattribution:** native small-alloc is correctly inline (`fun_fast` defaults true,
+  `linearize.ml:343`; disasm shows `subq $24,%r15; cmpq young_limit; jb caml_call_gc` — no `caml_alloc2`
+  call). Byte-for-byte stock, as claimed.
+
+---
+
 ## Dynamic heap default (footprint fix) + the real finding: MMTk's minor GC is expensive
 
 *2026-06-24*

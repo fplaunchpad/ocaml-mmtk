@@ -79,6 +79,7 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 |----------|---------|---------|
 | `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
 | `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand, like stock OCaml. |
+| `MMTK_THREADS` | `1` | GC worker threads. Default 1 (best for the common single-domain case); raise for parallel/multi-domain workloads. |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
 mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
