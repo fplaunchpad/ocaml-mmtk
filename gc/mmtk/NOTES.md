@@ -5,6 +5,44 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Dynamic heap default (footprint fix) + the real finding: MMTk's minor GC is expensive
+
+*2026-06-24*
+
+Investigating the nursery size surfaced that the fork shipped naive MMTk defaults. Measured on the M4 Pro
+(binarytrees, native, non-flambda, vs stock OCaml 5.4.1; RSS via `/usr/bin/time -l`; stock GC counts via
+`OCAMLRUNPARAM=v=0x400`; MMTk GC stats via `MMTK_VERBOSE=1`):
+
+- **Fixed 1 GB heap → FIXED (dynamic now default).** `runtime/mmtk.c` hard-coded `heap_mb=1024` and `api.rs`
+  set `FixedHeapSize`. The 1 GB was virtual (a tiny tool was 26 MB RSS, not 1 GB, so it still ran), but the
+  heap-full trigger let alloc-heavy programs balloon: **binarytrees-18 = 589 MB vs stock 39 MB (~15×)**. Fix:
+  `runtime/mmtk.c` passes `heap_bytes=0` when `MMTK_HEAP_SIZE_MB` is unset; `api.rs` turns 0 into
+  `DynamicHeapSize:16 MiB,<physical RAM>` (MemBalancer; 64 GiB fallback if RAM unknown). Gated on
+  `MMTK_GC_TRIGGER`; a non-zero `MMTK_HEAP_SIZE_MB` still pins a fixed heap. Added `physical_memory_bytes()`
+  (sysconf/sysctl). Result: **binarytrees-18 RSS 589 → 105 MB**, correct, no thrash (the 2026-06-20
+  `32M,cap` gcbench >190 s thrash did NOT reproduce — binarytrees-22 = 458 GCs / 8.6 s, completes).
+  **Supersedes the older "Dynamic heap sizing — reverted to FixedHeapSize" note below.**
+
+- **Nursery left on mmtk's proportional default** (0.25..1.0 × dynamic heap; floor 2 MiB, ceiling 1 TiB/64-bit).
+  A fixed 8 MiB cap was tried and **rejected** — it is the wrong model: stock affords a tiny minor because its
+  minor GC is cheap, MMTk's is not (next point), so a small nursery forces MMTk's worst regime. The right model
+  (per KC) is a nursery sized to a **target survival rate (~10%)** with a floor that amortizes MMTk's per-
+  collection cost — an **adaptive controller** (future work). mmtk already measures promotion
+  (`gc_trigger.rs:451`) for its MemBalancer *heap* controller; reuse that signal for an analogous *nursery*
+  controller. Isolate as an opt-in mode (NOT a new plan — nursery sizing is a trigger/policy concern shared by
+  all generational plans), keeping a frozen baseline config.
+
+- **The real finding: MMTk's per-minor-GC cost is high.** At stock's exact 2 MiB nursery, MMTk-GenImmix did
+  **1896 GCs in 2.86 s** vs stock's **1806 GCs in 1.21 s** — same count, ~2.4× slower; per-GC floor ≈1.2 ms
+  (MMTk) vs ≈0.3–0.4 ms (stock). MMTk routes every nursery collection through its full STW-handshake + GC-
+  worker-thread + work-packet machinery; stock's minor GC is an inline Cheney copy on the mutator. The big-
+  nursery "win" is fake — it only wins by ballooning RSS. **Methodology: compare at memory parity, report RSS
+  with wall time.** NEXT: Linux `perf` profile of one GenImmix minor GC to attribute the ~1.2 ms floor (worker
+  wakeup vs root scan vs copy vs scheduling) — sets the nursery amortization floor and the path to a viable
+  OCaml minor GC under MMTk.
+
+---
+
 ## GH#10 FIXED — bundle the MMTk staticlib into the runtime archives (drop the bare `-lmmtk_ocaml` from c_libraries)
 
 *2026-06-24*
@@ -766,7 +804,9 @@ closes much of the gap, and more heap headroom helps.
 
 **Optimisation levers + first-round results (2026-06-20):**
 
-1. **Dynamic heap sizing — TRIED, REGRESSED, reverted.** Switched `gc_trigger` to
+1. **Dynamic heap sizing — TRIED, REGRESSED, reverted.** *(SUPERSEDED 2026-06-24 — dynamic
+   heap `DynamicHeapSize:16 MiB,RAM` IS now the default; the gcbench thrash below did not
+   reproduce in re-test. See the top entry.)* Switched `gc_trigger` to
    `DynamicHeapSize:32M,cap`. On `gcbench` it *thrashed* — one run took >190 s (vs 5.9 s
    fixed) because it starts at 32 MB against a ~192 MB live set and mmtk 0.32's grow
    heuristic ramps too slowly. A small-min dynamic heap is *worse* for large-live-set

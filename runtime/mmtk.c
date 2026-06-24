@@ -127,14 +127,20 @@ void caml_mmtk_init(void)
   const char *plan = getenv("MMTK_PLAN");
   if (plan == NULL || plan[0] == '\0') plan = "GenImmix";
 
-  size_t heap_mb = 1024;
+  /* Heap sizing. Default to a DYNAMIC (MemBalancer) heap so the runtime grows on
+     demand like stock OCaml — a CLI tool needs only a few MB of RSS, and memory
+     tracks the live set. The old hard-coded fixed 1 GB heap never collected until
+     ~1 GB, so allocation-heavy programs used ~15x stock's footprint. Pass 0 to
+     mmtk_ocaml_init to request the dynamic default; MMTK_HEAP_SIZE_MB=<MB> still
+     pins a fixed heap for benchmarking/repro. */
+  size_t heap_bytes = 0;   /* 0 => dynamic heap (binding chooses min .. physical RAM) */
   const char *heap_env = getenv("MMTK_HEAP_SIZE_MB");
   if (heap_env != NULL && heap_env[0] != '\0') {
     long v = strtol(heap_env, NULL, 10);
-    if (v > 0) heap_mb = (size_t)v;
+    if (v > 0) heap_bytes = (size_t)v * 1024 * 1024;
   }
 
-  mmtk_ocaml_init(heap_mb * 1024 * 1024, plan);
+  mmtk_ocaml_init(heap_bytes, plan);
   caml_mmtk_initialised = 1;
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
   caml_mmtk_generational = (strcmp(plan, "GenImmix") == 0
@@ -164,8 +170,12 @@ void caml_mmtk_init(void)
   }
 
   if (getenv("MMTK_VERBOSE") != NULL) {
-    fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB weak_refs=%d\n",
-            plan, heap_mb, caml_mmtk_weak_refs);
+    if (heap_bytes == 0)
+      fprintf(stderr, "[mmtk] initialised: plan=%s heap=dynamic weak_refs=%d\n",
+              plan, caml_mmtk_weak_refs);
+    else
+      fprintf(stderr, "[mmtk] initialised: plan=%s heap=%zuMiB weak_refs=%d\n",
+              plan, heap_bytes / (1024 * 1024), caml_mmtk_weak_refs);
     atexit(caml_mmtk_report_copied);
   }
 }

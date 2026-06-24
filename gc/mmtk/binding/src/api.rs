@@ -19,6 +19,45 @@ use mmtk_ocaml_common::slot::OCamlMemorySlice;
 use crate::active_plan::{deregister_by_ptr, register_mutator};
 use crate::{mmtk, OCamlVM, SINGLETON};
 
+/// Best-effort physical RAM size in bytes — the upper bound for the default dynamic
+/// heap. Returns 0 if it can't be determined (caller falls back to a large constant).
+fn physical_memory_bytes() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if pages > 0 && page_size > 0 {
+            return (pages as usize).saturating_mul(page_size as usize);
+        }
+        0
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut mem: u64 = 0;
+        let mut size = core::mem::size_of::<u64>();
+        let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                &mut mem as *mut u64 as *mut libc::c_void,
+                &mut size,
+                core::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 {
+            mem as usize
+        } else {
+            0
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 
 /// Initialise MMTk.  Call once (from `caml_main`/startup) before any domain
@@ -32,14 +71,37 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         memory_manager::process(&mut builder, "plan", plan_str),
         "unknown MMTk plan: {}", plan_str
     );
-    assert!(
-        memory_manager::process(
-            &mut builder,
-            "gc_trigger",
-            &format!("FixedHeapSize:{}", heap_size)
-        ),
-        "failed to set gc_trigger/heap_size"
-    );
+    // Heap sizing. `heap_size == 0` is the runtime's "dynamic" request (the default,
+    // when MMTK_HEAP_SIZE_MB is unset): use MMTk's MemBalancer trigger growing from a
+    // small floor up to physical RAM, so RSS tracks the live set like stock OCaml
+    // instead of pinning a fixed (formerly 1 GB) heap that ballooned footprint ~15x.
+    // A non-zero heap_size pins a fixed heap. An explicit MMTK_GC_TRIGGER env (already
+    // read by MMTKBuilder::new) is honoured: we don't override it in the dynamic case.
+    let trigger = if heap_size != 0 {
+        Some(format!("FixedHeapSize:{}", heap_size))
+    } else if std::env::var_os("MMTK_GC_TRIGGER").is_none() {
+        const MIN_HEAP: usize = 16 * 1024 * 1024;
+        let ram = physical_memory_bytes();
+        let max_heap = if ram > MIN_HEAP { ram } else { 64usize << 30 }; // RAM, or 64 GiB if unknown
+        Some(format!("DynamicHeapSize:{},{}", MIN_HEAP, max_heap))
+    } else {
+        None // respect the user's MMTK_GC_TRIGGER
+    };
+    if let Some(t) = trigger {
+        assert!(
+            memory_manager::process(&mut builder, "gc_trigger", &t),
+            "failed to set gc_trigger ({})", t
+        );
+    }
+
+    // Nursery: deliberately left on mmtk-core's default (ProportionalBounded 0.25..1.0
+    // of the now-dynamic heap; absolute floor 2 MiB, ceiling 1 TiB/64-bit). A fixed or
+    // heap-proportional nursery is the wrong long-term model for OCaml under MMTk — the
+    // nursery should be sized to a target survival rate (~10%) with a floor that
+    // amortizes MMTk's (relatively high) per-collection cost. That adaptive controller
+    // is future work (see gc/mmtk/NOTES.md). Until then we keep the upstream proportional
+    // default rather than pin the baseline to a guessed constant. Overridable via
+    // MMTK_NURSERY (read by MMTKBuilder::new).
     // GC worker thread count is set via mmtk-core's own MMTK_THREADS env var
     // (read automatically by Options::default → read_env_var_settings), along with
     // the other pass-through knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …).

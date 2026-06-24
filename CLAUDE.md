@@ -115,9 +115,13 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 - `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
   Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix.
-- `MMTK_HEAP_SIZE_MB` (fixed heap), `MMTK_THREADS` (GC worker count),
-  `MMTK_VERBOSE=1` (prints GC stats at exit). MMTk is the only collector — no
-  opt-out; benchmark against stock via a separate vanilla OCaml 5.5 opam switch.
+- `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; the default is a **dynamic** MemBalancer heap
+  `16 MiB..physical-RAM` so RSS tracks the live set like stock — the old fixed-1 GB default
+  used ~15× stock's footprint), `MMTK_NURSERY` (e.g. `Fixed:8388608` / `Bounded:2m,8m`;
+  default = mmtk's `ProportionalBounded 0.25..1.0` of the heap, floor 2 MiB), `MMTK_THREADS`
+  (GC worker count), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
+  MMTk is the only collector — no opt-out; benchmark against stock via a separate vanilla
+  OCaml 5.5 opam switch (compare at **memory parity** — report RSS alongside wall time).
 
 ## Gotchas (hard-won — don't rediscover these)
 
