@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #3c — CORRECTED: a cross-STW rendezvous deadlock (OCaml minor STW × MMTk STW), not an orphaned flag
+
+*2026-06-24*
+
+The earlier "orphaned `gc_active` shadow flag" diagnosis (entry below) was an **idle end-state snapshot**,
+NOT the cause. A church before/after **disproved** the parker self-heal: baseline **23/40 hangs (57.5%)**,
+with-fix **34/60 (57%)** — unchanged; the self-heal never fires (at every hang `gc_in_progress_relaxed()`
+correctly returns *true* — MMTk is genuinely mid-collection, `gc_status == GcPrepare`).
+
+**Real cause (verified via thread-stack dumps at the hang):** a **cross-STW rendezvous deadlock** between
+OCaml's minor-heap STW and MMTk's STW. A terminating domain calls `caml_empty_minor_heaps_once`
+(`domain.c:2129`) while **still in MMTk's RUNNING set**, leads OCaml's minor STW, and spins on
+`all_domains_lock` waiting for the other domains — which MMTk has poisoned and parked in
+`park_until_resumed`. A GC worker is meanwhile blocked in `stop_all_mutators` at the `running.is_empty()`
+barrier. Each STW has captured domains the other waits on. **Not rare:** a 2-domain × 1500-round spawn loop
+fails ~2/10 even at `MMTK_THREADS=1`.
+
+**Correct fix (OPEN):** serialise OCaml's minor STW against MMTk's STW so neither captures the other's
+domains — mark a domain STOPPED in MMTk's view while it leads/joins OCaml's minor STW, OR have MMTk defer a
+collection while an OCaml minor STW is in flight. The shadow-flag self-heal (branch `fix/bug3c-parker` +
+mmtk-core `fix/bug3c-gc-in-progress-relaxed`, **NOT merged**) is at most defensive infra; it does not fix
+this. church report: `church:~/bug3c-fix.md`.
+
+**Two side issues surfaced (orthogonal, pre-existing):** (1) **GH#10 build break on rustc 1.92** — its
+`staticlib` isn't self-contained (~539 std + 4 `__rdl_*` symbols undefined), so the runtime-archive object
+bundling fails to link (workaround: `--whole-archive` + libstd dylib). (2) a separate **"MMTk cannot trace
+object"** crash (`active_plan.rs:59`) during domain terminate under light spawn — a likely dangling-root
+trace, distinct from #3c.
+
+---
+
 ## Space-overhead heap trigger — replaces MemBalancer (binarytrees 3.5× → 1.27×)
 
 *2026-06-24*
