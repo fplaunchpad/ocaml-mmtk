@@ -9,6 +9,12 @@ programs, ported to run on this MMTk-backed OCaml fork. Two jobs:
 - **Performance** — wall-time and max-RSS per plan, the basis for the M8
   comparison against stock OCaml (a separate vanilla 5.5 opam switch).
 
+> **See also `quick/`** — a small, fast **quick-decision GC panel** (six benches +
+> a one-command `quickbench.sh` harness) for getting rapid perf signal while
+> iterating on a GC change (e.g. the no-zero allocation change). It complements,
+> does not replace, this CLBG correctness suite and the heavyweight
+> ocaml-bench/macro-bench authoritative suite. Details: [`quick/README.md`](quick/README.md).
+
 ## Programs
 
 | Program | Parallelism | Notes |
