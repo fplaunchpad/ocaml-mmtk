@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## `finaliser_handover.ml` multidomain SIGSEGV — rr-diagnosed: use-after-free of a finaliser value
+
+*2026-06-24*
+
+Reverse-debugged the residual `weak-ephe-final/finaliser_handover.ml` SIGSEGV (bug #3b /
+"multi-domain orphan-finaliser handover sub-bug") on **godel** (rr 5.7.0). Fresh clone
+`~/ocaml-mmtk-finh` @ `8777a2208`, bytecode `world` + `ocamlrund`. **Deterministic repro** under
+`MMTK_PLAN=GenImmix MMTK_HEAP_SIZE_MB=64` (crashed on the FIRST run; small heap → frequent
+nursery GCs). **rr trace saved: `godel:~/rr-finh-saved` (packed, 59M)** + live `godel:/tmp/rr-finh`;
+full writeup `godel:~/finh-rr.md`.
+
+**Crash mechanism.** A GC worker recurses ~87,000 frames in the Immix copy allocator
+(`overflow_alloc → acquire_clean_block → alloc_slow_* → overflow_alloc …`) trying to satisfy ONE
+absurd request of **17,213,390,904 bytes (~17 GB)**, exhausts the C stack → SIGSEGV. The size is
+`get_current_size(from)` (`common/object_model.rs`) reading a **garbage header**
+(`0x00000200ffc01857`, wosize ~2.15e9) for `from = 0x4000000f5f8`.
+
+**Root cause — stale finaliser value (use-after-free), not a missed root or mis-forward.**
+`0x4000000f5f8` is a `roots:true` slot on the **main domain's `current_stack`**
+(`caml_scan_stack`, `fflags=0`), recurring across many bytecode frames = the argument `v` of the
+running finaliser body `fun v -> ignore @@ check v`. But it points into the **interior of a
+heap-allocated bytecode fiber stack** in the nursery (`0x4000000e900..f700` — code ptrs, the ASCII
+string "index out of bounds", etc.), **not** a real `Node`. The main mutator is STW-parked in
+`pthread_cond_wait`, stopped mid-finaliser with the corrupt `v` live; the worker scans its stack
+and dies copying `v`. This GC's `process_weak_refs` **does** run
+`caml_mmtk_adopt_orphaned_finalisers` — `orph_structs.final_info` non-NULL, hundreds of orphaned
+entries from the terminated `Domain.spawn(work)` domains, all nursery-resident (valid headers AT
+adoption: val `0x800` Node, fun `0x10f7` Closure). The lifetime hole: finaliser values orphaned by
+a terminated domain are nursery objects that are **not roots and not forwarded by the nursery GCs
+running between orphaning → adoption → the finaliser actually running**; the TLAB/copy-nursery is
+recycled (a fiber stack bump-allocated over it), so a queued finaliser's `val` ends up aliasing
+unrelated nursery bytes.
+
+**Where (code).** `caml_orphan_finalisers` (major_gc.c ~512) splices only pointers into
+`orph_structs`; `caml_mmtk_adopt_orphaned_finalisers` (~576) merges first/last via
+`caml_final_merge_finalisable` (memcpy, no retain/forward of table values) and re-examines them
+only *within the adopting GC*. Nothing keeps orphaned (or queued-but-not-yet-run) finaliser values
+live + address-correct across the intervening GCs.
+
+**Proposed fix (to validate).** Root the orphan structs **every** GC: enumerate
+`orph_structs.final_info` first/last tables + run-queues in a VM root pass (orphaned_lock-guarded)
+and feed `fun`/`val` to `collect_root_slot`, so each nursery GC forwards-and-updates them in place
+— mirroring how a live domain's `final_info` is rooted via `caml_final_do_roots`. Also verify the
+weak-refs `do_final_val=0` path keeps a live domain's `todo_head` run-queue vals alive+forwarded
+until `caml_final_do_calls` runs them. Then re-verify in a GenImmix/64MB loop + mmtk `sanity` at a
+small heap.
+
+---
+
 ## GC worker pool: default to 1 (was nproc) — the dominant minor-GC fix
 
 *2026-06-24*
