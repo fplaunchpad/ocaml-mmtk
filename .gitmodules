@@ -3,3 +3,7 @@
 	url = https://github.com/ocaml/flexdll.git
 	shallow = true
 	branch = master
+[submodule "gc/mmtk-core"]
+	path = gc/mmtk-core
+	url = https://github.com/fplaunchpad/mmtk-core.git
+	branch = 0.32-ocaml

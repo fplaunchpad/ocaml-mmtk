@@ -14,3 +14,11 @@ mmtk              = { workspace = true }
 mmtk-ocaml-common = { path = "../common" }
 lazy_static       = { workspace = true }
 libc              = { workspace = true }
+
+[features]
+# RQ8: forward to mmtk's no_zero_alloc — skips eager allocation-time zero-fill.
+# Build with `--features no_zero_alloc` to enable. STOP-THE-WORLD PLANS ONLY:
+# must NOT be combined with a concurrent-marking plan (ConcurrentImmix) — a
+# concurrent marker can observe the header-written/fields-unwritten window where
+# unzeroed fields read as garbage pointers. See gc/mmtk-core Cargo.toml + RQ8.
+no_zero_alloc = ["mmtk/no_zero_alloc"]
