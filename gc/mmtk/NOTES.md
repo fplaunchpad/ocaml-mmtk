@@ -5,6 +5,53 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GenImmix-default validated: throughput win over Immix, but a confirmed generational-minor weak-clear regression (GH#5)
+
+*2026-06-24*
+
+Validated the default flip (Immix → GenImmix, commit `49588c70ae`) on a fresh build at `99a7a123b`.
+
+**Default confirmed:** `MMTK_PLAN` unset → GenImmix (`mmtk.c:128`). Bootstrap smoke (`ocamlopt.opt -c typecore.ml`
+under default) PASS — 1 GC, 775 K copied (copy-nursery genuinely active). Broader regression slice **74/74**
+(basic / effects / lib-array / hashtbl / gc-roots / list) — common path clean.
+
+**Throughput — GenImmix is a near-strict improvement over Immix** (native, interleaved A/B vs released vanilla 5.5.0):
+
+| bench | heap | GenImmix/van | Immix/van | vs Immix |
+|---|---|---|---|---|
+| nbody | 256 | 1.006 | 1.005 | tie (0 GC) |
+| fft | 128 | 1.03–1.08 | 1.115 | **beats** |
+| fft | default | 1.052 | 1.079 | **beats** |
+| spectralnorm | 256 | 1.603 | 1.738 | **beats** (still loses to vanilla) |
+| fannkuchredux | 256 | 1.11–1.13 | 0.985 | **LOSES** (copy-nursery jitter, short alloc-light bench; fork min 0.575 = vanilla) |
+| binarytrees | 512 | 0.662 | 0.661 | tie (fork wins 1.5× vs vanilla) |
+
+GenImmix fires more GCs than Immix (spectralnorm 45 vs 23) but copies few objects (low nursery survival) —
+the generational hypothesis holds for OCaml. The lone throughput regression vs Immix is fannkuchredux (jitter
+on a short bench, not a real loss). Net: parity-or-fork-win vs vanilla everywhere except spectralnorm (1.6×,
+still better than Immix's 1.74×).
+
+**CORRECTNESS CAVEAT — the real blocker (GH#5).** `weak-ephe-final`: GenImmix **8/14** vs Immix **10/14**. Two
+regressions are **flip-introduced** (pass Immix, fail GenImmix; reconfirmed both ways):
+- **`weaklifetime.ml`** (native + bytecode): a weak reports CLEARED while its block is still reachable
+  (assert line 53) — **weak cleared too early under the generational minor (copy-nursery) collection.**
+- **`finaliser_handover.ml`** (bytecode only): multi-domain `Gc.finalise` handover timing in the interpreter.
+
+(Four other `weak-ephe-final` failures are **pre-existing** — fail under Immix too.) **`MMTK_WEAK_REFS=0` does
+NOT help — it makes it worse (6→9)**: never-clear breaks the positive-clear assertions. Root cause: generational
+**minor** GCs don't run the full `process_weak_refs` reachability a full GC does (flagged at `mmtk.c:124`). This
+is a **pre-existing GenImmix bug now on the default path**, not new code. Fix: run weak/ephemeron/finalise
+processing (or a nursery remembered-set of such entries) on minor collections — the prerequisite to declaring
+the flip fully validated.
+
+**Verdict:** flip is throughput-safe and the common path is clean, but it carries a confirmed weak/finaliser
+soundness regression on the default (affects `Weak`/`Ephemeron`/`Gc.finalise` users). **Decision pending:**
+keep GenImmix default + fix (GH#5), vs revert to Immix until fixed. Environment caveat: turing was not fully
+quiet during Task 2 (competing rq8 build + spot benches); the main sweep ran in a verified-clean window, reruns
+skipped to avoid mutual pollution. Writeup: `~/genimmix-default-validation.md` on turing.
+
+---
+
 ## Native ConcurrentImmix (RQ1) — SATB barrier is ~free, concurrent marking cuts max pause 3–4×, ~0% throughput tax
 
 *2026-06-24*
