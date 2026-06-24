@@ -5,7 +5,11 @@
 # builds a staticlib (`libmmtk_ocaml.a`) that is linked into the patched
 # OCaml runtime; `common` holds the version-independent value-layout code.
 #
-# mmtk-core is depended on from crates.io (NOT vendored, NOT a path dep).
+# mmtk-core: version "0.32" is redirected (via [patch.crates-io] below) to our
+# fork at `gc/mmtk-core` (git submodule -> fplaunchpad/mmtk-core, branch
+# `0.32-ocaml`, our deltas on top of the v0.32.0 release tag). The fork is needed
+# because the research plans modify mmtk-core itself (RQ8 no-zero allocation;
+# later the GenConcurrentImmix plan). The submodule SHA pins the exact source.
 [workspace]
 members = ["common", "binding"]
 resolver = "2"
@@ -14,6 +18,12 @@ resolver = "2"
 mmtk        = { version = "0.32", features = ["object_pinning"] }
 lazy_static = "1.5"
 libc        = "0.2"
+
+# Redirect the crates.io `mmtk` to our in-tree fork (the gc/mmtk-core submodule).
+# Path is relative to this file (gc/mmtk/) -> gc/mmtk-core. The fork is v0.32.0 +
+# our deltas, so the "0.32" version constraint above still resolves.
+[patch.crates-io]
+mmtk = { path = "../mmtk-core" }
 
 [profile.release]
 # Bring-up: keep debug info in the release staticlib for easier gdb/lldb work.

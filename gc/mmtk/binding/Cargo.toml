@@ -14,3 +14,8 @@ mmtk              = { workspace = true }
 mmtk-ocaml-common = { path = "../common" }
 lazy_static       = { workspace = true }
 libc              = { workspace = true }
+
+# RQ8 (ocaml-mmtk): allocation-time zero-fill is a RUNTIME toggle now
+# (`memory_manager::set_alloc_zeroed`, exposed as `mmtk_ocaml_set_alloc_zeroed`),
+# not a cargo feature — runtime/mmtk.c sets it from the active plan so one binary
+# disables zeroing for stop-the-world plans and keeps it on for ConcurrentImmix.

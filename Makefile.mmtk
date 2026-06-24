@@ -55,6 +55,11 @@ MMTK_RUSTFLAGS = --remap-path-prefix=$(abspath $(ROOTDIR))=.
 # build decides whether a rebuild is needed (cheap when up to date).
 .PHONY: mmtk-lib
 mmtk-lib:
+	@# RQ8: mmtk-core is now a git submodule (gc/mmtk-core, the [patch.crates-io]
+	@# target). A fresh clone has it empty, which breaks the cargo build below;
+	@# initialise it on demand so a plain `make` works without a manual step.
+	@test -f $(ROOTDIR)/gc/mmtk-core/Cargo.toml || \
+	  git -C $(ROOTDIR) submodule update --init gc/mmtk-core
 	RUSTFLAGS='$(MMTK_RUSTFLAGS)' \
 	  $(MMTK_CARGO) build --release --manifest-path $(MMTK_DIR)/Cargo.toml
 

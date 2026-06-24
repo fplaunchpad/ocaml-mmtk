@@ -376,6 +376,18 @@ pub extern "C" fn mmtk_ocaml_concurrent_marking_active() -> bool {
         .unwrap_or(false)
 }
 
+/// RQ8 (ocaml-mmtk): set whether allocation-time zero-fill is performed. Process
+/// global; default is `true` (zero — safe for every plan). The runtime calls this
+/// once at init, **before any allocation**, with `zeroed = false` for stop-the-world
+/// Immix-family plans (OCaml fully initializes every block before the next
+/// GC-observable safepoint, so eager zeroing is a redundant double-write) and
+/// `zeroed = true` for ConcurrentImmix (a concurrent marker can observe the
+/// header-written / fields-unwritten window, so zeroing must stay on there).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_set_alloc_zeroed(zeroed: bool) {
+    memory_manager::set_alloc_zeroed(zeroed);
+}
+
 /// Deregister a terminating domain (by its caml_domain_state address) so the
 /// stop-the-world code no longer waits for it.
 #[no_mangle]

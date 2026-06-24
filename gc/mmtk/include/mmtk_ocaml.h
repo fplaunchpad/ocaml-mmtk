@@ -133,6 +133,15 @@ void mmtk_ocaml_cont_unlock(uintptr_t cont_addr);
 /** True iff the concurrent plan is currently in its concurrent marking phase. */
 bool mmtk_ocaml_concurrent_marking_active(void);
 
+/**
+ * RQ8: set whether MMTk zeros allocation memory before handing it to the mutator.
+ * Process global; default true (zero). Call once at init, BEFORE any allocation,
+ * with false for stop-the-world Immix-family plans (OCaml initializes every block
+ * before the next GC-observable safepoint) and true for ConcurrentImmix (a
+ * concurrent marker may observe the header-written/fields-unwritten window).
+ */
+void mmtk_ocaml_set_alloc_zeroed(bool zeroed);
+
 /* ── Object queries ─────────────────────────────────────────────────── */
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
