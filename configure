@@ -24956,21 +24956,25 @@ esac
 # MMTk GC binding: this fork (mmtk-ocaml) always links the in-tree MMTk static
 # library (gc/mmtk) into native and -custom bytecode programs so the runtime glue
 # (mmtk_ocaml_*, referenced from lib{caml,asm}run) resolves. MMTk stays dormant
-# unless MMTK_ENABLED is set at run time. We put it in config's
-# {bytecomp,native}_c_libraries (consumed by ocamlc/ocamlopt, which place it after
-# the runtime lib on the C link line — the ordering that resolves the references);
-# the runtime executables themselves get it via MMTK_LINK in the Makefile, so this
-# is NOT added to cclibs/BYTECCLIBS (avoids a redundant double-link there).
+# unless MMTK_ENABLED is set at run time.
 #
-# Reference it relocatably as "-lmmtk_ocaml", exactly like the stock C libs: the
-# archive (libmmtk_ocaml.a) is symlinked into stdlib/ during the build and
-# installed into $(LIBDIR) (the Standard Library dir) on install, and ocamlc/
-# ocamlopt automatically pass "-L<standard-library>" to the C linker
-# (Ccomp.call_linker prefixes every Load_path dir with -L), so -lmmtk_ocaml
-# resolves both in the build tree and from an installed/relocated prefix. We must
-# NOT bake an absolute build-dir path here: it would be substituted into
-# config.cmx / ocamlcommon.cma / the compiler binaries and break the
-# relocatability check (testsuite/tools/testRelocation.ml).
+# How the Rust staticlib's objects reach a user link: at build time we *bundle*
+# libmmtk_ocaml.a's objects directly INTO the runtime archives the compiler always
+# links (lib{asm,caml}run*.a — see Makefile.mmtk MMTK_BUNDLE). The linker still
+# pulls only the objects a program actually references, so there is no per-binary
+# bloat, and crucially the published config carries NO bare "-lmmtk_ocaml": that
+# token is unresolvable by any tool that links a probe with plain `cc` and without
+# OCaml's -L<stdlib> (e.g. dune-configurator feature-probes in lwt/ctypes/owl),
+# which mis-detected features and broke third-party builds (GH#10). An earlier
+# design put "-lmmtk_ocaml" in {bytecomp,native}_c_libraries and relied on ocamlc/
+# ocamlopt adding -L<stdlib>; that works for real OCaml links but not for those
+# bare-cc probes, hence the switch to bundling.
+#
+# {bytecomp,native}_c_libraries (consumed by ocamlc/ocamlopt) therefore carries
+# ONLY MMTk's transitive *system* dependencies — libs a bare `cc` resolves — so
+# probes pass while real native/-custom links still pull mmtk_ocaml_* from the
+# bundled runtime archive. These also feed the runtime executables via MMTK_LINK
+# in the Makefile; not added to cclibs/BYTECCLIBS (avoids a redundant double-link).
 # The transitive native deps differ per OS (matches Makefile.mmtk).
 case $host_os in #(
   *darwin*) :
@@ -24978,7 +24982,7 @@ case $host_os in #(
   *) :
     mmtk_native_libs="-ldl -lpthread -lm" ;;
 esac
-mmtk_c_libraries="-lmmtk_ocaml $mmtk_native_libs"
+mmtk_c_libraries="$mmtk_native_libs"
 
 
 if test x"$libdir_given" = 'xno'

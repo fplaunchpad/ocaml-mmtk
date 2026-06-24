@@ -236,6 +236,9 @@ META
 /parsing/camlinternalMenhirLib.mli
 
 /runtime/domain_state.inc
+# MMTk (GH#10): staging dir of objects extracted from libmmtk_ocaml.a, bundled
+# into the runtime archives at build time. Build artifact, never committed.
+/runtime/mmtk_objs/
 /runtime/caml/jumptbl.h
 /runtime/caml/m.h
 /runtime/caml/s.h

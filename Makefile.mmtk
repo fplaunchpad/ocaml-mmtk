@@ -6,21 +6,18 @@
 
 # Build glue for the in-tree MMTk binding (gc/mmtk). The binding is a Rust
 # Cargo workspace producing a staticlib (libmmtk_ocaml.a). MMTk is the always-on
-# collector (M9): the archive is linked into the bytecode runtime executables
-# (via MMTK_LINK, below) and into every -custom bytecode and native program (via
-# config's {bytecomp,native}_c_libraries, referenced relocatably as
-# -lmmtk_ocaml; see configure.ac and the stdlib symlink / install rules in the
-# top-level Makefile).
+# collector (M9). The staticlib's objects are bundled (MMTK_BUNDLE, below) into
+# the runtime static archives (lib{asm,caml}run*.a) that the compiler always
+# links, so the GC glue (mmtk_ocaml_*, referenced from runtime/mmtk.c) resolves
+# in every native and -custom bytecode program WITHOUT a bare "-lmmtk_ocaml" in
+# config's {bytecomp,native}_c_libraries. (The old "-lmmtk_ocaml" mechanism broke
+# third-party dune-configurator feature-probes that link via bare `cc` without
+# OCaml's -L<stdlib>; see GH#10 and configure.ac.)
 #
 # This fragment is included by the top-level Makefile after Makefile.common.
 
 MMTK_DIR   = $(ROOTDIR)/gc/mmtk
 MMTK_LIB   = $(MMTK_DIR)/target/release/libmmtk_ocaml.a
-# Same archive, but as a path relative to $(ROOTDIR). The install machinery
-# (INSTALL_MODE=opam/clone/list) records source files implicitly relative to
-# $(ROOTDIR), so the install rule must use this, not the $(ROOTDIR)-absolute
-# $(MMTK_LIB) (an absolute path would produce a broken opam .install entry).
-MMTK_LIB_REL = gc/mmtk/target/release/libmmtk_ocaml.a
 MMTK_CARGO ?= cargo
 
 # Native libraries the Rust staticlib transitively depends on. Obtained via:
@@ -34,8 +31,53 @@ else
   MMTK_NATIVE_LIBS = -ldl -lpthread -lm
 endif
 
-# Everything to append to a bytecode-runtime link line so the binding resolves.
-MMTK_LINK = $(MMTK_LIB) $(MMTK_NATIVE_LIBS)
+# Everything to append to a runtime-executable link line so the binding resolves.
+# Since GH#10 the staticlib's objects are bundled INTO the runtime archives (see
+# MMTK_BUNDLE below), so the runtime executables (ocamlrun*, which already link
+# lib{caml}run*.a) pull mmtk_ocaml_* from the archive — we must NOT re-add
+# $(MMTK_LIB) here or every symbol would be defined twice (duplicate-symbol link
+# error). Only MMTk's transitive system deps remain.
+MMTK_LINK = $(MMTK_NATIVE_LIBS)
+
+# Bundling the Rust staticlib into the runtime archives (GH#10).
+#
+# The compiler links lib{asm,caml}run*.a into every native / -custom bytecode
+# program, and those archives reference mmtk_ocaml_* (runtime/mmtk.c). We make
+# those references resolve by merging libmmtk_ocaml.a's *objects* directly into
+# each runtime archive at build time (see the archive rules in the top-level
+# Makefile). This replaces the old "-lmmtk_ocaml" in config's *_c_libraries,
+# which was unresolvable by third-party dune-configurator probes that link via
+# bare `cc` without OCaml's -L<stdlib> (GH#10). We keep the per-object structure
+# (we do NOT ld -r into one blob), so the linker still pulls only the objects a
+# program actually uses — no per-binary bloat.
+#
+# Objects are staged once into $(MMTK_OBJS_DIR) (extracted from libmmtk_ocaml.a;
+# the 490 members have unique, non-colliding names that don't clash with the
+# runtime's own *.n.o/*.b.o), then appended to each archive with `ar r` and the
+# index rebuilt. RANLIB keeps macOS happy (GNU `ar r` already refreshes the index;
+# macOS `ar`'s does too, but an explicit ranlib is the portable belt-and-braces).
+MMTK_OBJS_DIR = $(ROOTDIR)/runtime/mmtk_objs
+MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
+
+# Extract the staticlib's objects once. `ar x` writes them into CWD, so cd into
+# the staging dir; use the absolute archive path since $(MMTK_LIB) is $(ROOTDIR)-
+# relative ("./gc/mmtk/...") and would be wrong after the cd. The stamp tracks
+# freshness against $(MMTK_LIB).
+$(MMTK_OBJS_STAMP): $(MMTK_LIB)
+	rm -rf $(MMTK_OBJS_DIR)
+	mkdir -p $(MMTK_OBJS_DIR)
+	cd $(MMTK_OBJS_DIR) && $(ARCMD) x $(abspath $(MMTK_LIB))
+	touch $@
+
+# Canned recipe: bundle the staged MMTk objects into archive $(1). Used in the
+# top-level Makefile right after each runtime archive is created by MKLIB.
+# `ar r` already refreshes the symbol index on GNU and macOS ar; the explicit
+# ranlib is portable belt-and-braces (and a no-op-cost on Linux).
+MMTK_RANLIB ?= ranlib
+define MMTK_BUNDLE
+$(ARCMD) r $(1) $(MMTK_OBJS_DIR)/*.o
+$(MMTK_RANLIB) $(1)
+endef
 
 # Strip the absolute build directory out of the staticlib's embedded DWARF.
 # The release profile keeps debug info (gc/mmtk/Cargo.toml: debug = true) for
@@ -64,3 +106,8 @@ mmtk-lib:
 	  $(MMTK_CARGO) build --release --manifest-path $(MMTK_DIR)/Cargo.toml
 
 $(MMTK_LIB): mmtk-lib
+
+# Remove the staged MMTk objects on clean (the runtime archives themselves are
+# removed by the top-level Makefile's runtime clean::).
+clean::
+	rm -rf $(MMTK_OBJS_DIR)

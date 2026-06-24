@@ -1427,51 +1427,65 @@ runtime/prims.$(O): runtime/build_config.h
 
 ## Runtime libraries and programs
 
-# MMTk: the in-tree binding staticlib ($(MMTK_LIB)) is linked into the bytecode
-# runtime. The allocation redirection in the C runtime is guarded by
-# #ifndef NATIVE_CODE, so only bytecode runtime archives reference mmtk_ocaml_*
-# symbols; libasmrun (native) stays clean. See Makefile.mmtk.
-runtime/ocamlrun$(EXE): runtime/prims.$(O) runtime/libcamlrun.$(A) $(MMTK_LIB)
+# MMTk (GH#10): every runtime static archive below references mmtk_ocaml_*
+# (runtime/mmtk.c is in the common runtime sources). After MKLIB builds each
+# archive we bundle in libmmtk_ocaml.a's objects (MMTK_BUNDLE, Makefile.mmtk) so
+# the GC symbols travel inside the archive the compiler always links — no bare
+# "-lmmtk_ocaml" in the published config (the old approach that broke third-party
+# dune-configurator probes). Each archive thus depends on $(MMTK_OBJS_STAMP) (the
+# staged objects). The runtime executables (ocamlrun*) link these archives, so
+# they get the GC symbols from the bundle; MMTK_LINK no longer carries $(MMTK_LIB)
+# (would double-define), only the system deps.
+runtime/ocamlrun$(EXE): runtime/prims.$(O) runtime/libcamlrun.$(A)
 	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlrun.$(A) $(MMTK_LINK) $(BYTECCLIBS)
 
-runtime/ocamlruns$(EXE): runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A) $(MMTK_LIB)
+runtime/ocamlruns$(EXE): runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A)
 	$(V_MKEXE)$(call MKEXE_VIA_CC,$@,runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A) $(MMTK_LINK) $(BYTECCLIBS))
 
-runtime/libcamlrun.$(A): $(libcamlrun_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libcamlrun.$(A): $(libcamlrun_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrun_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrun_non_shared_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/ocamlrund$(EXE): runtime/prims.$(O) runtime/libcamlrund.$(A) $(MMTK_LIB)
+runtime/ocamlrund$(EXE): runtime/prims.$(O) runtime/libcamlrund.$(A)
 	$(V_MKEXE)$(MKEXE) $(MKEXEDEBUGFLAG) -o $@ runtime/prims.$(O) runtime/libcamlrund.$(A) $(MMTK_LINK) $(BYTECCLIBS)
 
-runtime/libcamlrund.$(A): $(libcamlrund_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libcamlrund.$(A): $(libcamlrund_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrund_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/ocamlruni$(EXE): runtime/prims.$(O) runtime/libcamlruni.$(A) $(MMTK_LIB)
+runtime/ocamlruni$(EXE): runtime/prims.$(O) runtime/libcamlruni.$(A)
 	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlruni.$(A) $(INSTRUMENTED_RUNTIME_LIBS) $(MMTK_LINK) $(BYTECCLIBS)
 
-runtime/libcamlruni.$(A): $(libcamlruni_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libcamlruni.$(A): $(libcamlruni_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libcamlruni_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrunpic_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
 runtime/libcamlrun_shared.$(SO): $(libcamlrunpic_OBJECTS)
 	$(V_MKDLL)$(MKDLL) -o $@ $^ $(BYTECCLIBS)
 
-runtime/libasmrun.$(A): $(libasmrun_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libasmrun.$(A): $(libasmrun_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libasmrun_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/libasmrund.$(A): $(libasmrund_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libasmrund.$(A): $(libasmrund_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libasmrund_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/libasmruni.$(A): $(libasmruni_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libasmruni.$(A): $(libasmruni_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libasmruni_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
-runtime/libasmrun_pic.$(A): $(libasmrunpic_OBJECTS)
-	$(V_MKLIB)$(call MKLIB,$@, $^)
+runtime/libasmrun_pic.$(A): $(libasmrunpic_OBJECTS) $(MMTK_OBJS_STAMP)
+	$(V_MKLIB)$(call MKLIB,$@, $(libasmrunpic_OBJECTS))
+	$(call MMTK_BUNDLE,$@)
 
 runtime/libasmrun_shared.$(SO): $(libasmrunpic_OBJECTS)
 	$(V_MKDLL)$(MKDLL) -o $@ $^ $(NATIVECCLIBS)
@@ -1642,22 +1656,18 @@ RUNTIME_DEP_FILES := $(wildcard $(DEPDIR)/runtime/*.$(D))
 include $(RUNTIME_DEP_FILES)
 
 .PHONY: runtime
-runtime: stdlib/libcamlrun.$(A) stdlib/libmmtk_ocaml.$(A)
+runtime: stdlib/libcamlrun.$(A)
 
 .PHONY: makeruntime
 makeruntime: runtime-all
 stdlib/libcamlrun.$(A): runtime-all
 	cd stdlib; $(LN) ../runtime/libcamlrun.$(A) .
 
-# MMTk: mirror the libasmrun/libcamlrun handling so the in-tree binding archive
-# is found relocatably (as -lmmtk_ocaml) at link time. During the build it lives
-# at gc/mmtk/target/release/libmmtk_ocaml.a; symlink it into stdlib/ (which is on
-# the compiler's Load_path, so ocamlc/ocamlopt auto-add -L<stdlib>) so both
-# -custom bytecode and native links resolve it before install. The path here is
-# relative to stdlib/ ($(MMTK_LIB) is $(ROOTDIR)-absolute, so derive a relative
-# link target from runtime's sibling layout).
-stdlib/libmmtk_ocaml.$(A): $(MMTK_LIB)
-	cd stdlib; $(LN) ../gc/mmtk/target/release/libmmtk_ocaml.$(A) .
+# MMTk (GH#10): no stdlib/libmmtk_ocaml.a symlink any more. The Rust staticlib's
+# objects are now bundled directly into the runtime archives (MMTK_BUNDLE), so
+# there is no bare "-lmmtk_ocaml" to resolve and the archive does not need to sit
+# on the compiler's Load_path. $(MMTK_LIB) is still built (the archive rules
+# depend on $(MMTK_OBJS_STAMP), which extracts it).
 clean::
 	rm -f $(addprefix runtime/, *.o *.obj *.a *.lib *.so *.dll)
 	rm -f $(addprefix runtime/, ocamlrun ocamlrund ocamlruni ocamlruns sak)
@@ -1668,7 +1678,6 @@ clean::
 	rm -f runtime/domain_state.inc
 	rm -rf $(DEPDIR)
 	rm -f stdlib/libcamlrun.a stdlib/libcamlrun.lib
-	rm -f stdlib/libmmtk_ocaml.a stdlib/libmmtk_ocaml.lib
 
 .PHONY: runtimeopt
 runtimeopt: stdlib/libasmrun.$(A)
@@ -2864,12 +2873,11 @@ $(foreach runtime, $(runtime_PROGRAMS), \
 common-install::
 	$(call INSTALL_ITEMS, runtime/ld.conf $(runtime_BYTECODE_STATIC_LIBRARIES), \
 	  lib)
-# MMTk: install the in-tree binding archive into $(LIBDIR) (the Standard Library
-# dir, alongside libcamlrun.a/libasmrun.a) so an installed/relocated compiler can
-# link -custom and native programs via -lmmtk_ocaml after the build tree is gone.
-# Use the $(ROOTDIR)-relative path: the opam/clone/list install modes record
-# sources relative to $(ROOTDIR).
-	$(call INSTALL_ITEMS, $(MMTK_LIB_REL), lib)
+# MMTk (GH#10): no longer install the bare libmmtk_ocaml.a — its objects are
+# bundled into the runtime static archives (lib{asm,caml}run*.a, installed above
+# and via the native-install rule), so an installed/relocated compiler resolves
+# mmtk_ocaml_* from those. Shipping the 130MB+ staticlib separately would be dead
+# weight (nothing links -lmmtk_ocaml any more).
 
 $(foreach shared_runtime, $(runtime_BYTECODE_SHARED_LIBRARIES), \
   $(eval $(call INSTALL_RUNTIME_LIB,$(shared_runtime),BYTECODE)))
