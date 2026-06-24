@@ -16,7 +16,7 @@ there**), [`fork-handoff.md`](fork-handoff.md) (original rationale).
 `5.5+mmtk`), distributed as `ocaml-mmtk`. The MMTk binding is in-tree at
 [`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 from crates.io (not vendored).
 MMTk is **always-on and the only collector** — no opt-out; the stock minor *and*
-major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `Immix`).
+major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix`).
 Native code uses TLAB nursery-aliasing onto an MMTk Immix block, so it requires an
 **Immix-family** plan (`Immix`/`StickyImmix`); bytecode runs under any plan. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (default 1024, fixed heap), `MMTK_VERBOSE`;
@@ -196,9 +196,9 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 |------|------|:------:|:---------:|
 | `NoGC` | bump-pointer, no collection | no | ✅ (byte + native; native moot — never reclaims) |
 | `MarkSweep` | free-list mark-sweep | no | ✅ (bytecode) |
-| `Immix` | mark-region w/ opportunistic defrag | yes | ✅ **default** (byte + native) |
+| `Immix` | mark-region w/ opportunistic defrag | yes | ✅ (byte + native) |
 | `StickyImmix` | Immix + sticky mark-bit (gen, in-place nursery) | yes | ✅ (byte + native) |
-| `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ (byte + native) |
+| `GenImmix` | generational, copying nursery + Immix mature | yes | ✅ **default** (byte + native) |
 | `SemiSpace` | classic copying (two spaces) | yes | ✅ (byte + native) |
 | `GenCopy` | generational, copying nursery + SemiSpace mature | yes | ✅ (byte + native) |
 | `MarkCompact` | Lisp-2 mark-compact | yes | ✅ (bytecode; native **infeasible** — VO bit + reserved header word) |
@@ -211,7 +211,8 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root fixup is reused
 from the major path. `MarkSweep` (free-list), `MarkCompact` (per-object VO bit + reserved Lisp-2 header
 word the gapless TLAB can't produce), and `PageProtect` abort at startup on native (bytecode-only).
-`GenImmix` is the stock-faithful generational native default.
+`GenImmix` is the stock-faithful generational plan and the **default** (it replaced Immix as default — OCaml's
+short-lived-allocation profile favours a copying nursery; see `PERFORMANCE.md`).
 
 **`Compressor` (deferred) and `ConcurrentImmix` (landed bytecode, open work #8):**
 

@@ -116,11 +116,16 @@ void caml_mmtk_init(void)
   if (caml_mmtk_initialised) return;
 
   /* Default to a collecting plan now that MMTk is always on (NoGC can't sustain
-     the runtime). Immix is the most-validated plan that supports native TLAB
-     nursery aliasing; StickyImmix (generational) is the likely perf default, to
-     be switched after the benchmarking phase confirms it. */
+     the runtime). The default is **GenImmix**: a copying nursery (CopySpace) over
+     an Immix mature space — the generational, stock-OCaml-faithful plan. OCaml
+     allocates a torrent of short-lived data, so a cheap copying nursery is the
+     right default (the M8 benchmarking confirmed plain Immix loses on
+     allocation-heavy workloads where a nursery collects the young garbage
+     cheaply). Caveat: weak-clear timing under generational plans is a known tail
+     (see ROADMAP/NOTES); MMTK_WEAK_REFS=0 is the conservative never-clear
+     fallback. Override with MMTK_PLAN=<Immix|StickyImmix|ConcurrentImmix|…>. */
   const char *plan = getenv("MMTK_PLAN");
-  if (plan == NULL || plan[0] == '\0') plan = "Immix";
+  if (plan == NULL || plan[0] == '\0') plan = "GenImmix";
 
   size_t heap_mb = 1024;
   const char *heap_env = getenv("MMTK_HEAP_SIZE_MB");

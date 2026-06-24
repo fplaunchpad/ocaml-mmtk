@@ -8,7 +8,8 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - This repo **is** the OCaml 5.5 fork distributed as `mmtk-ocaml`: a normally-built
   OCaml whose garbage collector is **MMTk** (crates.io `mmtk` 0.32). It is *not* a
   separate binding bolted onto stock OCaml — we hack on and ship this tree.
-- MMTk is **always-on** (milestone M9). Default plan is **Immix**. Both the bytecode
+- MMTk is **always-on** (milestone M9). Default plan is **GenImmix** (copying nursery + Immix
+  mature; the generational, stock-OCaml-faithful plan). Both the bytecode
   interpreter and native code allocate through MMTk.
 - **Branches.** Remote: `mmtk` → `fplaunchpad/ocaml-mmtk` (public, the only remote).
   - **`5.5+mmtk`** is the fork's **default branch and sole mainline** — all work lands
@@ -104,8 +105,8 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 ## GC plan & env knobs
 
-- `MMTK_PLAN` = `Immix` (default) | `StickyImmix` | `GenImmix` | `MarkSweep` | `NoGC`.
-  Native code requires an **Immix-family** plan (TLAB nursery-aliasing).
+- `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
+  Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix.
 - `MMTK_HEAP_SIZE_MB` (fixed heap), `MMTK_THREADS` (GC worker count),
   `MMTK_VERBOSE=1` (prints GC stats at exit). MMTk is the only collector — no
   opt-out; benchmark against stock via a separate vanilla OCaml 5.5 opam switch.
@@ -152,4 +153,4 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 4. Record new design rationale and any new repro (with its `rr` trace path) in
    `gc/mmtk/NOTES.md`.
 5. **Verify before claiming done**: build + (for GC changes) `sanity` at a small
-   heap + a regression run on the default plan (Immix).
+   heap + a regression run on the default plan (GenImmix).

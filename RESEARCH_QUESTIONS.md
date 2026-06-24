@@ -443,6 +443,21 @@ PLDI (if the low-latency result lands). **Risk:** high (a new plan, likely mmtk-
 — re-implementing the host's own GC in a general framework, then measuring design-vs-implementation, is a
 question the practitioner reports gestured at but no one has built.
 
+**Now backed by data (2026-06-24); the default is now GenImmix.** The post-fft-fix native baseline makes the
+construction concrete and well-motivated. **GenImmix** (copying nursery) is now the **default plan** because
+OCaml's short-lived-allocation torrent is exactly where a cheap nursery pays — native GenImmix-class reaches
+parity-or-better with vanilla on 5/6 CLBG benches and wins ~1.5× on parallel alloc-heavy (binarytrees). The
+**one** structural loss — **spectralnorm ≈1.74×** — is real Immix **mature-space sweep/metadata** cost
+(`bzero_metadata`/`SweepChunk`/`side_metadata_access`), precisely the cost a **(near-)non-moving, incremental
+mature** would change; and the dominant *serial* overhead elsewhere is the **STW mark/root-scan**, precisely
+what **ConcurrentImmix**'s concurrent marking moves off the pause. The two landed halves' measured strengths
+are thus complementary: the hybrid — call it **`GenConcurrentImmix`** (copying nursery + concurrently-marked,
+STW-evacuated Immix mature, SATB barrier) — is the artifact that would capture the nursery's throughput *and*
+the concurrent marker's latency, the faithful MMTk realization of OCaml 5's generational + mostly-concurrent
+major. The **no-read-barrier / C-API constraint (RQ6) bounds it to concurrent *marking* + STW *evacuation*** —
+which is also exactly what vanilla does (its major is non-moving), so the constraint is not a compromise here
+but the faithful choice.
+
 ---
 
 ## What each question needs from the platform

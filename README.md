@@ -12,7 +12,7 @@ multicore, effect-handler language on which MMTk's many collectors can be compar
 on a common substrate. The research agenda lives in
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md).
 
-- **Base:** OCaml `5.5.0` (final). **Collector:** MMTk, always on, default plan **Immix**.
+- **Base:** OCaml `5.5.0` (final). **Collector:** MMTk, always on, default plan **GenImmix** (copying nursery + Immix mature — the generational, stock-OCaml-faithful plan).
 - **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
   [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
 - Collection is multi-domain, parallel, and stop-the-world; moving plans relocate
@@ -84,14 +84,15 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 `MMTK_PLAN` selects the collector at startup. **Ten** of mmtk-core 0.32's eleven plans are
 wired in **bytecode**; **native** runs the **seven** whose Default allocator is a bump/Immix
 region the inlined TLAB can alias — `Immix`/`StickyImmix` (in-place), `GenImmix`/`GenCopy`
-(copy-nursery), `SemiSpace`/`NoGC`, and `ConcurrentImmix`. `GenImmix` is the stock-faithful generational native
-default.
+(copy-nursery), `SemiSpace`/`NoGC`, and `ConcurrentImmix`. `GenImmix` (copying nursery over an Immix mature) is
+the **default** plan — generational, stock-OCaml-faithful, and the right fit for OCaml's short-lived-allocation
+profile (a cheap copying nursery; see [`PERFORMANCE.md`](PERFORMANCE.md)).
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
-| `Immix` *(default)* | mark-region, moving (defragments) | bytecode + native |
+| `Immix` | mark-region, moving (defragments) | bytecode + native |
 | `StickyImmix` | generational, in-place nursery | bytecode + native |
-| `GenImmix` | generational, copying nursery | bytecode + native |
+| `GenImmix` *(default)* | generational, copying nursery + Immix mature | bytecode + native |
 | `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode + native |
 | `SemiSpace` | classic two-space copying | bytecode + native |
 | `NoGC` | bump-only; never reclaims (short programs only) | bytecode + native |
