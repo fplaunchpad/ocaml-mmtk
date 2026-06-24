@@ -81,6 +81,13 @@ lazy_static! {
 }
 static STW_COND: Condvar = Condvar::new();
 
+/// Bounded re-validation interval for parked domains. A parked domain wakes at
+/// least this often to re-check `gc_active` against MMTk's real GC state and
+/// self-heal an orphaned STW flag (bug #3c). A normal collection's
+/// resume_mutators wakes parkers immediately, so this only bounds the worst-case
+/// latency of detecting the (rare) orphaned-flag condition.
+const PARK_REVALIDATE: Duration = Duration::from_millis(50);
+
 /// GC-pause accounting: number of collections and total stop-the-world wall time
 /// (the span from stop_all_mutators to resume_mutators). Lets the runtime report
 /// GC time separately from mutator/allocation time — e.g. to see whether parallel
@@ -154,7 +161,35 @@ fn park_until_resumed(addr: usize) {
     s.running.remove(&addr);
     STW_COND.notify_all();
     while s.gc_active {
-        s = STW_COND.wait(s).unwrap();
+        // Bounded wait so we periodically re-validate `gc_active` against MMTk's real
+        // GC-in-progress state. The STW lock is HELD across remove-running + the whole
+        // wait (load-bearing: splitting it re-introduces the burn deadlock — a lost
+        // wakeup between dropping the lock and waiting). On a normal collection
+        // resume_mutators flips gc_active false and wakes us before the timeout.
+        let (g, _) = STW_COND.wait_timeout(s, PARK_REVALIDATE).unwrap();
+        s = g;
+        // Defensive self-heal for an ORPHANED gc_active: if our flag still says a
+        // collection is active but MMTk reports no GC in progress, the stop/resume
+        // pairing was broken (a stop_all_mutators with no matching resume_mutators);
+        // clear the flag and wake co-parked domains rather than wait forever.
+        // gc_in_progress_relaxed() is the LOCK-FREE mirror of MMTk gc_status (an atomic
+        // in our mmtk-core fork): we MUST NOT call gc_in_progress() here, as it takes
+        // the gc_status mutex which the collector locks BEFORE STW, inverting the lock
+        // order under our held STW lock.
+        //
+        // NOTE (verified on church, 2026-06-24): this self-heal does NOT cure the
+        // dominant bug #3c hang. In the reproduced hangs MMTk is *genuinely* mid-
+        // collection: a GC worker is blocked in stop_all_mutators at the
+        // running.is_empty() barrier, gc_status == GcPrepare, so gc_in_progress_relaxed()
+        // correctly returns true and the heal never fires. The real #3c is a cross-STW
+        // deadlock (a domain leading OCaml's minor-heap STW while still in MMTk's RUNNING
+        // set, with the other domains poisoned/parked for MMTk's STW). See gc/mmtk/NOTES.md.
+        if s.gc_active && !crate::mmtk().gc_in_progress_relaxed() {
+            s.gc_active = false;
+            GC_ACTIVE.store(false, Ordering::SeqCst);
+            STW_COND.notify_all();
+            break;
+        }
     }
 }
 
@@ -182,7 +217,16 @@ pub extern "C" fn mmtk_ocaml_stw_park(addr: usize) {
 pub extern "C" fn mmtk_ocaml_wait_collection_done() {
     let mut s = STW.lock().unwrap();
     while s.gc_active {
-        s = STW_COND.wait(s).unwrap();
+        // Same bounded-wait + orphaned-flag self-heal as park_until_resumed (bug #3c):
+        // an orphaned gc_active must not wedge a terminating domain here forever.
+        let (g, _) = STW_COND.wait_timeout(s, PARK_REVALIDATE).unwrap();
+        s = g;
+        if s.gc_active && !crate::mmtk().gc_in_progress_relaxed() {
+            s.gc_active = false;
+            GC_ACTIVE.store(false, Ordering::SeqCst);
+            STW_COND.notify_all();
+            break;
+        }
     }
 }
 

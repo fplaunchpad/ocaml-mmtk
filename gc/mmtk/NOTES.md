@@ -5,6 +5,74 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #3c attempted fix (parker self-heal) — does NOT cure it; real cause is a cross-STW barrier deadlock
+
+*2026-06-24 — host: church*
+
+Implemented + verified the prescribed fix for bug #3c (lock-free `gc_in_progress_relaxed()` mirror in the
+mmtk-core fork + a bounded re-validating self-heal in `park_until_resumed` / `mmtk_ocaml_wait_collection_done`).
+Branch `fix/bug3c-parker` (superproject) + `fix/bug3c-gc-in-progress-relaxed` (mmtk-core submodule). **The fix
+is sound infrastructure but does NOT fix the hang** — measured before/after on the same repro:
+
+- **Baseline** (mainline `0e962bc7a`, Immix/512MB/`MMTK_THREADS=8`, 40 runs): **23/40 hangs (57.5%)**.
+- **With the fix** (60 runs, same params): **34/60 hangs (57%)** — statistically unchanged. Self-heal neutral.
+
+**Why the prescribed fix can't work — the dominant hang is NOT the "idle orphan" the rr trace described.**
+Instrumented the parker (`eprintln!` of `gc_active`, `gc_in_progress_relaxed()`, `running.len()`) and dumped
+all thread stacks at the hang (gdb, run-under-gdb to dodge yama ptrace_scope). At every reproduced hang:
+
+- The parker wakes every 50 ms and observes `gc_active=true relaxed=true` — i.e. **MMTk's `gc_status` is
+  genuinely non-`NotInGC` (GcPrepare)**, so `gc_in_progress_relaxed()` correctly returns `true` and the
+  self-heal predicate (`gc_active && !gc_in_progress_relaxed()`) is never satisfied. MMTk is **not idle**.
+- A GC worker is **actively blocked inside `stop_all_mutators` at the `running.is_empty()` barrier**
+  (collection.rs, the 1 ms re-poison loop), with `running == 1`. The collection is in progress and wedged,
+  not finished-but-orphaned.
+
+**The real root cause is a cross-STW (two-collector) rendezvous deadlock between OCaml's minor-heap STW and
+MMTk's STW.** At the hang (representative stacks):
+
+- **GC worker** — `stop_all_mutators` waiting for the last RUNNING domain to reach a safepoint and park.
+- **A domain still in MMTk's RUNNING set** — inside `caml_domain_terminate` → `caml_empty_minor_heaps_once`
+  → `caml_try_run_on_all_domains_with_spin_work` → spinning on **`all_domains_lock`**: it is leading/driving
+  **OCaml's own minor-heap STW** (`caml_stw_empty_minor_heap`) and waiting for every other domain to
+  rendezvous at the minor-GC barrier.
+- **The other domains** — poisoned by MMTk's `caml_mmtk_interrupt` and parked in `park_until_resumed`
+  (waiting for `gc_active==false`), so they will NOT answer OCaml's minor STW.
+
+Cycle: the minor-STW leader can't finish (its participants are parked for MMTk) → it never parks for MMTk →
+MMTk's barrier never drains `running` → `gc_active` stays true → the parked participants never wake. Each STW
+mechanism has captured domains the other is waiting on. (`caml_empty_minor_heaps_once` runs at
+`domain.c:2129`, *before* `caml_mmtk_domain_terminate`/deregister at `domain.c:2206`, so the terminating
+domain is still RUNNING in MMTk's view during the minor empty.)
+
+**Prevalence (not "rare").** Even a light 2-domain × 1500-round spawn/join loop fails ~2/10 at the default
+`MMTK_THREADS=1` and more often at 8 — either the same deadlock or a **separate** GC-correctness crash
+(`active_plan.rs:59` "MMTk cannot trace object … does not belong to any MMTk space", a dangling-root trace
+during terminate). Concurrent `Domain.spawn` + GC is fundamentally unstable, not a corner case.
+
+**Reconciliation with the earlier rr entry (below).** The rr trace captured `goal=None`/all-workers-parked
+(an *idle* end-state). The live repros here capture the *active* barrier-stuck state. Likely two snapshots of
+the same cross-STW deadlock at different stages (or two related modes); either way the orphaned-flag self-heal
+addresses only the idle end-state, which is not what the bytecode repro hits.
+
+**Verified safe (the change doesn't regress correctness):** `sanity` feature on GenImmix at 64–256 MB across
+single-domain allocation + compiler workloads — **0 "Invalid reference"** over 11–15 sanity-checked moving
+GCs (4.5M objects copied). The light spawn loop, on the runs that complete, prints a stable
+`checksum=93585672000`.
+
+**Correct fix direction (the actual research question — NOT the shadow-flag self-heal):** MMTk's STW and
+OCaml's minor-heap STW must not be able to capture each other's domains. A domain that is leading or
+participating in OCaml's minor STW must be STOPPED in MMTk's view for that window (so `stop_all_mutators`
+does not await it), OR MMTk's collection must defer/yield while an OCaml minor STW is in flight. This mirrors
+the FAQ-Q3 "per-continuation lock" intuition: serialise the two STWs rather than let them interleave. The
+shadow-flag self-heal lands as defensive infrastructure only.
+
+**Artifacts:** before/after numbers + stacks in `church:~/bug3c-fix.md`; debug build steps + the host-specific
+GH#10 link workaround (rustc 1.92 staticlib is not self-contained → link with `--whole-archive` + libstd; see
+that file) are recorded there too.
+
+---
+
 ## finaliser_handover UAF — FIXED (root orphaned finalisers every GC); + a separate adoption-routing residual
 
 *2026-06-24*
