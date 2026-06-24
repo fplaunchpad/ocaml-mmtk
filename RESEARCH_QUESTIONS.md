@@ -2,7 +2,7 @@
 
 `ocaml-mmtk` is OCaml 5.5 with **MMTk as its only garbage collector** — multicore, native + bytecode,
 moving + generational, with the whole collector swappable at startup. The engineering bring-up (the
-ROADMAP's M0–M7, and ~90% of M9) is essentially done. This document is about the *other* axis: what
+ROADMAP's M0–M9 — bar the open M8 perf milestone) is essentially done. This document is about the *other* axis: what
 **research** this platform enables. The ROADMAP correctness/perf tail is deferrable engineering; the
 questions below are the reason to keep going.
 
@@ -179,8 +179,8 @@ mutation rate / lifetime dispersion** (Dolan's Gini measure), not with allocatio
 find the cost is dominated by something mutation-independent (allocation rate, tracing volume, root
 scanning), the immutability story is *wrong* and RQ1 fails honestly.
 
-**How to test.** Wire ConcurrentImmix + an SATB write barrier (ROADMAP #15's one high-value unwired
-plan) and/or port LXR's RC barrier into the binding — OCaml's `caml_modify`/`caml_initialize` already
+**How to test.** ConcurrentImmix + an SATB write barrier is **LANDED** (bytecode + native; ROADMAP #15);
+the remaining lever is porting an LXR/RC plan + its RC barrier into the binding — OCaml's `caml_modify`/`caml_initialize` already
 carry MMTk barrier hooks (ROADMAP Phase 2 #3; the native barrier is live). Measure pause-time +
 throughput vs OCaml's own STW GC (a vanilla 5.5 opam switch) on Sandmark + the compiler, and **regress
 the residual throughput gap against measured mutation rate and lifetime dispersion** across modules /
@@ -255,7 +255,8 @@ class cheaper — because there was no immutable-by-default language in a multi-
 it on. Dolan'25 gives the covariate to make the test quantitative. That is the new contribution: a
 *language-property → GC-design-outcome* law, not another collector.
 
-**Venue:** PLDI / ISMM. **Risk:** high (needs a concurrent/RC plan + barrier + latency harness), high
+**Venue:** PLDI / ISMM. **Risk:** medium now (the concurrent plan + SATB barrier are landed; residual = an
+LXR/RC plan + a cross-mutation-spectrum latency harness), high
 upside. **Novelty: strong** — the *prediction-tested-across-the-mutation-spectrum* framing is new;
 "RC works on OCaml" alone would not be. Serves the charter's reliability/trustworthiness via predictable
 latency.
@@ -515,8 +516,11 @@ a concurrent marker can observe an object in the header-written / fields-unwritt
 unwritten fields read as safe immediates, **without** it as garbage pointers. So no-zero must be **gated OFF for
 ConcurrentImmix**, and the **GenConcurrentImmix hybrid (RQ7) inherits this as a design problem** — combining
 no-zero throughput with concurrent-mark latency needs an **init-publishing (zero-on-publish / SATB-style)
-allocation barrier**. Net: RQ8 is a clean win on the **default (GenImmix, STW) today**; the concurrent
-combination is a sharper sub-question that couples RQ8 ↔ RQ1 ↔ RQ7. Design: `~/rq8-nozero-design.md` on turing.
+allocation barrier**. Net: RQ8 is a clean win on the **default (GenImmix, STW) today**; for ConcurrentImmix
+no-zero is **conservatively gated OFF today**, but the allocate-black argument (markers don't *trace*
+newly-allocated black objects' fields) suggests it is **likely safe there too** — re-examination in progress
+(RQ9). The concurrent combination is a sharper sub-question that couples RQ8 ↔ RQ1 ↔ RQ7. Design:
+`~/rq8-nozero-design.md` on turing.
 
 **CONFIRMED (2026-06-24).** Implemented on the `0.32-ocaml` fork + measured. **SAFE on STW plans** (sanity 0
 invalid-ref incl. the load-bearing closure self-compile; CLBG byte-identical ON vs OFF 15/15; GC count/time/
@@ -528,18 +532,42 @@ runtime plan-gate (no-zero auto-off for ConcurrentImmix). Writeup: `~/rq8-nozero
 
 ---
 
+### RQ9 — When is no-zero allocation safe under a concurrent marker? The allocate-black / init-before-publish boundary *(couples RQ8 ↔ RQ1 ↔ RQ7)*
+
+No-zero allocation (RQ8) is proven SAFE for STW plans by vanilla's own unzeroed-minor-heap invariant, but it
+has a sharp boundary: a concurrent marker can observe an object in the header-written / fields-unwritten window
+— with zeroing the unwritten fields read as safe immediates, without it as garbage pointers. The question is
+which of three safety arguments carries the proof, and whether they compose to make no-zero safe even under
+ConcurrentImmix: (i) **init-before-publish** (the mutator never publishes a reference to a half-initialized
+object — covers the case where the marker reaches it via a heap edge); (ii) the **safepoint/STW property** (no
+GC-observable point between alloc and field-fill — the unconditional STW argument); (iii) **allocate-black
+non-scanning** (a SATB marker allocates newly-acquired lines black and never *traces* the new object's fields,
+so it never reads the garbage — a new object's children are already live). If (iii) holds in mmtk-core 0.32
+(verification in progress; FinalMark already uses `new_no_scan_roots` and `caml_initialize` takes no SATB), then
+no-zero is safe on ConcurrentImmix too and the conservative gate can be dropped; otherwise an init-publishing
+(zero-on-publish / SATB-style) allocation barrier is needed — exactly the design problem the GenConcurrentImmix
+hybrid (RQ7) inherits. Novelty: the precise statement of *which* invariant carries the safety, and that it
+differs STW-vs-concurrent, is an instructive framework-vs-host-discipline finding. Venue: MPLR/ISMM. Risk: medium.
+
+---
+
 ## What each question needs from the platform
 
-- **Common prerequisite:** finish M9 (ROADMAP #8 — retire the always-false `Is_young` reservation +
-  header/metadata reconciliation) so plan-swapping is clean. Then **#15 wires the non-Immix plans
-  cheaply** — the "do it immediately after vanilla removal" step. Per the ROADMAP's own triage,
-  `SemiSpace`/`PageProtect` are cheap, `MarkCompact`/`Compressor` medium, `GenCopy` ≈ GenImmix, and
-  **`ConcurrentImmix` (a SATB write barrier) is the one high-effort, high-value plan** — and it is RQ1's
-  enabler.
-- **RQ1:** + ConcurrentImmix and/or an LXR-style RC plan + the SATB/RC write barrier + a latency harness +
-  a mutation-rate / lifetime-dispersion instrument. *(This is the real research engineering.)*
+- **Common prerequisite (DONE):** M9 is complete; **#15 wired 10 plans (bytecode)**; **native runs 7**;
+  **ConcurrentImmix + SATB (RQ1's enabler) landed bytecode + native**; plan-swapping is clean. What remains
+  is per-RQ research, not bring-up.
+- **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier. *Remaining:* an LXR/RC plan, a richer latency
+  harness, and a mutation-rate / lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
-  RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler.
+  RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add
+  the *extreme-allocation copy pathology* probe — covary alloc-rate ÷ heap-size against survival (GenImmix
+  copies dead-on-arrival cells under a fixed heap at very high allocation volume; GitHub issue).
+- **RQ7 (GenConcurrentImmix hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
+  a copying-nursery + concurrently-marked + STW-evacuated Immix-mature plan with a SATB barrier — mmtk-core
+  fork work (a (near-)non-moving, incremental mature). Both halves are landed natively.
+- **RQ8 (no-zero allocation):** CONFIRMED (~15–22% on alloc-bound code, SAFE on STW plans, on the `0.32-ocaml`
+  mmtk-core fork). *Remaining:* the runtime plan-gate (auto-off for ConcurrentImmix) to land default-on, and
+  the RQ9 concurrent-safety argument.
 - **RQ4:** essentially the write-up; nothing new to build.
 - **RQ5(b):** an extracted, abstractable model of the safepoint / blocking-section protocol (the bug-#3
   site) in a proof assistant — not platform engineering, but it depends on pinning the protocol down
@@ -552,9 +580,11 @@ runtime plan-gate (no-zero auto-off for ConcurrentImmix). Writeup: `~/rq8-nozero
    with Julia/CRuby. Lowest risk, near-term, opens the ISMM door. No new engineering.
 2. **RQ2 (characterization)** — finish #8, wire #15, build the benchmark + profiling harness, run the
    comparison. Produces the data that motivates RQ1 and is a paper in its own right.
-3. **RQ1 (flagship)** — the immutability ⇒ read-barrier-free-low-latency hypothesis, tested across the
-   mutation spectrum. The high-upside PLDI/ISMM claim; start the RC / ConcurrentImmix engineering once
-   RQ2 has framed the question.
+3. **RQ1 (flagship) — already in flight.** ConcurrentImmix + SATB is landed and has produced **first strong
+   native evidence** (the SATB barrier measured ~free; concurrent marking cuts max STW 3–4×). The immutability
+   ⇒ read-barrier-free-low-latency hypothesis is now testable across the mutation spectrum; the residual is an
+   LXR/RC plan + the latency harness. **RQ7 (GenConcurrentImmix) and RQ8 (no-zero) are active workstreams**
+   feeding it.
 4. **RQ3 / RQ5** — opportunistic, as the platform and interest allow; RQ5(b) is the standout long-game
    (real, confirmed gap; on-charter).
 
