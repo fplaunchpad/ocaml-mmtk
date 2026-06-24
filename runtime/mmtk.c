@@ -142,14 +142,20 @@ void caml_mmtk_init(void)
                            || strcmp(plan, "GenCopy") == 0);
   caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0);
 
-  /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill for stop-the-world plans
-     and keep it ON for the concurrent plan. OCaml fully initializes every block
-     before the next GC-observable safepoint, so eager zeroing is a redundant
-     double-write (~20% of cycles on alloc-heavy code) for a STW collector. A
-     CONCURRENT marker can observe the header-written / fields-unwritten window, so
-     zeroing must stay on there. Set before any allocation (this runs at init,
-     before any domain/mutator is bound). zeroed == caml_mmtk_concurrent. */
-  mmtk_ocaml_set_alloc_zeroed(caml_mmtk_concurrent);
+  /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
+     plan including ConcurrentImmix. OCaml fully initializes every block before the
+     next GC-observable safepoint, so MMTk eager-zeroing is a redundant double-write
+     (~20% of cycles on alloc-heavy code). This is safe for both collector families:
+       - STW Immix-family plans (GenImmix/Immix/StickyImmix/GenCopy): a collection
+         only happens at a safepoint, by which time OCaml has already written every
+         field (the unzeroed-minor-heap discipline), so the GC never reads garbage.
+       - ConcurrentImmix: it is ALLOCATE-BLACK — newly-allocated objects are born
+         marked, and the concurrent marker does NOT field-scan freshly-allocated
+         (black) objects, so the header-written / fields-unwritten window is never
+         traced. Hence no-zero is safe here too.
+     Set before any allocation (this runs at init, before any domain/mutator is
+     bound). Pass 0: zeroing off for ALL plans. */
+  mmtk_ocaml_set_alloc_zeroed(0);
 
   {
     /* On by default; MMTK_WEAK_REFS=0 opts out to the conservative scheme. */
