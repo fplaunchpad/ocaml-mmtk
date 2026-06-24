@@ -61,9 +61,19 @@ Merged to `5.5+mmtk` (2026-06-24) as part of the doc consolidation.
 
 ---
 
-## RQ8 no-zero allocation: SAFE for STW plans, ~15–22% mutator recovery, GC unchanged — ready to land (needs a runtime plan-gate)
+## RQ8 no-zero allocation: SAFE, ~15–22% mutator recovery, GC unchanged — LANDED on mainline (`338cce723`), no-zero universal incl. ConcurrentImmix
 
 *2026-06-24*
+
+**LANDED (2026-06-24, mainline tip `338cce723`).** No-zero is now ON for **all** plans — **including
+ConcurrentImmix** — via a *runtime* plan-gate: an `alloc_zeroed` flag forwarded to the two zeroing sites, set
+0 by `runtime/mmtk.c:158` (`mmtk_ocaml_set_alloc_zeroed(0)`), so one binary is correct across every
+`MMTK_PLAN`. The `gc/mmtk-core` fork (`0.32-ocaml`) is now the **mainline** mmtk dependency (submodule), not a
+side branch. ConcurrentImmix was **verified allocate-black** — the concurrent marker eager-marks acquired
+lines and never field-scans a newly-allocated object, so it never reads the half-initialized window (RQ9) —
+so no-zero is safe and **enabled** there too; the gate is therefore *no-zero-universal*, superseding the
+earlier "gate OFF for ConcurrentImmix" plan below. The rest of this entry records the original
+measurement/correctness work that justified landing.
 
 Implemented + measured the no-zero allocation mode (mmtk-core fork `0.32-ocaml` `no_zero_alloc` feature gating
 the two alloc-time zeroing sites; binding forwards it; branch `rq8-nozero`). Build-glue: `Makefile.mmtk` gained
@@ -75,20 +85,20 @@ an on-demand `git submodule update --init gc/mmtk-core` (commit `812ee0eb6`, rq8
 **Correctness — SAFE (STW plans only):** sanity (full-heap re-trace) + no_zero @48 MB on
 binarytrees / alloc-churn / closure-stress × GenImmix/Immix/StickyImmix → **0 Invalid-ref, 9/9**; the
 load-bearing **closure self-compile** (`ocamlc parser.ml`) under sanity+no_zero → 0 Invalid-ref; CLBG
-byte-identical ON vs OFF vs golden **15/15**; quick-panel self-check 18/18. ConcurrentImmix never enabled
-(unsafe by design). GC count/time/objects-copied identical OFF vs ON — **the win is pure mutator time.**
+byte-identical ON vs OFF vs golden **15/15**; quick-panel self-check 18/18. (ConcurrentImmix was not exercised
+in *this* STW-focused round; it was later verified allocate-black and enabled too — see the LANDED note above /
+RQ9.) GC count/time/objects-copied identical OFF vs ON — **the win is pure mutator time.**
 
 **Recovery (the quick panel was the decision vehicle):** spectralnorm **+21.9%** (CLBG; memset hotspot
 ~19%→~1% of cycles); panel ON-vs-OFF per plan — alloc +2.4–6.1%, mutate +2.8–10.2%, binarytrees +2.1–4.9%,
 **nbody +0.0%** (compute control neutral — red-flag check passes); parallel scaling preserved (par_* ON-faster
 at every domain count). RQ8's hypothesis (eager-zero redundant for OCaml; ~15–20% on alloc-bound) **confirmed.**
 
-**Landing — one design point.** `no_zero` is a *compile-time* cargo feature, so a default-on build would also
-no-zero **ConcurrentImmix** (unsafe — RQ8's RED FLAG). Landing it default-on therefore needs a **runtime
-plan-gate**: skip alloc-zeroing only for STW Immix-family plans, retain it for ConcurrentImmix, so one binary
-is correct across all plans (the platform switches plans via `MMTK_PLAN`). That's the productionization step
-(a runtime "zero-on-alloc" flag set from the plan, threaded to the two sites) — to implement on the fork
-alongside GH#5.
+**Landing — done (see the LANDED note at the top).** The original plan here assumed a compile-time `no_zero`
+cargo feature would have to be **gated OFF for ConcurrentImmix** (the then-RED-FLAG) and proposed a runtime
+plan-gate that retained zeroing for ConcurrentImmix. What actually landed is a runtime `alloc_zeroed` flag
+(threaded to the two sites) that is **no-zero-universal**: ConcurrentImmix was verified allocate-black (RQ9), so
+zeroing is dropped for it as well. One binary, correct across all plans switched via `MMTK_PLAN`.
 
 **Independent finding (follow-up, NOT no-zero):** the panel's large alloc sizes (40–64 M) are pathologically
 slow under MMTk — `alloc 40000000` = 2m43s; GenImmix copies ~13–19 M cells once the fixed heap fills

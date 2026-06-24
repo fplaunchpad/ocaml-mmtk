@@ -295,8 +295,10 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 > every recyclable line before the mutator fills it → every word written twice → **~20% of cycles**,
 > plan-independent, **not heap-fixable**: bigger heap ⇒ fewer GCs but *worse* ratio). Generational (the new
 > GenImmix default) recovers only ~8% (whole-heap line-sweep removal). **The lever → RQ8: a no-zero allocation
-> mode** — vanilla OCaml already runs on an *unzeroed* minor heap, so the zeroing is redundant for OCaml;
-> removing it should recover ~15–20% on allocation-bound code with zero pause impact. **Not a flambda
+> mode** — vanilla OCaml already runs on an *unzeroed* minor heap, so the zeroing is redundant for OCaml.
+> **CONFIRMED + LANDED on mainline** (runtime plan-gate; no-zero universal incl. ConcurrentImmix): it recovers
+> ~15–22% on allocation-bound code (spectralnorm +21.9%) with zero pause impact (→ RESEARCH_QUESTIONS RQ8/RQ9).
+> **Not a flambda
 > confound:** spectralnorm's 5.76 GB is boxed floats (`eval_A` not inlined) — but that is just normal
 > non-flambda codegen, which is the real-world config we compare (vanilla 5.5.0 is non-flambda; upstream
 > flambda1 is mostly useless and flambda2 hasn't landed). The comparison is non-flambda-vs-non-flambda;

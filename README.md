@@ -106,8 +106,10 @@ profile (a cheap copying nursery; see [`PERFORMANCE.md`](PERFORMANCE.md)).
 `ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
 write barrier is wired in bytecode **and native**, `lazy` is proven clean, and the
 continuation-scan-vs-resume hazard is fixed (per-continuation lock + resume SATB-snapshot — see
-[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3). The remaining items are perf-only (an UNLOG-bit barrier gate;
-a sanity-build-only small-heap deadlock).
+[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3). The remaining items are perf-only (a de-prioritized UNLOG-bit barrier
+gate — the SATB barrier measured ~free, <0.1% self; a sanity-build-only small-heap deadlock). Because the
+concurrent marker is **allocate-black** (never field-scans new objects), no-zero allocation (RQ8) is safe and
+**enabled** under `ConcurrentImmix` too.
 The one **unwired** plan is **`Compressor`**, which needs a unified object-reference model
 incompatible with OCaml's value/header layout (see [`ROADMAP.md`](ROADMAP.md)).
 `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only — their allocators can't back the

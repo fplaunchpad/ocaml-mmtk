@@ -159,10 +159,11 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    (commit `55ab6ce40b`: per-continuation lock `cont_lock.rs` + resume SATB-snapshot — deterministic crash
    gone, STW flat in fiber count). **Native: VALIDATED** — the expected native gaps were already closed
    (native reaches `caml_modify` via the out-of-line extcall; mmtk-core eager-marks acquired lines so
-   allocate-black is automatic), plus a real atomics-SATB-ordering bug found + fixed (`d0c721a8b7`);
-   sanity-clean, macOS bytecode build verified. **Open (perf, not correctness):** an UNLOG-bit barrier gate
-   + the sanity-build-only ~10 MB deadlock (`rr`). → RESEARCH_QUESTIONS RQ1;
-   NOTES (2026-06-23).
+   allocate-black is automatic — which also makes **no-zero (RQ8) safe on ConcurrentImmix**, now enabled),
+   plus a real atomics-SATB-ordering bug found + fixed (`d0c721a8b7`); sanity-clean, macOS bytecode build
+   verified. **Open (perf, not correctness):** the UNLOG-bit barrier gate is **de-prioritized** — native
+   characterization showed the SATB barrier is ~free (<0.1% self), so the gate is empirically a non-issue;
+   the sanity-build-only ~10 MB deadlock (`rr`) remains. → RESEARCH_QUESTIONS RQ1; NOTES (2026-06-23).
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
@@ -175,15 +176,21 @@ The active research/measurement threads behind the M8 milestone — the index; d
     The headline throughput/RSS campaign runs here. (See `PERFORMANCE.md` §1/§3.)
   - **Quick GC-decision bench panel** (on the `benchmarks` orphan branch, `quick/`; ~5 min/variant; sequential
     + parallel) — the **fast inner-loop complement** to the macro suite and the **no-zero (RQ8) A/B vehicle**.
-- **RQ8 — no-zero allocation (CONFIRMED, ~15–22% on alloc-bound code).** MMTk's eager zero-fill is redundant
-  for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22% (spectralnorm +21.9%) with GC
-  count/time/copies unchanged — a pure mutator win, SAFE on STW plans. Implemented on the **`0.32-ocaml`
-  mmtk-core fork** (a `no_zero_alloc` feature); **NOT yet on mainline** — landing default-on needs a runtime
-  plan-gate (auto-off for ConcurrentImmix). → RESEARCH_QUESTIONS RQ8; FAQ Q10.
-- **GH#5 — generational-minor weak/ephemeron clear-too-early.** Flipping the default to GenImmix surfaced a
-  real regression: a still-reachable weak/ephemeron is wrongly cleared on a nursery GC (a freshly-promoted
-  referent has no current mark bit). **OPEN; fix in progress on the fork.** Full GCs unaffected; Immix
-  byte-identical. → FAQ Q11; GitHub #5.
+- **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
+  zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
+  (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime
+  plan-gate** (an `alloc_zeroed` flag set 0 by `runtime/mmtk.c`): no-zero is **universal** — ON for **all**
+  plans, **including ConcurrentImmix** (verified allocate-black → safe, RQ9). The `gc/mmtk-core` fork
+  (`0.32-ocaml`) is now the **mainline** mmtk dependency (submodule). → RESEARCH_QUESTIONS RQ8/RQ9; FAQ Q10.
+- **GH#5 — generational-minor weak/ephemeron liveness (a GC-scheduling + `Gc.major_collections`-accounting
+  bug, NOT clear-too-early).** Flipping the default to GenImmix surfaced `weaklifetime.ml`. Direct
+  instrumentation **disproved** the hypothesized clear-too-early (freshly-promoted referent); the real failure
+  is **clear-too-LATE**: at the test heap the generational plans run **no full GC**, so mature-*dead* weaks are
+  never cleared, and **`Gc.major_collections` counts nursery GCs**, so the test's major-count window is
+  unsatisfiable (same binary passes at a 16 MB heap). The generational-aware liveness shim is
+  **correct-but-doesn't-close-the-test** (kept as a sound defensive change). Real fix: schedule a **full GC
+  under mature pressure** + fix the **major-collection count**. **OPEN** (liveness, not a crash). Full GCs
+  unaffected; Immix byte-identical. → FAQ Q11; NOTES 2026-06-24; GitHub #5.
 - **RQ7 — `GenConcurrentImmix` hybrid (flagship research direction).** The faithful MMTk realization of
   OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
   (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
@@ -264,8 +271,10 @@ short-lived-allocation profile favours a copying nursery; see `PERFORMANCE.md`).
   off it. **`lazy` is clean**, and **Q3 (continuation scan vs resume) is fixed** (per-continuation lock +
   resume SATB-snapshot, commit `55ab6ce40b`; FAQ Q2/Q3). **Native validated** — the expected gaps were
   already closed (native uses the out-of-line `caml_modify` extcall; mmtk-core auto-allocate-blacks acquired
-  lines), plus an atomics-SATB-ordering bug found + fixed (`d0c721a8b7`). **Open (perf):** an UNLOG-bit gate +
-  the sanity-build ~10 MB deadlock (`rr`).
+  lines — which also makes **no-zero (RQ8) safe + enabled on ConcurrentImmix**), plus an atomics-SATB-ordering
+  bug found + fixed (`d0c721a8b7`). **Open (perf):** the UNLOG-bit gate is **de-prioritized** (native
+  characterization: the SATB barrier is ~free, <0.1% self — empirically a non-issue); the sanity-build ~10 MB
+  deadlock (`rr`) remains.
   → open work #8; RESEARCH_QUESTIONS RQ1; FAQ Q1–Q4; NOTES (2026-06-23).
 
 ---

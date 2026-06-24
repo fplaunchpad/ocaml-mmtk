@@ -232,7 +232,7 @@ Immix's 1.74×) — Immix mature-space sweep cost, the lever RQ8/RQ7 target.
 
 ---
 
-## Q10. Is MMTk's eager zero-fill correct to remove for OCaml (no-zero allocation)? — **SETTLED for STW; subtle for concurrent**
+## Q10. Is MMTk's eager zero-fill correct to remove for OCaml (no-zero allocation)? — **SETTLED — no-zero LANDED on mainline, enabled for all plans**
 
 mmtk-core 0.32 zero-fills every recyclable line/region before the mutator fills it, so OCaml writes every word
 twice (~20% of spectralnorm cycles). Existence proof it's redundant: vanilla OCaml's minor heap is never zeroed
@@ -242,12 +242,14 @@ always written), native Ialloc polls before the field stores with no safepoint b
 (String/Bytes/Double/Custom) read zero fields anyway. Load-bearing case: Closure_tag (scanner reads field 1
 closinfo for start_env; OCaml already forbids a GC before closinfo is set — issue #11482). Measured recovery:
 spectralnorm +21.9%, alloc/mutate/binarytrees +2–10%, nbody +0.0% (compute control), GC count/time/copies
-identical — a pure mutator win. The subtlety (→ RQ9): a concurrent marker can observe the
-header-written/fields-unwritten window; with zeroing it reads as safe immediates, without it as garbage
-pointers — so no-zero is conservatively gated OFF for ConcurrentImmix today, though the allocate-black argument
-(the marker never traces a newly-allocated black object's fields) suggests it is likely safe there too. Which
-of init-before-publish / the safepoint property / allocate-black carries the proof differs STW-vs-concurrent —
-that is the instructive point.
+identical — a pure mutator win. **LANDED on mainline** (tip `338cce723`) and **enabled for all plans —
+including ConcurrentImmix** — via a *runtime* gate (an `alloc_zeroed` flag forwarded to the two zeroing sites,
+set 0 by `runtime/mmtk.c`), so one binary is correct across every `MMTK_PLAN`; the `gc/mmtk-core` fork
+(`0.32-ocaml`) is now the mainline mmtk dependency. The concurrent-marker subtlety (→ RQ9) is **resolved**:
+ConcurrentImmix is **allocate-black** (the marker eager-marks acquired lines and never traces a
+newly-allocated object's fields), so it never reads the header-written/fields-unwritten window — no-zero is
+verified safe there too, so it is enabled rather than gated off. The instructive point: *which* invariant
+carries the proof differs STW (the safepoint property) vs. concurrent (allocate-black non-scanning).
 
 ---
 

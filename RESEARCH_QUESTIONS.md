@@ -499,7 +499,9 @@ clean lever and an existence proof. **Independent of and complementary to RQ7** 
 axis, RQ7 the *collector* axis. **Venue:** MPLR/ISMM. **Risk:** medium (mmtk-core change + safety argument).
 **Novelty: strong**, and the **biggest single measured lever** — immediately actionable.
 
-**Scoped (2026-06-24) — design ready; SAFE for STW plans, must be gated OFF for concurrent.** Allocation-time
+**Scoped (2026-06-24) — design ready; SAFE for STW plans.** (Historical snapshot: this round initially
+expected concurrent to need no-zero gated OFF; that was later disproven — ConcurrentImmix is allocate-black, so
+no-zero is safe and enabled there too. See the CONFIRMED/LANDED notes below + RQ9.) Allocation-time
 zeroing has exactly **two** sites in mmtk-core 0.32, both → `util/memory.rs:167 zero()`: **site 1** (dominant)
 `immix_allocator.rs:253` `acquire_recyclable_lines` (recycled holes in reused Immix blocks, **unconditional**),
 and **site 2** `policy/space.rs:229` `get_new_pages_and_initialize` (`if zeroed` — clean Immix blocks + the
@@ -511,28 +513,34 @@ vanilla's own invariant (minor heap never zeroed; native `Ialloc` polls *before*
 safepoint between; the scanner is header-driven and the header is always written; no-scan tags
 String/Bytes/Double/Custom read zero fields → strict wins). One load-bearing case: **`Closure_tag`** (the
 scanner reads field 1 `closinfo` to compute `start_env`; OCaml already forbids a GC before `closinfo` is set —
-issue #11482 — so the gate must stress closure-heavy code). **RED FLAG — incompatible with concurrent marking:**
-a concurrent marker can observe an object in the header-written / fields-unwritten window; **with** zeroing the
-unwritten fields read as safe immediates, **without** it as garbage pointers. So no-zero must be **gated OFF for
-ConcurrentImmix**, and the **GenConcurrentImmix hybrid (RQ7) inherits this as a design problem** — combining
-no-zero throughput with concurrent-mark latency needs an **init-publishing (zero-on-publish / SATB-style)
-allocation barrier**. Net: RQ8 is a clean win on the **default (GenImmix, STW) today**; for ConcurrentImmix
-no-zero is **conservatively gated OFF today**, but the allocate-black argument (markers don't *trace*
-newly-allocated black objects' fields) suggests it is **likely safe there too** — re-examination in progress
-(RQ9). The concurrent combination is a sharper sub-question that couples RQ8 ↔ RQ1 ↔ RQ7. Design:
-`~/rq8-nozero-design.md` on turing.
+issue #11482 — so the gate must stress closure-heavy code). **The concurrent-marking worry — resolved (RQ9):**
+a concurrent marker can observe an object in the header-written / fields-unwritten window; with zeroing the
+unwritten fields read as safe immediates, without it as garbage pointers. The original conservative call was to
+gate no-zero **OFF for ConcurrentImmix**. That gate is **no longer needed**: ConcurrentImmix is **verified
+allocate-black** in mmtk-core 0.32 — the marker eager-marks acquired lines and **never field-scans a
+newly-allocated object** (it never reads the garbage window), so no-zero is **safe and now enabled** on
+ConcurrentImmix too (→ RQ9). The runtime gate is therefore *no-zero-universal* (ON for all plans), not
+no-zero-except-concurrent. The **GenConcurrentImmix hybrid (RQ7)** likewise inherits no-zero as safe (its
+mature half is the allocate-black ConcurrentImmix marker), not as a design problem. Net: RQ8 is a clean win on
+**every plan**. Design: `~/rq8-nozero-design.md` on turing.
 
 **CONFIRMED (2026-06-24).** Implemented on the `0.32-ocaml` fork + measured. **SAFE on STW plans** (sanity 0
 invalid-ref incl. the load-bearing closure self-compile; CLBG byte-identical ON vs OFF 15/15; GC count/time/
 copies identical — pure mutator win). **Recovery materialized:** spectralnorm **+21.9%** (memset cycle-share
 ~19%→~1%), alloc/mutate/binarytrees +2–10%, **nbody +0.0%** (compute control flat); parallel scaling preserved.
 So RQ8's core claim holds: **MMTk's eager zero-fill is redundant for OCaml and removing it recovers ~15–20% on
-allocation-bound code with zero pause impact** — the lever exists and is real. Landing default-on needs a
-runtime plan-gate (no-zero auto-off for ConcurrentImmix). Writeup: `~/rq8-nozero-results.md`.
+allocation-bound code with zero pause impact** — the lever exists and is real. Writeup: `~/rq8-nozero-results.md`.
+
+**LANDED on mainline (2026-06-24, tip `338cce723`).** No-zero is now ON for **all** plans — **including
+ConcurrentImmix** — via a *runtime* plan-gate: a `alloc_zeroed` flag forwarded to the two zeroing sites,
+set 0 by `runtime/mmtk.c` so one binary is correct across every `MMTK_PLAN`. The `gc/mmtk-core` fork
+(`0.32-ocaml`) is now the mainline mmtk dependency (submodule). ConcurrentImmix was **verified
+allocate-black** (the concurrent marker never field-scans newly-allocated objects), so no-zero is safe there
+too — the gate is therefore *no-zero-universal*, not no-zero-except-concurrent.
 
 ---
 
-### RQ9 — When is no-zero allocation safe under a concurrent marker? The allocate-black / init-before-publish boundary *(couples RQ8 ↔ RQ1 ↔ RQ7)*
+### RQ9 — When is no-zero allocation safe under a concurrent marker? The allocate-black / init-before-publish boundary *(couples RQ8 ↔ RQ1 ↔ RQ7)* — **RESOLVED**
 
 No-zero allocation (RQ8) is proven SAFE for STW plans by vanilla's own unzeroed-minor-heap invariant, but it
 has a sharp boundary: a concurrent marker can observe an object in the header-written / fields-unwritten window
@@ -542,12 +550,20 @@ ConcurrentImmix: (i) **init-before-publish** (the mutator never publishes a refe
 object — covers the case where the marker reaches it via a heap edge); (ii) the **safepoint/STW property** (no
 GC-observable point between alloc and field-fill — the unconditional STW argument); (iii) **allocate-black
 non-scanning** (a SATB marker allocates newly-acquired lines black and never *traces* the new object's fields,
-so it never reads the garbage — a new object's children are already live). If (iii) holds in mmtk-core 0.32
-(verification in progress; FinalMark already uses `new_no_scan_roots` and `caml_initialize` takes no SATB), then
-no-zero is safe on ConcurrentImmix too and the conservative gate can be dropped; otherwise an init-publishing
-(zero-on-publish / SATB-style) allocation barrier is needed — exactly the design problem the GenConcurrentImmix
-hybrid (RQ7) inherits. Novelty: the precise statement of *which* invariant carries the safety, and that it
-differs STW-vs-concurrent, is an instructive framework-vs-host-discipline finding. Venue: MPLR/ISMM. Risk: medium.
+so it never reads the garbage — a new object's children are already live).
+
+**Answer — (iii) carries the proof; RESOLVED (2026-06-24).** mmtk-core 0.32's ConcurrentImmix is
+**allocate-black**: the `ImmixAllocator` **eager-marks lines** as it acquires them, so a newly-allocated object
+is born marked; `attempt_mark` **skips an already-marked object** (so the tracer never re-visits it); FinalMark
+uses `new_no_scan_roots`; and `caml_initialize` takes the **region (allocate-black) barrier, not the SATB
+deletion barrier**. The net invariant: **the concurrent marker never reads a half-initialized object's fields**
+— a new object is black-on-birth, never re-traced, and its initializing stores need no SATB snapshot. So
+no-zero is **verified safe and now enabled on ConcurrentImmix**, the conservative gate is **dropped** (RQ8's
+runtime gate is no-zero-universal), and the **GenConcurrentImmix hybrid (RQ7)** inherits no-zero as safe rather
+than as a design problem (no init-publishing / zero-on-publish barrier is needed). Novelty: the precise
+statement of *which* invariant carries the safety, and that it differs STW (the safepoint property) vs.
+concurrent (allocate-black non-scanning), is an instructive framework-vs-host-discipline finding. Venue:
+MPLR/ISMM.
 
 ---
 
@@ -565,9 +581,10 @@ differs STW-vs-concurrent, is an instructive framework-vs-host-discipline findin
 - **RQ7 (GenConcurrentImmix hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
   a copying-nursery + concurrently-marked + STW-evacuated Immix-mature plan with a SATB barrier — mmtk-core
   fork work (a (near-)non-moving, incremental mature). Both halves are landed natively.
-- **RQ8 (no-zero allocation):** CONFIRMED (~15–22% on alloc-bound code, SAFE on STW plans, on the `0.32-ocaml`
-  mmtk-core fork). *Remaining:* the runtime plan-gate (auto-off for ConcurrentImmix) to land default-on, and
-  the RQ9 concurrent-safety argument.
+- **RQ8 (no-zero allocation):** CONFIRMED + **LANDED on mainline** (~15–22% on alloc-bound code) via a runtime
+  plan-gate; no-zero is **universal** — ON for all plans **including ConcurrentImmix** (verified allocate-black,
+  RQ9). The `gc/mmtk-core` fork (`0.32-ocaml`) is now the mainline mmtk dep. *Remaining:* nothing for safety;
+  follow-up perf characterization only.
 - **RQ4:** essentially the write-up; nothing new to build.
 - **RQ5(b):** an extracted, abstractable model of the safepoint / blocking-section protocol (the bug-#3
   site) in a proof assistant — not platform engineering, but it depends on pinning the protocol down
