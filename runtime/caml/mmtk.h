@@ -122,6 +122,18 @@ extern void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
                                                 caml_mmtk_ephe_retain_fn retain,
                                                 void *ctx);
 
+/* Scan finalisers orphaned by terminated domains (orph_structs, in major_gc.c)
+ * as roots: mirrors caml_final_do_roots over every orphaned struct so the binding
+ * can report their fun/val slots in scan_vm_specific_roots. Without this the
+ * orphaned nursery values are neither rooted nor forwarded between orphaning and
+ * adoption, and a queued finaliser runs against recycled nursery bytes
+ * (finaliser_handover use-after-free). [do_val] gates first/last *values* (0 with
+ * MMTK_WEAK_REFS, matching caml_do_roots, so finalisers can fire); run-queue (todo)
+ * values are always rooted. Defined in runtime/major_gc.c. */
+extern void caml_mmtk_scan_orphaned_finalisers(scanning_action act,
+                                               scanning_action_flags fflags,
+                                               void *fdata, int do_val);
+
 /* Custom-block finalizers (Custom_operations.finalize), same MMTK_WEAK_REFS gate.
  * register: enqueue a finalizable custom block on MMTk's finalizer queue (called
  * from caml_alloc_custom). run_custom_finalizers: drain the ready queue + run each

@@ -92,6 +92,17 @@ extern "C" {
     /// DEBUG (moving-GC bug hunt): a domain's bytecode value-stack live range
     /// [*lo, *hi). Used by the post-GC stale-root check.
     fn caml_mmtk_debug_stack_range(domain: usize, lo: *mut *mut usize, hi: *mut *mut usize);
+    /// Scan finalisers orphaned by terminated domains as roots (runtime/major_gc.c).
+    /// Mirrors caml_final_do_roots over every orphaned final_info still awaiting
+    /// adoption, so their fun/val slots are reported here too — otherwise the
+    /// orphaned nursery values dangle between orphaning and adoption
+    /// (finaliser_handover use-after-free). `do_val` matches the per-domain scan.
+    fn caml_mmtk_scan_orphaned_finalisers(
+        f: ScanningAction,
+        fflags: i32,
+        data: *mut c_void,
+        do_val: i32,
+    );
 }
 
 #[inline]
@@ -240,11 +251,19 @@ impl Scanning<OCamlVM> for VMScanning {
         mut factory: impl RootsWorkFactory<FieldSlot>,
     ) {
         let mut buf: Vec<FieldSlot> = Vec::new();
+        let buf_ptr = (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>();
+        // Same gate as scan_roots_in_mutator_thread's caml_do_roots call: with
+        // MMTk-native finalisers (weak-refs mode) leave finalisable *values*
+        // unrooted (0) so dead ones can be detected and their finalisers run;
+        // otherwise keep them alive (1). The run-queue values are always rooted
+        // inside caml_mmtk_scan_orphaned_finalisers regardless.
+        let do_final_val = if weak_refs_enabled() { 0 } else { 1 };
         unsafe {
-            caml_scan_global_roots(
-                collect_root_slot,
-                (&mut buf as *mut Vec<FieldSlot>).cast::<c_void>(),
-            );
+            caml_scan_global_roots(collect_root_slot, buf_ptr);
+            // Finalisers orphaned by terminated domains are referenced only from
+            // [orph_structs] until adopted — no domain root scan covers them, so
+            // root their fun/val slots here too (fixes finaliser_handover UAF).
+            caml_mmtk_scan_orphaned_finalisers(collect_root_slot, 0, buf_ptr, do_final_val);
         }
         if !buf.is_empty() {
             factory.create_process_roots_work(buf);
