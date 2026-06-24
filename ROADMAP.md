@@ -84,8 +84,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      finalisers work under `MMTK_WEAK_REFS=1`): `callback/test_finaliser_gc.ml`,
      `callback/test_gc_alarm.ml`, `basic-more/simplif_under_lambda.ml` — restore `(* TEST *)` + verify.
 
-5. **#14 / i386 — platform.** macOS native linking (always-on native is Linux-only
-   today). The **i386** Build job is deliberately skipped — the 32-bit MMTk staticlib
+5. **#14 / i386 — platform.** macOS native linking: **DONE** (2026-06-24, arm64) — native
+   compile + link + run verified (`-lmmtk_ocaml` resolves via the stdlib symlink + auto
+   `-L<stdlib>`, the Linux mechanism). The earlier "Linux-only" status was a stale configured
+   tree, not a source gap: the relocatable `mmtk_c_libraries` wiring (configure.ac →
+   `{bytecomp,native}_c_libraries`) already carries the Darwin native-lib set; a tree
+   configured before that commit just needs a reconfigure. The **i386** Build job is
+   deliberately skipped — the 32-bit MMTk staticlib
    won't build (`Makefile.mmtk` `mmtk-lib` Error 127). Hygiene CI (`check-typo`) is red
    on whole-tree non-ASCII/long-lines — scope it to changed files, keep new C/build
    comments ASCII ≤80 col. → NOTES various; ROADMAP archive entry.

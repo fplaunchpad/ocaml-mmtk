@@ -5,6 +5,62 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## macOS (arm64) native compile + link + run: VERIFIED — root cause was a stale configured tree, not a source gap
+
+*2026-06-24*
+
+**Symptom (reported).** Native *compile* worked but native *link of user programs* failed on macOS:
+`./ocamlopt.opt -I stdlib /tmp/nat.ml -o /tmp/nat` →
+`Undefined symbols for architecture arm64: _mmtk_ocaml_alloc, … (referenced from libasmrun.a(mmtk.n.o))`,
+`ld: symbol(s) not found`. `libasmrun.a(mmtk.n.o)` references `mmtk_ocaml_*` but the MMTk staticlib was not
+on the native user-program link line.
+
+**Root cause — stale configured tree, NOT a Darwin source bug.** The relocatable link mechanism was already
+committed and is already Darwin-aware:
+- `configure.ac` computes `mmtk_c_libraries="-lmmtk_ocaml $mmtk_native_libs"` with a `$host_os` `*darwin*`
+  branch (`-lobjc -framework IOKit -framework CoreFoundation -liconv`) — commit `e07de24a75` (Jun 20),
+  made relocatable in `3206a3b7fc` (Jun 22).
+- `utils/config.generated.ml.in` prepends `@mmtk_c_libraries@` to both `bytecomp_c_libraries` and
+  `native_c_libraries`, so `ocamlc`/`ocamlopt` place `-lmmtk_ocaml` *after* `libasmrun.a` on the C link line.
+- `Makefile` symlinks `stdlib/libmmtk_ocaml.a → ../gc/mmtk/target/release/libmmtk_ocaml.a` (a `runtime`
+  prereq), and the compiler auto-adds `-L<stdlib>` (Ccomp prefixes every Load_path dir with `-L`), so
+  `-lmmtk_ocaml` resolves both in-tree and from an installed/relocated prefix.
+
+This Mac's tree was last configured at **5.5.0~rc1 (config.status dated Jun 19)** — *before* both commits — so
+its (gitignored) `utils/config.generated.ml` still read `-lpthread` only, and `stdlib/libmmtk_ocaml.a` had
+never been created. The fix on a stale tree is just to **reconfigure + rebuild**; no source change was needed
+for the link mechanism.
+
+**Fix applied.** `./configure` (no args, matching the original) → regenerates `config.status` +
+`config.generated.ml` (now `-lmmtk_ocaml -lobjc -framework IOKit -framework CoreFoundation -liconv … -lpthread`);
+`make stdlib/libmmtk_ocaml.a` creates the symlink; `make world.opt` recompiles the compiler so the new
+`config.ml` (`native_c_libraries`) is embedded in `ocamlopt.opt`. Hardcoded Darwin `mmtk_native_libs` confirmed
+sufficient: `cargo … --print native-static-libs` reports `-lobjc -framework IOKit -framework CoreFoundation
+-liconv -lSystem -lc -lm` (the `-lSystem -lc -lm` tail is supplied by the default toolchain).
+
+**Verification (arm64 Darwin, this Mac).**
+- Native compile+link+RUN: `ocamlopt.opt -I stdlib nat.ml -o nat` → exit 0, no undefined symbols;
+  `nat` prints correct output; verbose link line ends `… stdlib/libasmrun.a -lmmtk_ocaml -lobjc -framework
+  IOKit -framework CoreFoundation -liconv -lpthread` (correct archive order), zero linker warnings.
+- Moving GC end-to-end through the linked exe: a 5M-iteration alloc-churn program @64 MB GenImmix →
+  **55 GCs, 31068 objects copied**, correct output, exit 0. Immix/StickyImmix/GenImmix all run.
+- No startup mmap/ASLR flake observed (macOS has no `setarch`; none was needed here).
+- Bytecode unaffected: `ocamlc.opt` compile + `ocamlrun` run clean.
+
+**Residual / caveats (distinct from the link fix).**
+- `-custom` bytecode from the *in-tree* build fails at the C-compile of the prim stub with
+  `'caml/mlvalues.h' file not found` — the headers live in `runtime/caml/`, not `stdlib/caml/`. This is a
+  pre-existing in-tree path quirk (the link step, where `bytecomp_c_libraries` matters, is never reached);
+  `-custom` from an installed prefix finds headers in `$LIBDIR/caml/`. Not a regression from this work.
+- `mmtk_native_libs` is still hardcoded per-OS in two places (`configure.ac` + `Makefile.mmtk`); the
+  `--print native-static-libs` derivation TODO (M4/packaging) is unchanged.
+
+**Merge-readiness.** The link mechanism needs no source change, so a future fresh configure on macOS Just
+Works. The only committed deltas are doc updates (README/ROADMAP/this NOTES) reflecting the now-verified state.
+Left on `fix/macos-native-link` per request; not merged to `5.5+mmtk`.
+
+---
+
 ## RQ8 no-zero allocation: SAFE for STW plans, ~15–22% mutator recovery, GC unchanged — ready to land (needs a runtime plan-gate)
 
 *2026-06-24*
@@ -325,7 +381,7 @@ Linux native (turing) — `world.opt` builds; native ConcurrentImmix runs the 4-
 lazy + atomics stressors, all clean; MMTk `sanity`-clean (66 re-traces, 0 Invalid); 21 native ConcurrentImmix
 runs, 0 crashes; non-concurrent regression clean. Native plan set is now **7** (adds ConcurrentImmix).
 **Open (perf, not correctness):** an UNLOG-bit barrier fast-path gate; the sanity-build-only ~10 MB deadlock
-(`rr`, issue #4); native-on-macOS linking (separate, unfinished).
+(`rr`, issue #4). (native-on-macOS linking: since verified working — see the 2026-06-24 macOS entry above.)
 
 **rsync stale-binary lesson:** the macOS build cost two restarts — Mach-O `runtime/sak` + `yacc/ocamlyacc`
 slipped past `*.o` excludes (truncating generated `prims.c`), and an unanchored `--exclude='ocamlc'` deleted

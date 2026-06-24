@@ -20,8 +20,10 @@ on a common substrate. The research agenda lives in
   TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
   single- and multi-domain (`Domain.spawn`) programs run.
 
-> Supported on **x86-64 Linux**; the **macOS bytecode build is validated** (native linking on macOS is
-> still unfinished). MMTk's overhead is workload-dependent — on a native Immix-vs-vanilla-5.5.0 sweep it now
+> Supported on **x86-64 Linux**; on **macOS (arm64)** both the **bytecode build** and **native
+> compile + link + run** are validated (native programs link the in-tree MMTk staticlib
+> relocatably via `-lmmtk_ocaml`, the same mechanism as Linux).
+> MMTk's overhead is workload-dependent — on a native Immix-vs-vanilla-5.5.0 sweep it now
 > reaches **parity or better on 5 of 6 benchmarks** (and is **~1.5× faster** on parallel allocation-heavy
 > work), with one structural outlier (~1.74× on a sweep-bound float kernel); it uses more memory (it reserves
 > its heap). Performance tuning is the open milestone (M8); the methodology is
