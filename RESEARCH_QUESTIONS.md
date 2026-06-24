@@ -424,7 +424,7 @@ plan + an API change). **Novelty: strong.**
 
 ---
 
-### RQ7 — Can MMTk express OCaml's own collector? A vanilla-faithful plan as a construction problem *(framework expressiveness + the clean MMTk-vs-vanilla comparison)*
+### RQ7 — Can MMTk express OCaml's own collector? The `Bactrian` plan: a vanilla-faithful collector as a construction problem *(framework expressiveness + the clean MMTk-vs-vanilla comparison)*
 
 No mmtk-core 0.32 plan matches OCaml's GC: vanilla is **generational** (per-domain **copying** minor, promoting
 into a **shared, non-moving, mostly-concurrent / incremental mark-and-sweep major**) with a **SATB** write
@@ -464,12 +464,21 @@ parity-or-better with vanilla on 5/6 CLBG benches and wins ~1.5× on parallel al
 (`bzero_metadata`/`SweepChunk`/`side_metadata_access`), precisely the cost a **(near-)non-moving, incremental
 mature** would change; and the dominant *serial* overhead elsewhere is the **STW mark/root-scan**, precisely
 what **ConcurrentImmix**'s concurrent marking moves off the pause. The two landed halves' measured strengths
-are thus complementary: the hybrid — call it **`GenConcurrentImmix`** (copying nursery + concurrently-marked,
-STW-evacuated Immix mature, SATB barrier) — is the artifact that would capture the nursery's throughput *and*
+are thus complementary: the hybrid — named **`Bactrian`** (the two-humped camel — OCaml's mascot is a camel,
+and the plan has two humps: a copying nursery and a concurrently-marked, STW-evacuated Immix mature with a
+SATB barrier; the name signals it is built *for OCaml*) — is the artifact that would capture the nursery's throughput *and*
 the concurrent marker's latency, the faithful MMTk realization of OCaml 5's generational + mostly-concurrent
 major. The **no-read-barrier / C-API constraint (RQ6) bounds it to concurrent *marking* + STW *evacuation*** —
 which is also exactly what vanilla does (its major is non-moving), so the constraint is not a compromise here
 but the faithful choice.
+
+**`Bactrian` is the apples-to-apples vehicle.** Stock OCaml and MMTk-`Bactrian` would run the *same* GC
+algorithm, so comparing them measures pure framework/implementation overhead rather than collector-design
+differences — and the minor-GC-cost finding (MMTk ≈ 4× stock per nursery collection at a matched 2 MiB
+nursery, 2026-06-24) is the first quantification of exactly that gap. The question `Bactrian` answers:
+*how close can an MMTk implementation of OCaml's own collector get to the bespoke one — and what framework
+costs (per-collection STW/worker/work-packet overhead) must fall to close it?* That makes `Bactrian` not
+just RQ1's low-latency vehicle but the yardstick for "how good can MMTk-for-OCaml be."
 
 ---
 
@@ -520,7 +529,7 @@ gate no-zero **OFF for ConcurrentImmix**. That gate is **no longer needed**: Con
 allocate-black** in mmtk-core 0.32 — the marker eager-marks acquired lines and **never field-scans a
 newly-allocated object** (it never reads the garbage window), so no-zero is **safe and now enabled** on
 ConcurrentImmix too (→ RQ9). The runtime gate is therefore *no-zero-universal* (ON for all plans), not
-no-zero-except-concurrent. The **GenConcurrentImmix hybrid (RQ7)** likewise inherits no-zero as safe (its
+no-zero-except-concurrent. The **Bactrian hybrid (RQ7)** likewise inherits no-zero as safe (its
 mature half is the allocate-black ConcurrentImmix marker), not as a design problem. Net: RQ8 is a clean win on
 **every plan**. Design: `~/rq8-nozero-design.md` on turing.
 
@@ -559,7 +568,7 @@ uses `new_no_scan_roots`; and `caml_initialize` takes the **region (allocate-bla
 deletion barrier**. The net invariant: **the concurrent marker never reads a half-initialized object's fields**
 — a new object is black-on-birth, never re-traced, and its initializing stores need no SATB snapshot. So
 no-zero is **verified safe and now enabled on ConcurrentImmix**, the conservative gate is **dropped** (RQ8's
-runtime gate is no-zero-universal), and the **GenConcurrentImmix hybrid (RQ7)** inherits no-zero as safe rather
+runtime gate is no-zero-universal), and the **Bactrian hybrid (RQ7)** inherits no-zero as safe rather
 than as a design problem (no init-publishing / zero-on-publish barrier is needed). Novelty: the precise
 statement of *which* invariant carries the safety, and that it differs STW (the safepoint property) vs.
 concurrent (allocate-black non-scanning), is an instructive framework-vs-host-discipline finding. Venue:
@@ -578,7 +587,7 @@ MPLR/ISMM.
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add
   the *extreme-allocation copy pathology* probe — covary alloc-rate ÷ heap-size against survival (GenImmix
   copies dead-on-arrival cells under a fixed heap at very high allocation volume; GitHub #6).
-- **RQ7 (GenConcurrentImmix hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
+- **RQ7 (Bactrian hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
   a copying-nursery + concurrently-marked + STW-evacuated Immix-mature plan with a SATB barrier — mmtk-core
   fork work (a (near-)non-moving, incremental mature). Both halves are landed natively.
 - **RQ8 (no-zero allocation):** CONFIRMED + **LANDED on mainline** (~15–22% on alloc-bound code) via a runtime
@@ -600,7 +609,7 @@ MPLR/ISMM.
 3. **RQ1 (flagship) — already in flight.** ConcurrentImmix + SATB is landed and has produced **first strong
    native evidence** (the SATB barrier measured ~free; concurrent marking cuts max STW 3–4×). The immutability
    ⇒ read-barrier-free-low-latency hypothesis is now testable across the mutation spectrum; the residual is an
-   LXR/RC plan + the latency harness. **RQ7 (GenConcurrentImmix) and RQ8 (no-zero) are active workstreams**
+   LXR/RC plan + the latency harness. **RQ7 (Bactrian) and RQ8 (no-zero) are active workstreams**
    feeding it.
 4. **RQ3 / RQ5** — opportunistic, as the platform and interest allow; RQ5(b) is the standout long-game
    (real, confirmed gap; on-charter).

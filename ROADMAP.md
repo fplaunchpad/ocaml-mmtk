@@ -201,7 +201,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
   **correct-but-doesn't-close-the-test** (kept as a sound defensive change). Real fix: schedule a **full GC
   under mature pressure** + fix the **major-collection count**. **OPEN** (liveness, not a crash). Full GCs
   unaffected; Immix byte-identical. → FAQ Q11; NOTES 2026-06-24; GitHub #5.
-- **RQ7 — `GenConcurrentImmix` hybrid (flagship research direction).** The faithful MMTk realization of
+- **RQ7 — `Bactrian` hybrid (flagship research direction).** The faithful MMTk realization of
   OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
   (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
   incremental mature is the open mmtk-core-fork work. → RESEARCH_QUESTIONS RQ7.

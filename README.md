@@ -14,7 +14,9 @@ on a common substrate. The research agenda lives in
 
 - **Base:** OCaml `5.5.0` (final). **Collector:** MMTk, always on, default plan **GenImmix** (copying nursery + Immix mature — the generational, stock-OCaml-faithful plan).
 - **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
-  [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` from crates.io.
+  [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` — a small in-tree fork
+  (`gc/mmtk-core`) carrying OCaml-specific deltas (e.g. it skips redundant
+  allocation-time zeroing).
 - Collection is multi-domain, parallel, and stop-the-world; moving plans relocate
   objects and generational plans use a write barrier. Native code allocates from a
   TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
@@ -25,8 +27,8 @@ on a common substrate. The research agenda lives in
 > relocatably via `-lmmtk_ocaml`, the same mechanism as Linux).
 > MMTk's overhead is workload-dependent — on a native Immix-vs-vanilla-5.5.0 sweep it now
 > reaches **parity or better on 5 of 6 benchmarks** (and is **~1.5× faster** on parallel allocation-heavy
-> work), with one structural outlier (~1.74× on a sweep-bound float kernel); it uses more memory (it reserves
-> its heap). Performance tuning is the open milestone (M8); the methodology is
+> work), with one structural outlier (~1.74× on a sweep-bound float kernel). The heap grows on demand,
+> so memory tracks the live set. Performance tuning is the open milestone (M8); the methodology is
 > [`PERFORMANCE.md`](PERFORMANCE.md). Benchmark against a vanilla OCaml 5.5.0 opam switch.
 
 ## Status at a glance
@@ -35,8 +37,8 @@ on a common substrate. The research agenda lives in
   multi-domain, native code, weak/ephemeron/finaliser support, the testsuite); **excising
   the stock GC** (no stock minor/major collector, shared heap, or minor-heap arena remains);
   advancing the base to **OCaml 5.5.0 final**; the MMTk-native multi-domain stop-the-world
-  handshake (per-mutator RUNNING set, bug #3b); and **`ConcurrentImmix`** (bytecode + native) — SATB
-  write barrier, `lazy`-clean, and the continuation-scan-vs-resume hazard fixed (FAQ Q3).
+  handshake; and **`ConcurrentImmix`** (bytecode + native) — a concurrent marker with an SATB
+  write barrier, proven clean on `lazy` values and on effect-handler continuations.
 - **In progress:** the macro-benchmark performance campaign + analysis (M8); and three
   rare-crash investigations tracked as GitHub issues.
 - **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
@@ -76,7 +78,7 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
-| `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
+| `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand, like stock OCaml. |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
 mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
@@ -101,15 +103,14 @@ profile (a cheap copying nursery; see [`PERFORMANCE.md`](PERFORMANCE.md)).
 | `MarkSweep` | non-moving free-list | bytecode (native infeasible — free-list) |
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
-| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (RQ1; `lazy`-clean, Q3 fixed) |
+| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
 
-`ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
-write barrier is wired in bytecode **and native**, `lazy` is proven clean, and the
-continuation-scan-vs-resume hazard is fixed (per-continuation lock + resume SATB-snapshot — see
-[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3). The remaining items are perf-only (a de-prioritized UNLOG-bit barrier
-gate — the SATB barrier measured ~free, <0.1% self; a sanity-build-only small-heap deadlock). Because the
-concurrent marker is **allocate-black** (never field-scans new objects), no-zero allocation (RQ8) is safe and
-**enabled** under `ConcurrentImmix` too.
+`ConcurrentImmix` is the low-latency **research** plan: it marks concurrently with the mutator using
+an SATB (snapshot-at-the-beginning) write barrier, wired in both bytecode and native. It runs cleanly on
+`lazy` values and on effect-handler continuations — the subtle cases are written up in
+[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md). The remaining work on it is performance-only. Its marker is
+*allocate-black* (it never scans freshly-allocated objects), which is also what lets the runtime safely skip
+zeroing freshly-allocated memory.
 The one **unwired** plan is **`Compressor`**, which needs a unified object-reference model
 incompatible with OCaml's value/header layout (see [`ROADMAP.md`](ROADMAP.md)).
 `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only — their allocators can't back the
