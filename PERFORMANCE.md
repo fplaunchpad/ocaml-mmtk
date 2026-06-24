@@ -95,11 +95,14 @@ Day-to-day regression tracking watches the **champion vs vanilla** number; the f
 | Runtime id | What | Switch source |
 |---|---|---|
 | `vanilla-5.5.0` | **released** OCaml 5.5.0 (auto-sizing 2-gen GC) — the baseline | normal opam switch (`ocaml-base-compiler.5.5.0`) |
-| `mmtk-immix` | fork, `MMTK_PLAN=Immix` (default, native) | pin the fork |
+| `mmtk-immix` | fork, `MMTK_PLAN=Immix` (non-generational baseline) | pin the fork |
 | `mmtk-stickyimmix` | fork, `StickyImmix` (gen, in-place nursery) | same switch, env only |
-| `mmtk-genimmix` | fork, `GenImmix` (stock-faithful gen, copy nursery) | same switch, env only |
+| `mmtk-genimmix` | fork, `GenImmix` **(default)** — stock-faithful gen, copy nursery | same switch, env only |
+| `mmtk-concurrentimmix` | fork, `ConcurrentImmix` (concurrent SATB marking; flagship low-latency plan, RQ1) | same switch, env only |
 
 **Version-match the baseline.** The fork is being advanced to **5.5.0 final** (from 5.5.0-rc1; the rc1→5.5.0 delta is 6 release-plumbing commits — see ROADMAP), so the vanilla baseline must be **released 5.5.0**, not rc1 and not trunk — otherwise an OCaml-version delta confounds the GC comparison. Do not start the Stage-2 campaign until both sides are 5.5.0. Build the *same* program with both the `vanilla-5.5.0` switch and the fork switch.
+
+**The default plan is now `GenImmix`** (copying nursery + Immix mature), not Immix — much of this doc still uses Immix as the reference point, but the shipped default, and the natural Stage-1 champion candidate, is GenImmix. **Native runs seven plans** (`Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`), not four.
 
 Efficiency: the MMTk plans are **one opam switch** differing only by `MMTK_PLAN` — no rebuild between plans (this is what makes Stage 1 cheap). **olly** consumes `runtime_events` from a built program, so each measured subject needs a real compiler switch (`vanilla-5.5.0` for the baseline; the fork switch for MMTk); install `runtime_events_tools` into a *separate* tooling switch — but note olly-on-MMTk is broken until backlog #R1–#R4 (§7).
 
@@ -150,7 +153,7 @@ GC introduces run-to-run nondeterminism (collection timing depends on allocation
 ## 5. Pitfalls specific to this project (control these or your numbers are noise)
 
 - **ASLR mmap flake → always `setarch x86_64 -R`.** MMTk can abort at startup with `failed to mmap meta memory: File exists`; *not* a correctness bug. Run every measured invocation (and the stock baseline) under `setarch x86_64 -R`. (rr disables ASLR itself.)
-- **`MMTK_PLAN` and `MMTK_HEAP_SIZE_MB` are the primary independent variables.** Pin them explicitly per run; never rely on defaults in a results table. **Native code requires an Immix-family plan** (TLAB nursery-aliasing): native runs `Immix`/`StickyImmix`/`GenImmix`/`GenCopy`; `MarkSweep`/`PageProtect`/Compressor are **bytecode-only** (abort at startup on native — `runtime/mmtk.c:195`). A *native* cross-plan study is restricted to the four bump-pointer-aliasable plans; full 9-plan sweeps are bytecode-only — and **bytecode vs native is itself a confound you must never cross** (the bytecode alloc path goes per-object through `mmtk_ocaml_alloc`; native uses an inlined TLAB bump — see backlog #A1).
+- **`MMTK_PLAN` and `MMTK_HEAP_SIZE_MB` are the primary independent variables.** Pin them explicitly per run; never rely on defaults in a results table. **Native code requires a bump/Immix-Default plan** (TLAB nursery-aliasing): native runs the **seven** `Immix`/`StickyImmix`/`ConcurrentImmix`/`GenImmix`/`GenCopy`/`SemiSpace`/`NoGC`; `MarkSweep`/`MarkCompact`/`PageProtect`/`Compressor` are **bytecode-only** (abort at startup on native — `runtime/mmtk.c:195`). A *native* cross-plan study is restricted to the seven bump-pointer-aliasable plans; the full 10-plan sweep is bytecode-only — and **bytecode vs native is itself a confound you must never cross** (the bytecode alloc path goes per-object through `mmtk_ocaml_alloc`; native uses an inlined TLAB bump — see backlog #A1).
 - **GC worker thread count (`MMTK_THREADS`) vs cores.** Defaults to `nproc` *per process* (oversized for short runs — NOTES lever #4). Both a confound and a knob: (a) **hold it constant** within a comparison; (b) when studied, sweep it ({1,2,4,8}) as its own axis and account that GC workers and mutator domains contend for the same cores (on an N-core box, workers = domains = N oversubscribes). Pin affinity; report (mutator domains, GC workers, physical cores) for every run.
 - **Host settings (verified on `turing`).** `perf_event_paranoid = -1` (perf/bpftrace work without sudo — good). `intel_pstate/no_turbo = 1` (turbo already off — leave it). **`scaling_governor = powersave` — MUST change to `performance`** before any timing run (`sudo cpupower frequency-set -g performance`), else clock scaling adds variance. CPU is 2-socket Xeon Gold 5120 (28 cores) — NUMA matters; **pin to one socket** (`taskset -c 0-13`).
 - **`sanity` feature is a correctness tool, not a measured config.** Full-heap re-trace after each GC is far too slow to leave on for timing. Verify a moving plan with `sanity` at a small heap in a *separate* run; time with `sanity` off.
@@ -223,7 +226,7 @@ A staged funnel: confirm it is real, find which counter moved, find the function
 
 ## 10. The optimization backlog
 
-The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP open-work #17 carries the summary. The standing order: **obvious removals first, then measure with §2–§9, then the deeper structural levers.** The single dominant lever is #A1 (give bytecode a TLAB / inline its alloc fast path); the dominant collection-side levers are #C1 (per-slot SFT lookup + double slot-load) and #B1 (inline the no-op native write barrier for the default Immix plan). Both marquee static findings (#A1 bytecode no-TLAB at `memory.h:263`; #C1 double slot-load at `slot.rs:92`/`:179`) were spot-verified against the tree.
+The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP open-work #17 carries the summary. The standing order: **obvious removals first, then measure with §2–§9, then the deeper structural levers.** The single dominant lever is #A1 (give bytecode a TLAB / inline its alloc fast path); the dominant collection-side levers are #C1 (per-slot SFT lookup + double slot-load) and #B1 (inline the no-op native write barrier for the non-generational Immix plan). Both marquee static findings (#A1 bytecode no-TLAB at `memory.h:263`; #C1 double slot-load at `slot.rs:92`/`:179`) were spot-verified against the tree.
 
 ---
 
@@ -266,8 +269,9 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 > **Measured — 2026-06-24 (the obvious-removal pass).** Seven obvious-removal levers were implemented and
 > correctness-gated (build / mmtk `sanity` 0-invalid-ref / CLBG byte-identical / native compile-repro); six
 > passed and were pushed as `perf-lever-*`, one was rejected. **Only #C1-sftbound is load-bearing** (cached
-> `[heap_start,heap_end)` pre-check before the per-edge SFT lookup in `FieldSlot::classify`: **+1.26% on
-> fannkuchredux, outside noise**; halves the SFT-lookup self% cluster). **#C2/#C4/#B2/#B3/#A3 are correct +
+> `[heap_start,heap_end)` pre-check before the per-edge SFT lookup in `FieldSlot::classify`: **~+1% on
+> binarytrees, outside noise** (post-fft-fix; the win migrated off the now-trace-light fannkuchredux —
+> matches NOTES 2026-06-24); halves the SFT-lookup self% cluster). **#C2/#C4/#B2/#B3/#A3 are correct +
 > safe but perf-neutral** (≤ noise on fft/binarytrees/nbody/fannkuchredux). **#C1-double-load was REJECTED —
 > the "double load" is NOT removable:** MMTk's sanity GC clones root slots and re-`load()`s them *after* the
 > real GC writes forwarded refs, so a cached slot word returns stale pre-GC pointers (dangling edge). Update
@@ -292,8 +296,11 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 > plan-independent, **not heap-fixable**: bigger heap ⇒ fewer GCs but *worse* ratio). Generational (the new
 > GenImmix default) recovers only ~8% (whole-heap line-sweep removal). **The lever → RQ8: a no-zero allocation
 > mode** — vanilla OCaml already runs on an *unzeroed* minor heap, so the zeroing is redundant for OCaml;
-> removing it should recover ~15–20% on allocation-bound code with zero pause impact. **Flambda confound:**
-> spectralnorm's 5.76 GB is non-flambda boxed floats (`eval_A` not inlined) — measure flambda too. Detail:
+> removing it should recover ~15–20% on allocation-bound code with zero pause impact. **Not a flambda
+> confound:** spectralnorm's 5.76 GB is boxed floats (`eval_A` not inlined) — but that is just normal
+> non-flambda codegen, which is the real-world config we compare (vanilla 5.5.0 is non-flambda; upstream
+> flambda1 is mostly useless and flambda2 hasn't landed). The comparison is non-flambda-vs-non-flambda;
+> the boxed-float allocation is the workload as built, not an artifact to "fix" by measuring flambda. Detail:
 > NOTES 2026-06-24; `~/spectralnorm-investigation.md` on turing.
 
 ## #17 / M8 — ranked optimization backlog (perf work)
@@ -346,7 +353,7 @@ Sequencing: cheapest high-impact first within each group.
 
 ### Group B — Write barrier (mutator, collection-adjacent)
 
-- **#B1 — Inline the native write barrier; for non-generational (default Immix) make it a plain store. [deeper] — IMPACT: HI.**
+- **#B1 — Inline the native write barrier; for the non-generational Immix plan make it a plain store. [deeper] — IMPACT: HI.**
   - Where: `asmcomp/cmm_helpers.ml:2290-2296` (`caml_modify` extcall), array-set `:771`, init `:774`;
     `runtime/memory.c:183-200`; gate `runtime/mmtk.c:563-568`.
   - What: every pointer store is an unconditional out-of-line `call` into `caml_modify`→`caml_mmtk_region_barrier`,

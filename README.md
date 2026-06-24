@@ -75,7 +75,7 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MMTK_PLAN` | `Immix` | GC plan — see **GC plans** below. |
+| `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
 | `MMTK_HEAP_SIZE_MB` | `1024` | Fixed heap size, in MiB. |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
@@ -104,8 +104,10 @@ profile (a cheap copying nursery; see [`PERFORMANCE.md`](PERFORMANCE.md)).
 | `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (RQ1; `lazy`-clean, Q3 fixed) |
 
 `ConcurrentImmix` is the low-latency **research** plan (`RESEARCH_QUESTIONS.md` RQ1): its SATB
-write barrier is wired in bytecode and `lazy` is proven clean, with one open hazard —
-continuation stacks scanned concurrently with a resume (see [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3).
+write barrier is wired in bytecode **and native**, `lazy` is proven clean, and the
+continuation-scan-vs-resume hazard is fixed (per-continuation lock + resume SATB-snapshot — see
+[`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) Q3). The remaining items are perf-only (an UNLOG-bit barrier gate;
+a sanity-build-only small-heap deadlock).
 The one **unwired** plan is **`Compressor`**, which needs a unified object-reference model
 incompatible with OCaml's value/header layout (see [`ROADMAP.md`](ROADMAP.md)).
 `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only — their allocators can't back the

@@ -216,3 +216,51 @@ is genuinely incremental + mostly-concurrent (and non-moving, so no evacuation p
 **The true match** — generational + copying-minor + incremental/concurrent + (near-)non-moving major + SATB +
 read-barrier-free — **is not an mmtk-core 0.32 plan, and building it is a research problem** (`RESEARCH_QUESTIONS.md`
 RQ7); it coincides with the RQ1 low-latency target.
+
+---
+
+## Q9. Why is GenImmix the default plan (it replaced Immix)? — **SETTLED**
+
+OCaml allocates a torrent of small, short-lived objects with very low nursery survival — the textbook
+generational regime. GenImmix gives each domain a copying nursery promoting into an Immix mature, so a minor GC
+over near-entirely-dead young objects copies almost nothing: native GenImmix reaches parity-or-better with
+vanilla 5.5.0 on 5/6 CLBG benches and wins ~1.5× on parallel alloc-heavy (binarytrees). It fires more GCs than
+plain Immix (spectralnorm 45 vs 23) but copies few objects — the generational hypothesis empirically holds for
+OCaml. It is also the most stock-faithful plan (vanilla's minor is a copying nursery). Caveat: the flip surfaced
+a generational-minor weak-clear regression — GH#5 (see Q11). The one structural loss is spectralnorm (~1.6×, vs
+Immix's 1.74×) — Immix mature-space sweep cost, the lever RQ8/RQ7 target.
+
+---
+
+## Q10. Is MMTk's eager zero-fill correct to remove for OCaml (no-zero allocation)? — **SETTLED for STW; subtle for concurrent**
+
+mmtk-core 0.32 zero-fills every recyclable line/region before the mutator fills it, so OCaml writes every word
+twice (~20% of spectralnorm cycles). Existence proof it's redundant: vanilla OCaml's minor heap is never zeroed
+— it bump-allocates into uninitialized young memory, relying on "no GC between caml_alloc and field-fill".
+Removing it (the 0.32-ocaml fork's no_zero_alloc) is SAFE for STW plans: the scanner is header-driven (header
+always written), native Ialloc polls before the field stores with no safepoint between, no-scan tags
+(String/Bytes/Double/Custom) read zero fields anyway. Load-bearing case: Closure_tag (scanner reads field 1
+closinfo for start_env; OCaml already forbids a GC before closinfo is set — issue #11482). Measured recovery:
+spectralnorm +21.9%, alloc/mutate/binarytrees +2–10%, nbody +0.0% (compute control), GC count/time/copies
+identical — a pure mutator win. The subtlety (→ RQ9): a concurrent marker can observe the
+header-written/fields-unwritten window; with zeroing it reads as safe immediates, without it as garbage
+pointers — so no-zero is conservatively gated OFF for ConcurrentImmix today, though the allocate-black argument
+(the marker never traces a newly-allocated black object's fields) suggests it is likely safe there too. Which
+of init-before-publish / the safepoint property / allocate-black carries the proof differs STW-vs-concurrent —
+that is the instructive point.
+
+---
+
+## Q11. Does the GenImmix default clear weak references / ephemerons too early? — **OPEN (GH#5; fix in progress)**
+
+Yes — flipping the default to GenImmix surfaced a real regression: weak-ephe-final/weaklifetime.ml (native +
+bytecode) asserts a weak is CLEARED while its block is still reachable. Root cause: process_weak_refs DOES run
+on nursery GCs, but the clear-vs-keep predicate is ObjectReference::is_reachable() → (ImmixSpace doesn't
+override SFT::is_reachable) → is_live → is_marked() against a mark_state advanced ONLY on full GCs. An object
+freshly promoted to mature during this very minor GC has no current mark bit → is_reachable()==false → its
+still-held weak is wrongly cleared. MMTK_WEAK_REFS=0 makes it worse (6→9; never-clear breaks the positive-clear
+asserts). Fix: make the predicate generational-aware — on a nursery GC treat any non-nursery-resident referent
+as live, clear only dead nursery objects (stock OCaml's minor rule); needs a small public shim to the
+0.32-ocaml mmtk-core fork. Full GCs unaffected (Immix byte-identical, preserves 10/14). A multi-domain
+orphan-finaliser handover sub-bug (finaliser_handover.ml, bytecode) is tracked alongside. Affects
+Weak/Ephemeron/Gc.finalise users on the default plan until fixed.

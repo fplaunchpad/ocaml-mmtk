@@ -57,7 +57,7 @@ sufficient: `cargo … --print native-static-libs` reports `-lobjc -framework IO
 
 **Merge-readiness.** The link mechanism needs no source change, so a future fresh configure on macOS Just
 Works. The only committed deltas are doc updates (README/ROADMAP/this NOTES) reflecting the now-verified state.
-Left on `fix/macos-native-link` per request; not merged to `5.5+mmtk`.
+Merged to `5.5+mmtk` (2026-06-24) as part of the doc consolidation.
 
 ---
 
@@ -202,10 +202,12 @@ and it points at a concrete, publishable lever (see RQ8).
    The driver is **boxed floats**, not the float arrays (~0.5 MB total): the build is **non-flambda**, so
    `eval_A` isn't inlined and returns a 2-word boxed float — 360 M boxes × 2 words = 720 M words (matches
    `Gc.stat`). The 23 GCs are **allocation-volume-driven** (5.76 GB ÷ 256 MB), NOT a poll storm: `caml_call_gc`
-   = 0.29% of cycles, total GC time ~106 ms (<3% of wall). **Benchmark-fidelity caveat:** a *flambda* build
-   would unbox these floats and likely erase most of the allocation — so spectralnorm is allocation-heavy
-   partly as a non-flambda artifact. Measure both flambda and non-flambda (Sandmark does); the structural
-   finding below holds for any allocation-heavy OCaml regardless.
+   = 0.29% of cycles, total GC time ~106 ms (<3% of wall). **Not a confound to "fix" with flambda:** the
+   boxed-float allocation here is just normal non-flambda codegen — and non-flambda *is* the real-world config
+   we compare against (vanilla 5.5.0 is non-flambda; upstream flambda1 is mostly useless and flambda2 hasn't
+   landed). The comparison is non-flambda-vs-non-flambda, so spectralnorm's allocation volume is the workload
+   as built, not an artifact to measure away; the structural finding below holds for any allocation-heavy
+   OCaml regardless.
 
 2. **Plan sweep @256MB** (ratio vs vanilla 2.165 s): GenImmix **1.60×** = GenCopy 1.60× < SemiSpace 1.65× <
    ConcurrentImmix 1.68× < StickyImmix 1.71× < Immix 1.74×. **Generational helps but does not close it** —
