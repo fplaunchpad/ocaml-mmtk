@@ -17,8 +17,9 @@ there**), [`fork-handoff.md`](fork-handoff.md) (original rationale).
 [`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 from crates.io (not vendored).
 MMTk is **always-on and the only collector** — no opt-out; the stock minor *and*
 major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix`).
-Native code uses TLAB nursery-aliasing onto an MMTk Immix block, so it requires an
-**Immix-family** plan (`Immix`/`StickyImmix`); bytecode runs under any plan. Run
+Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it requires a
+plan whose Default allocator is a bump/Immix region (the seven:
+`Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (default 1024, fixed heap), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
@@ -38,10 +39,10 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix`), single- and multi-domain (`Domain.spawn` clean); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | **Weak arrays, ephemerons, finalisers** — `process_weak_refs` on by default (`MMTK_WEAK_REFS=0` opts out to the memory-safe never-clear interim). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, custom-block finalisers (incl. unmarshalled blocks), cross-domain orphaned-finaliser adoption. `pr3612`+`pr5233` pass. Bar #11 (resurrection ordering + orphaned ephemerons). | 🟢 done (default-on) |
 | M7 | **Pass the OCaml testsuite** — full bytecode suite ~1450/1547 pass under Immix/StickyImmix (`setarch -R`, per-test timeout). Non-pass are known-unsupported (statmemprof, runtime-events, `Gc.stat`-pacing) or the bug #3b intermittent multidomain hang — none are MMTk correctness diffs (output byte-identical to stock). | 🟢 done |
-| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First baseline: MMTk ~1.4–1.8× slower & more memory on a GC-heavy native bench (`gcbench`); structural (fixed heap, non-gen Immix re-traces the live set). Levers + native bump-pointer plans below. | 🟡 **open milestone** |
+| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. | 🟡 **open milestone** |
 | M9 | **MMTk-only: excise the stock GC** — always-on; stock minor + major GC deleted; `shared_heap.c`/`.h` deleted (−1665 lines, live colour-machinery relocated to `major_gc.{c,h}`); per-domain minor-heap arena removed; `Gc.stat` reimplemented on MMTk stats; `Is_young` reservation retired. `ocaml-mmtk` is a single-GC runtime. **Complete** bar #11 (weak-clear semantics) + the flagged `memprof.c` colour read. Stage/bug depth: `gc/mmtk/NOTES.md`. | 🟢 done |
 | — | Parallel collection: verified correct; marking scales ~8.4× on 16 threads (parallel-friendly heaps) | ✅ |
-| — | **GC plans:** 9 wired (bytecode), 2 deferred — see the GC plans table below | 🟢 |
+| — | **GC plans:** 10 wired (bytecode), 1 deferred (Compressor) — see the GC plans table below | 🟢 |
 
 ---
 
@@ -94,10 +95,10 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    the copy-nursery `BumpPointer` TLAB aliasing; the anticipated "lots of issues" didn't
    materialise because the moving-root fixup is already general (no minor-vs-major root path —
    reused from the major/defrag path), so it was a 2-file change. **GenImmix is the
-   stock-faithful generational native default.** → Shipped / NOTES (2026-06-23).
+   stock-faithful generational default.** → Shipped / NOTES (2026-06-23).
    **`SemiSpace` + `NoGC` native: DONE (2026-06-23)** — they already worked via the `BumpPointer`
    generalization (their Default allocator is a bump pointer); `SemiSpace` is `sanity`-clean (0 Invalid,
-   3M+ objects copied). The native set is now **6**: Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/NoGC.
+   3M+ objects copied). The native set is now **7**: Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/NoGC/ConcurrentImmix.
    **`MarkCompact` native: INFEASIBLE via TLAB aliasing (confirmed empirically by two agents).** Although
    it bump-allocates internally, it needs per-object bookkeeping the inlined *gapless* TLAB bump cannot
    produce — a **reserved header word before every object** (its Lisp-2 forwarding slot) and a
@@ -158,6 +159,38 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    + the sanity-build-only ~10 MB deadlock (`rr`). → RESEARCH_QUESTIONS RQ1;
    NOTES (2026-06-23).
 
+### Research & measurement workstreams (M8 / RQ-driven)
+
+The active research/measurement threads behind the M8 milestone — the index; depth in `gc/mmtk/NOTES.md`,
+`PERFORMANCE.md`, and `RESEARCH_QUESTIONS.md` (RQ-numbers below).
+
+- **Benchmark vehicles (the M8 measurement plumbing).**
+  - **`ocaml-bench/macro-benches`** — the authoritative DaCapo-style cross-runtime *macro* suite (±flambda),
+    driven via **`running-ng`** — adopted as the M8 measurement vehicle (rather than building our own harness).
+    The headline throughput/RSS campaign runs here. (See `PERFORMANCE.md` §1/§3.)
+  - **Quick GC-decision bench panel** (on the `benchmarks` orphan branch, `quick/`; ~5 min/variant; sequential
+    + parallel) — the **fast inner-loop complement** to the macro suite and the **no-zero (RQ8) A/B vehicle**.
+- **RQ8 — no-zero allocation (CONFIRMED, ~15–22% on alloc-bound code).** MMTk's eager zero-fill is redundant
+  for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22% (spectralnorm +21.9%) with GC
+  count/time/copies unchanged — a pure mutator win, SAFE on STW plans. Implemented on the **`0.32-ocaml`
+  mmtk-core fork** (a `no_zero_alloc` feature); **NOT yet on mainline** — landing default-on needs a runtime
+  plan-gate (auto-off for ConcurrentImmix). → RESEARCH_QUESTIONS RQ8; FAQ Q10.
+- **GH#5 — generational-minor weak/ephemeron clear-too-early.** Flipping the default to GenImmix surfaced a
+  real regression: a still-reachable weak/ephemeron is wrongly cleared on a nursery GC (a freshly-promoted
+  referent has no current mark bit). **OPEN; fix in progress on the fork.** Full GCs unaffected; Immix
+  byte-identical. → FAQ Q11; GitHub #5.
+- **RQ7 — `GenConcurrentImmix` hybrid (flagship research direction).** The faithful MMTk realization of
+  OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
+  (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
+  incremental mature is the open mmtk-core-fork work. → RESEARCH_QUESTIONS RQ7.
+- **Scalability gap (open M8 work).** No multicore speedup-vs-cores data: the parallel/multidomain
+  macro-benches are disabled, so there is no throughput-vs-domains curve. Re-enable them (or stand up the
+  quick-panel/Sandmark-style scaling harness — task #36). Micro-benches already show ~2× on parallel
+  alloc-heavy. → PERFORMANCE.md §1/§6; GitHub issue.
+- **macOS native-link gap (known item).** Native compiles on Darwin/arm64 but the MMTk staticlib isn't on the
+  native user-program link line (`mmtk_ocaml_*` undefined at link). Bytecode macOS is fine; Linux native is
+  fine. Tracked as a known gap. → GitHub issue; NOTES 2026-06-23.
+
 ### Shipped (done — one line each; depth in NOTES)
 
 - **bug #2** — native unmarshalling allocated off-heap (intern path was `#ifndef NATIVE_CODE`); un-guarded so native interns via MMTk. (CI ocamldoc SIGSEGV resolved; manpage repro 0/12.)
@@ -173,8 +206,8 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 - **#8 Is_young reservation retired** — `Is_young` always-false under TLAB; folded to a constant; reservation + STW machinery removed; header-colour audit (no live liveness read; `memprof.c:1558` flagged).
 - **caml_mmtk_enabled removed** — ~35 dual-path sites collapsed to unconditional MMTk (153 lines).
 - **shared_heap.c / .h deleted** — −1665 lines; colour-machinery/`caml_atom`/`caml_compactions_count` relocated to `major_gc.{c,h}`; `mmtk.c` link anchor keeps `roots.o` (`caml_do_roots`) linking.
-- **#15 — 9 plans wired (bytecode)** — `SemiSpace`/`GenCopy`/`MarkCompact`/`PageProtect` added behind the generic forwarding-spec gate; CLBG byte-identical.
-- **#16 — native GenImmix + GenCopy** — generalized the TLAB refill to alias the copy-nursery `BumpPointer` (not just an in-place Immix block); the moving-root fixup was reused from the major/defrag path (no minor-vs-major root path → 2-file change). GenImmix = the stock-faithful generational native default. old→young pointer A/B + `sanity` (3.05M copied, 0 Invalid) clean.
+- **#15 — non-Immix plans wired (bytecode)** — `SemiSpace`/`GenCopy`/`MarkCompact`/`PageProtect` added behind the generic forwarding-spec gate (taking the bytecode total to 9 at the time; ConcurrentImmix later via #8 → 10 wired, 1 deferred); CLBG byte-identical.
+- **#16 — native GenImmix + GenCopy** — generalized the TLAB refill to alias the copy-nursery `BumpPointer` (not just an in-place Immix block); the moving-root fixup was reused from the major/defrag path (no minor-vs-major root path → 2-file change). GenImmix = the stock-faithful generational default. old→young pointer A/B + `sanity` (3.05M copied, 0 Invalid) clean.
 - **linux-O0 debug runtime** — stale stock-GC asserts removed; a real domain-terminate lock-drop race fixed (`caml_mmtk_park_terminating` parks without dropping `domain_lock`).
 - **opam relocatability** — `libmmtk_ocaml.a` referenced as `-lmmtk_ocaml` (symlinked into `stdlib/`, installed into `$(LIBDIR)`); DWARF build-root stripped via `--remap-path-prefix`. `test-in-prefix` exit 0.
 - **CI hygiene** — x86-64 Build green; CLBG cross-plan correctness gate green; all-plans testsuite workflow (deliberately red — surfaces per-plan breakage).
@@ -188,7 +221,7 @@ The binding is *moving-ready* (forwarding-pointer spec, pinning bit, updatable s
 straight to mmtk-core (no hardcoded allowlist); the forwarding-bits side-metadata spec
 is registered **iff** `moves_objects && !needs_forward_after_liveness`. So wiring a new
 bump-pointer plan is mostly validation, not trait code. mmtk-core 0.32 offers 11 plans;
-**9 are wired**, 2 deferred. The `Testsuite (all GC plans)` CI workflow
+**10 are wired**, 1 deferred (Compressor). The `Testsuite (all GC plans)` CI workflow
 (`.github/workflows/testsuite-plans.yml`) runs the suite under all 11 to surface
 per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 
@@ -206,9 +239,9 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
 | `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (**byte + native**) — SATB; `lazy`-clean; **Q3 fixed** |
 
-**Native** runs **6 plans** — `Immix`/`StickyImmix` (in-place Immix-block TLAB), `GenImmix`/`GenCopy`
-(copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) — i.e. every plan
-whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root fixup is reused
+**Native** runs **7 plans** — `Immix`/`StickyImmix`/`ConcurrentImmix` (in-place Immix-block TLAB),
+`GenImmix`/`GenCopy` (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) —
+i.e. every plan whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root fixup is reused
 from the major path. `MarkSweep` (free-list), `MarkCompact` (per-object VO bit + reserved Lisp-2 header
 word the gapless TLAB can't produce), and `PageProtect` abort at startup on native (bytecode-only).
 `GenImmix` is the stock-faithful generational plan and the **default** (it replaced Immix as default — OCaml's
