@@ -10,6 +10,7 @@
 //! hand the batch to MMTk via `create_process_roots_work`.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use mmtk::memory_manager;
@@ -25,7 +26,7 @@ use mmtk_ocaml_common::scanning::{continuation_stack, scan_ocaml_object};
 use mmtk_ocaml_common::slot::FieldSlot;
 
 use crate::active_plan::domain_addrs;
-use crate::OCamlVM;
+use crate::{mmtk, OCamlVM};
 
 // OCaml runtime entry points (resolved when the binding's staticlib is linked
 // into the bytecode runtime). `caml_do_roots` and `caml_scan_global_roots` are
@@ -125,13 +126,44 @@ fn managed_obj(v: usize) -> Option<ObjectReference> {
     }
 }
 
+/// GH#5: is the in-progress collection a nursery (minor) GC? Snapshotted once at
+/// the top of `process_weak_refs` (the context-free `ephe_is_reachable` callback
+/// has no way to receive it otherwise), and consulted by that callback. It is only
+/// ever read inside a single GC's `process_weak_refs` invocation, between the store
+/// at the top of the pass and the callbacks that run synchronously below it.
+static CURRENT_GC_IS_NURSERY: AtomicBool = AtomicBool::new(false);
+
+/// GH#5 nursery-aware liveness for the weak / ephemeron / finaliser passes.
+///
+/// On a **nursery (minor) GC**, mature space is NOT re-marked, so a referent that is
+/// mature — or was just promoted out of the nursery this cycle — has no current mark
+/// bit and `is_reachable()` wrongly reports it dead, which would clear a still-live
+/// weak/ephemeron key or finalise a still-live value. Mirroring stock OCaml's minor
+/// collection (which only clears `Is_young` dead keys) and mmtk-core's documented
+/// nursery-safe `is_reachable` contract, we treat any **non-nursery-resident**
+/// referent as LIVE during a nursery GC, and only let the exact query decide for
+/// nursery-resident objects. On a **full GC** (the flag is false) this is the exact
+/// `is_reachable()` query, byte-for-byte the previous behaviour — so the
+/// non-generational (Immix) path is unchanged.
+#[inline]
+fn ephe_is_live(o: ObjectReference) -> bool {
+    if CURRENT_GC_IS_NURSERY.load(Ordering::Relaxed)
+        && !memory_manager::is_object_in_nursery(mmtk(), o)
+    {
+        // Mature / freshly-promoted during a nursery GC: conservatively live.
+        return true;
+    }
+    o.is_reachable()
+}
+
 /// Weak-processing callbacks handed to the C ephemeron walk (runtime/mmtk.c).
 /// `is_reachable`/`forward` are context-free; `retain` carries the GC worker's
 /// tracer through `ctx` (a `*mut &mut dyn FnMut(usize) -> usize`).
 extern "C" fn ephe_is_reachable(v: usize) -> i32 {
     // Foreign / immediate values are never collected → always "reachable" (1), so
-    // the walk never clears a key/data that points at one.
-    managed_obj(v).map_or(1, |o| o.is_reachable() as i32)
+    // the walk never clears a key/data that points at one. Managed objects go
+    // through the GH#5 nursery-aware predicate (exact `is_reachable` on a full GC).
+    managed_obj(v).map_or(1, |o| ephe_is_live(o) as i32)
 }
 
 extern "C" fn ephe_forward(v: usize) -> usize {
@@ -317,6 +349,15 @@ impl Scanning<OCamlVM> for VMScanning {
         if !weak_refs_enabled() {
             return false;
         }
+        // GH#5: record whether THIS collection is a nursery (minor) GC, once, before
+        // any liveness callback runs. The context-free `ephe_is_reachable` callback
+        // consults it (via `ephe_is_live`) to treat mature / freshly-promoted
+        // referents as live during a nursery GC instead of mis-clearing them. On a
+        // full GC this is false and the exact `is_reachable` query is used unchanged.
+        CURRENT_GC_IS_NURSERY.store(
+            memory_manager::current_gc_is_nursery(mmtk()),
+            Ordering::Relaxed,
+        );
         let domains = domain_addrs();
 
         // One retention round, with access to the tracer for resurrecting objects.
