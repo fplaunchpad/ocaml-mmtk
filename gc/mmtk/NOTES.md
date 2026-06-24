@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## bug #3c FIXED (cross-STW bracket); #52 worker-scaling ABANDONED; the real finding — MMTk-GenImmix SERIALIZES multi-domain execution
+
+*2026-06-24*
+
+**bug #3c — FIXED & landed.** `runtime/minor_gc.c`: bracket the body of `caml_empty_minor_heaps_once`
+with `caml_mmtk_enter_blocking((uintnat)Caml_state)` … `caml_mmtk_become_running(...)`, so a domain
+leading/joining OCaml's all-domains minor STW is marked STOPPED in MMTk's view for that window —
+`stop_all_mutators` no longer awaits it, so the two STW protocols cannot capture each other's domains.
+The domain stays a registered mutator (roots still scanned); both primitives are idempotent + no-ops
+without an MMTk mutator. Validated on church (Immix/512 MB/threads=8, 20 s kill): cross-STW hang
+**52.5% → ~1%** (≈78×), `sanity` 0 invalid refs, regression checksum stable. Residual ~1% is a rarer
+interleaving (concurrent multi-domain terminate; needs `rr`). bug #57 (`active_plan.rs:59`) is now the
+dominant threads=8 failure — separate, pre-existing. Topic branch `fix/bug3c-cross-stw` (`7d66a6172f`),
+merged to `5.5+mmtk`.
+
+**#52 dynamic GC-worker scaling — ABANDONED (premise disproved).** Hypothesis: par_binarytrees
+anti-scales because the default 1 GC worker serialises the parallel major GC. **Disproved by
+measurement** (M4 Pro, par_binarytrees, GenImmix dynamic heap, wall s; vanilla = non-flambda 5.5.0):
+
+depth 18: vanilla d1→d8 = 0.30→**0.084 (3.6× speedup)**; fork T=1 = 0.37→0.57 (anti); fork T=8 = 0.40→0.75 (anti).
+depth 21 (with CPU%):
+
+| domains | vanilla | fork T=1 | fork T=8 |
+|---|---|---|---|
+| 1 | 3.05s (99%) | 3.91s (100%) | 3.84s (240%) |
+| 2 | 1.53s (186%) | 4.57s (114%) | 4.09s (319%) |
+| 4 | 1.08s (266%) | 5.69s (120%) | 4.76s (393%) |
+| 8 | **0.85s (419%)** | 8.40s (126%) | 5.90s (649%) |
+
+The benchmark **divides** a fixed `niter` across domains (it is *supposed* to scale — vanilla does, 3.6×).
+The fork **anti-scales at BOTH T=1 and T=8** (wall *rises* with domains). Worker count is a third-order
+knob: T=8 vs T=1 trades CPU for a little pause latency (d8 5.9 vs 8.4 s) but does not change the
+direction. Decisive signal = **mutator-core utilisation**: at d8 vanilla runs at ~419% CPU (≈4.2 cores
+in parallel); the fork at T=1 sits at **126%** (~1.26 cores) — *the domains never run concurrently*. At
+T=8 the high CPU% is GC **workers** churning during STW, not mutators: it burns **38 CPU-s** to vanilla's
+3.5 (11× waste) and still anti-scales. fork d1 = 1.28× vanilla d1 = the known ~1.27× sequential
+per-collection cost.
+
+**Root cause = STW-everything, not the thread pool.** Every minor collection stops *all* domains, and
+the benchmark's ~64 `Domain.spawn`/`join` each force a full MMTk GC on terminate; the domains spend
+nearly all their time stopped/coordinating → ~1 core of real progress + super-linearly growing total
+work (fork total CPU at d8 grows to 10.7 s at T=1). `MMTK_THREADS=N` already serves anyone wanting more
+workers. #52's deferred-spawn cut also deadlocked with ≥2 active workers (one livelocks in
+`poll_schedulable_work` — it preallocates `max` slots for pool sizing but activates only a prefix,
+leaving phantom stealers in the poll/steal path). Parked on `feat/dynamic-worker-scaling`
+(super `265b1fc784`, submodule `b73e7fa472`) with the full diagnosis; not worth fixing.
+
+**THE research question this surfaces:** MMTk-GenImmix *eliminates OCaml's multi-domain parallel
+scalability* — it turns a 3.6× vanilla speedup into a ~2× slowdown — because of the GC's STW design
+(all-domains STW minor GC + full-GC-per-terminate), independent of GC worker count. The levers worth
+chasing: per-domain-local / concurrent minor collection (avoid the all-domains rendezvous) and a cheap
+domain terminate (no full GC). Plus the single-thread per-collection cost (the 1.27× residual, #G1).
+
+---
+
 ## bug #3c — CORRECTED: a cross-STW rendezvous deadlock (OCaml minor STW × MMTk STW), not an orphaned flag
 
 *2026-06-24*

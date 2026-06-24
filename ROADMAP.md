@@ -54,14 +54,16 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 Correctness before performance; dependencies noted. **Depth for every item is in
 `gc/mmtk/NOTES.md`** (dated, newest-first) — this list is the index, not the detail.
 
-1. **bug #3c — rare burn-pattern hang (after the bug #3b STW rearchitecture).** A rare
-   hang (~2/30 bytecode burn; ~0–1/20 native burn; `dls`/stress are 30/30) remains
-   **only** in the `burn` pattern (3 driver domains hammering `Gc.minor`/`Gc.major` +
-   25-way spawn bursts) — a *separate* race from bug #3b (now fixed): a GC during the
-   tight `Gc.minor` OCaml-minor-STW loop and/or during `caml_mmtk_refill_tlab` at domain
-   init (child holds `all_domains_lock`, no backup thread). Fix: route `Gc.minor` to MMTk
-   so it doesn't run OCaml's own minor STW, and/or suppress collection around the
-   init-time refill. → NOTES `bug #3b` residual (2026-06-23).
+1. **bug #3c — cross-STW rendezvous deadlock — FIXED** (`runtime/minor_gc.c`, merged
+   `7d66a6172f`). Re-diagnosed (not the burn-pattern / `Gc.minor` race first suspected):
+   a terminating domain leads OCaml's all-domains minor STW while still in MMTk's RUNNING
+   set, so MMTk's `stop_all_mutators` and OCaml's minor STW capture each other's domains.
+   Fix: bracket `caml_empty_minor_heaps_once` with `caml_mmtk_enter_blocking` /
+   `caml_mmtk_become_running` — the domain is STOPPED in MMTk's view while it leads/joins
+   the minor STW (still a registered mutator, roots still scanned). church gate (Immix/512/
+   threads=8): hang **52.5% → ~1%**, `sanity` clean. **Residual:** ~1% rarer interleaving
+   (concurrent multi-domain terminate; needs `rr`) + the separate **bug #57**
+   (`active_plan.rs:59` "cannot trace object") now dominate at threads=8. → NOTES (2026-06-24).
 
 2. **#11 — weak-ref resurrection ordering + retire `MMTK_WEAK_REFS`.** Fix
    `process_weak_refs` resurrection ordering (`pr5233` — a value resurrected only for
