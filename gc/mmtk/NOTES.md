@@ -146,6 +146,25 @@ the `gc/mmtk-core` fork (`0.32-ocaml`)**, alongside the RQ8 no-zero work. Full G
 byte-identical → preserves 10/14). `finaliser_handover.ml` is partly fixed by this; its residual is a
 multi-domain orphan-finaliser handover sub-bug, tracked separately. Design: `~/gh5-weakclear-design.md`.
 
+**REFRAMED (2026-06-24, by direct instrumentation — the hypothesis above is WRONG).** The generational-aware
+liveness shim was implemented + built + sanity-clean (Immix byte-identical, 10/14 preserved) — but it **did not
+move the gate** (weak-ephe-final failed/14 unchanged pre→post: Immix 4, StickyImmix 5, GenImmix 6, GenCopy 6).
+Instrumentation shows the hypothesized **clear-too-early** (line 52, freshly-promoted referent) **does not
+reproduce, even on pre-fix code**. The actual failure is **clear-too-LATE** (`weaklifetime.ml:53`): at the test
+heap the generational plans run **zero full GCs** (instrumented 4/4 nursery), so mature-*dead* weaks are never
+cleared; and **`Gc.major_collections` counts every GC including nursery**, so the test's `n+2`-major window is
+unsatisfiable. The same binary **passes at a 16 MB heap** (mature fills → a full GC runs). So **GH#5 is a
+GC-scheduling + `Gc.major_collections`-accounting problem, not a weak-liveness-query bug.** The
+generational-aware shim is kept as a **correct defensive change** (no regression; sound under a real
+nursery/mature liveness split) but is **not** what the test needs. **Real fix (separate, perf-sensitive):**
+(1) schedule a **full GC under mature-space pressure** on generational plans (so mature-dead weaks/objects are
+reclaimed without waiting for OOM); (2) fix **`Gc.major_collections`** to count only full collections, not
+nursery GCs (a Gc.stat accounting bug in the MMTk reimpl). `finaliser_handover.ml` SIGSEGV under GenImmix is
+**pre-existing** (reproduces pre-fix) — the separate multi-domain orphan-finaliser handover sub-bug. CI
+corroborates the *pattern*: weaklifetime fails on exactly the plans that don't run a full GC every cycle
+(StickyImmix/GenImmix/NoGC/GenCopy/ConcurrentImmix), passes Immix+SemiSpace. Code (not yet on mainline): branch
+`rq8-runtime-gate-gh5-weakclear` (`2a48fb963`), fork `0.32-ocaml` (`6f3c4afc5b`). Writeup: `~/fork-impl-results.md`.
+
 **Verdict:** flip is throughput-safe and the common path is clean, but it carries a confirmed weak/finaliser
 soundness regression on the default (affects `Weak`/`Ephemeron`/`Gc.finalise` users). **Decision pending:**
 keep GenImmix default + fix (GH#5), vs revert to Immix until fixed. Environment caveat: turing was not fully
