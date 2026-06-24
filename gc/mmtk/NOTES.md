@@ -38,11 +38,21 @@ regressions are **flip-introduced** (pass Immix, fail GenImmix; reconfirmed both
 - **`finaliser_handover.ml`** (bytecode only): multi-domain `Gc.finalise` handover timing in the interpreter.
 
 (Four other `weak-ephe-final` failures are **pre-existing** — fail under Immix too.) **`MMTK_WEAK_REFS=0` does
-NOT help — it makes it worse (6→9)**: never-clear breaks the positive-clear assertions. Root cause: generational
-**minor** GCs don't run the full `process_weak_refs` reachability a full GC does (flagged at `mmtk.c:124`). This
-is a **pre-existing GenImmix bug now on the default path**, not new code. Fix: run weak/ephemeron/finalise
-processing (or a nursery remembered-set of such entries) on minor collections — the prerequisite to declaring
-the flip fully validated.
+NOT help — it makes it worse (6→9)**: never-clear breaks the positive-clear assertions. **Root cause (scoped,
+GH#5 comment) — refined:** `process_weak_refs` (scanning.rs:313) *does* run on nursery GCs; the bug is the
+liveness query. The clear-vs-keep decision is `ObjectReference::is_reachable()` (`ephe_is_reachable`,
+scanning.rs:131), but `ImmixSpace` doesn't override `SFT::is_reachable` → it falls through to
+`is_live → is_marked()` against a `mark_state` **advanced only on full GCs**. So steady-state mature objects
+(marked at the last full GC) report live correctly, but an object **freshly promoted to mature during this very
+minor GC** has no current mark bit → `is_reachable()==false` → its still-held weak is cleared (weaklifetime.ml:
+young block stored strongly into a mature slot, promoted on the next nursery GC, weak then mis-cleared). A
+pre-existing generational bug now on the default path, not new code. **Fix:** make the predicate
+generational-aware — on a nursery GC, treat any **non-nursery-resident** referent as live, clearing only **dead
+nursery** objects (stock OCaml's minor rule + mmtk-core's intended `is_reachable` contract). The needed
+`is_current_gc_nursery()`/`is_object_in_nursery()` are module-sealed in mmtk-core → add a small **public shim to
+the `gc/mmtk-core` fork (`0.32-ocaml`)**, alongside the RQ8 no-zero work. Full GCs unchanged (gate false → Immix
+byte-identical → preserves 10/14). `finaliser_handover.ml` is partly fixed by this; its residual is a
+multi-domain orphan-finaliser handover sub-bug, tracked separately. Design: `~/gh5-weakclear-design.md`.
 
 **Verdict:** flip is throughput-safe and the common path is clean, but it carries a confirmed weak/finaliser
 soundness regression on the default (affects `Weak`/`Ephemeron`/`Gc.finalise` users). **Decision pending:**
