@@ -264,5 +264,8 @@ still-held weak is wrongly cleared. MMTK_WEAK_REFS=0 makes it worse (6→9; neve
 asserts). Fix: make the predicate generational-aware — on a nursery GC treat any non-nursery-resident referent
 as live, clear only dead nursery objects (stock OCaml's minor rule); needs a small public shim to the
 0.32-ocaml mmtk-core fork. Full GCs unaffected (Immix byte-identical, preserves 10/14). A multi-domain
-orphan-finaliser handover sub-bug (finaliser_handover.ml, bytecode) is tracked alongside. Affects
-Weak/Ephemeron/Gc.finalise users on the default plan until fixed.
+orphan-finaliser handover SIGSEGV (finaliser_handover.ml) — a use-after-free of un-rooted orphaned
+finaliser values — is **FIXED** (`a1971a465d`: root `orph_structs` every GC, 3/3 crash → 0/62). A
+low-frequency adoption-routing residual remains (some adopted finalisers get queued on one domain and never
+drain — under-execution at small heaps, not a crash). The weak-clear (GH#5) item above is the remaining
+default-plan tail for Weak/Ephemeron users.
