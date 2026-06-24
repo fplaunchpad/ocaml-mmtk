@@ -142,6 +142,15 @@ void caml_mmtk_init(void)
                            || strcmp(plan, "GenCopy") == 0);
   caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0);
 
+  /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill for stop-the-world plans
+     and keep it ON for the concurrent plan. OCaml fully initializes every block
+     before the next GC-observable safepoint, so eager zeroing is a redundant
+     double-write (~20% of cycles on alloc-heavy code) for a STW collector. A
+     CONCURRENT marker can observe the header-written / fields-unwritten window, so
+     zeroing must stay on there. Set before any allocation (this runs at init,
+     before any domain/mutator is bound). zeroed == caml_mmtk_concurrent. */
+  mmtk_ocaml_set_alloc_zeroed(caml_mmtk_concurrent);
+
   {
     /* On by default; MMTK_WEAK_REFS=0 opts out to the conservative scheme. */
     const char *wr = getenv("MMTK_WEAK_REFS");
