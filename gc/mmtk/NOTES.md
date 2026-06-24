@@ -5,6 +5,34 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#10 FIXED — bundle the MMTk staticlib into the runtime archives (drop the bare `-lmmtk_ocaml` from c_libraries)
+
+*2026-06-24*
+
+External report (@udesou, found building the macro-benches): the macOS-native-link relocatability fix had put a
+**bare `-lmmtk_ocaml` (no `-L`)** into `ocamlc -config`'s `{bytecomp,native}_c_libraries`. Third-party
+`dune-configurator` feature-probes link a test program via bare `cc` (without OCaml's `-L<stdlib>`), so `ld`
+couldn't resolve `-lmmtk_ocaml` → the probe failed → the lib mis-detected the feature (lwt "requires pthreads",
+ctypes "'bool' cannot be defined", owl "cblas not found"). Blocked building real libraries + the macro-benches
+campaign.
+
+**Fix** (branch `fix/mmtk-clibs-probe`, merged `35bf263b3a`): **bundle `libmmtk_ocaml.a`'s objects directly into
+the runtime static archives** (`lib{asm,caml}run*.a`) the compiler always links — so the `mmtk_ocaml_*` glue
+resolves in every native + `-custom` program **without** a bare `-lmmtk_ocaml` — and **drop the bare
+`-lmmtk_ocaml` from `mmtk_c_libraries`** (keep the per-OS system libs). Per-object bundling (a staging dir
+`runtime/mmtk_objs/`, not `ld -r`) so the linker still dead-strips → no per-binary bloat. `MMTK_LINK` drops
+`$(MMTK_LIB)` (objects now in the archives → no duplicate-symbol). This **supersedes** the `-lmmtk_ocaml`
+relocatability mechanism the macOS-native entry below describes. Tradeoff: each runtime archive grows to
+~135 MB (~1.1 GB build tree); the separate 131 MB `libmmtk_ocaml.a` install is dropped.
+
+**Verified both platforms:** Linux (turing) — config has 0 `-lmmtk_ocaml`; the dune-configurator probe + lwt's
+pthread probe PASS (control with the old config FAILS); native + `-custom` link+run. macOS (arm64, fresh shallow
+clone, `world.opt` 111 s) — the `ar`/`ranlib` bundle step works, config clean, native links+runs, and the
+bare-cc probe with the Darwin `-framework` tokens PASSES (control FAILS). Residual (pre-existing, orthogonal):
+the in-tree `-custom` header-path gap; the shared-runtime `.dylib`/`-dynamiclib` undefined-symbol case.
+
+---
+
 ## macOS (arm64) native compile + link + run: VERIFIED — root cause was a stale configured tree, not a source gap
 
 *2026-06-24*
