@@ -21,7 +21,9 @@ Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it req
 plan whose Default allocator is a bump/Immix region (the seven:
 `Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
-**dynamic** MemBalancer heap `16 MiB..physical-RAM` — the old fixed-1 GB default used ~15× stock RSS), `MMTK_VERBOSE`;
+**space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
+clamped 16 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
+3.5× → 1.27× slower than stock), `MMTK_NURSERY` (default bounded 2–8 MiB), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
@@ -136,10 +138,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      runtime_events_tools` (perf/turbo already OK).
    - **Prereqs that don't exist yet:** a lifetime-dispersion (Gini) profiler (#P1) + a
      per-GC survival/mutation meter (#P2) — RQ2's workload fingerprint needs them.
-   - **Heap/nursery defaults + the MMTk minor-GC cost (2026-06-24, partly LANDED).** The
-     fixed-1 GB heap (→ ~15× stock RSS; binarytrees-18 589 MB vs 39 MB) is now a **dynamic
-     MemBalancer heap `16 MiB..RAM`** (landed `8777a22082`; the first-round small-min
-     regression did *not* reproduce). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**
+   - **Heap/nursery defaults + the MMTk minor-GC cost (2026-06-24, LANDED).** The fixed-1 GB
+     heap (→ ~15× stock RSS) became dynamic (`8777a22082`), then a **space-overhead heap**
+     (`70a709e179`): after each full GC `heap = live × 2.2` (stock's `Gc.space_overhead`), with a
+     bounded 2–8 MiB nursery. This *replaced* MemBalancer, whose sqrt rule under-provisioned
+     big-live-set programs — **binarytrees 3.5× → 1.27× slower than stock** (major-GC thrash
+     gone; the residual 1.27× is the per-collection copy cost, not the heap). RSS ≈ 4× live is
+     Immix *fragmentation* (a separate defrag lever). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**
      (~1.2 ms vs 0.3–0.4 ms/collection at a 2 MiB nursery) — every nursery collection goes
      through the full STW + GC-worker + work-packet machinery vs stock's inline on-mutator
      Cheney copy. Being profiled on turing to attribute the floor. The nursery should be an

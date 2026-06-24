@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Space-overhead heap trigger — replaces MemBalancer (binarytrees 3.5× → 1.27×)
+
+*2026-06-24*
+
+The dynamic default heap was MemBalancer (`DynamicHeapSize`), the OOPSLA'22 optimal-heap sizer:
+`heap = live + sqrt(live × alloc_rate/gc_rate / 0.2)`. Its headroom term is **sqrt(live)** — *sublinear*,
+so for a large live set the headroom is a small fraction of live → the heap settles ~1.1–1.3× live →
+major-GC thrash re-tracing the live set. binarytrees-20 was **3.5× slower than stock** under it (290 GCs,
+mostly major, 4.3 s of GC).
+
+**Fix (LANDED `70a709e179`; submodule `0fe660bb9c`).** New `GCTriggerSelector::SpaceOverheadSize(min,max,
+overhead_pct)` + `SpaceOverheadTrigger` in the `gc/mmtk-core` fork: after each **full** GC, `heap_limit =
+live × (1 + overhead/100)`, clamped `[min,max]`. Headroom is **linear** in live (stock OCaml's
+`Gc.space_overhead`), so it's always proportional to what's alive. Binding default (when `MMTK_HEAP_SIZE_MB`
+unset): `SpaceOverheadSize:16MiB,RAM,120` + a **bounded 2–8 MiB nursery** (the major heap is now sized
+separately, so the nursery must NOT be heap-proportional — a proportional nursery blew RSS to 362 MB–1.1 GB).
+
+**Two implementation traps, both fixed:** (1) recompute must be **gated on full-heap GC**
+(`gen.last_collection_full_heap()`) — a nursery GC's `get_reserved_pages()` is transiently inflated
+(un-released nursery + Immix fragmentation), and resizing on it overshoots (worse with smaller nurseries →
+more nursery GCs → RSS climbed 362→732→1153 MB). (2) the nursery must be **bounded absolute**, not
+proportional to the (now larger) heap.
+
+**Result (binarytrees-20, 1 GC thread, M4 Pro):** **1.27× slower than stock** (was 3.5×); 640 GCs / 1353 ms
+GC; panel goldens byte-identical; CLI tools stay ~26 MB RSS. The residual 1.27× is the per-collection copy
+cost (#G1 territory), heap-policy-independent. RSS ≈ 4× live (197 MB) is **Immix mature-space fragmentation**
+× the 1.2 overhead (lowering overhead to 60% barely helped RSS but cost throughput — 1.73×), so 120% is the
+right default; the RSS floor is a separate Immix-defrag lever. Overridable via `MMTK_GC_TRIGGER`/`MMTK_NURSERY`.
+
+---
+
 ## finaliser_handover UAF — FIXED (root orphaned finalisers every GC); + a separate adoption-routing residual
 
 *2026-06-24*

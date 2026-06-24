@@ -115,10 +115,12 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 - `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
   Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix.
-- `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; the default is a **dynamic** MemBalancer heap
-  `16 MiB..physical-RAM` so RSS tracks the live set like stock — the old fixed-1 GB default
-  used ~15× stock's footprint), `MMTK_NURSERY` (e.g. `Fixed:8388608` / `Bounded:2m,8m`;
-  default = mmtk's `ProportionalBounded 0.25..1.0` of the heap, floor 2 MiB), `MMTK_THREADS`
+- `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
+  full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 16 MiB..physical-RAM, so
+  RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set
+  programs — binarytrees was 3.5× slower; now 1.27×. Override via `MMTK_GC_TRIGGER`), `MMTK_NURSERY`
+  (e.g. `Fixed:8388608` / `Bounded:2m,8m`; default = bounded **2–8 MiB**, sized separately from the
+  major heap), `MMTK_THREADS`
   (GC worker count; **default 1** — was nproc, which made single-domain minor GC ~1.37× slower via futex
   park/wake contention; raise for parallel/multi-domain), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
   MMTk is the only collector — no opt-out; benchmark against stock via a separate vanilla
