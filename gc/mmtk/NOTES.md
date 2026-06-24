@@ -5,6 +5,42 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## RQ8 no-zero allocation: SAFE for STW plans, ~15–22% mutator recovery, GC unchanged — ready to land (needs a runtime plan-gate)
+
+*2026-06-24*
+
+Implemented + measured the no-zero allocation mode (mmtk-core fork `0.32-ocaml` `no_zero_alloc` feature gating
+the two alloc-time zeroing sites; binding forwards it; branch `rq8-nozero`). Build-glue: `Makefile.mmtk` gained
+an on-demand `git submodule update --init gc/mmtk-core` (commit `812ee0eb6`, rq8-nozero only).
+
+**Provably took** (disasm of `libmmtk_ocaml.a`): `acquire_recyclable_lines` 1→0 and
+`get_new_pages_and_initialize` 7→0 `memory::zero` calls; GC-time bzero untouched.
+
+**Correctness — SAFE (STW plans only):** sanity (full-heap re-trace) + no_zero @48 MB on
+binarytrees / alloc-churn / closure-stress × GenImmix/Immix/StickyImmix → **0 Invalid-ref, 9/9**; the
+load-bearing **closure self-compile** (`ocamlc parser.ml`) under sanity+no_zero → 0 Invalid-ref; CLBG
+byte-identical ON vs OFF vs golden **15/15**; quick-panel self-check 18/18. ConcurrentImmix never enabled
+(unsafe by design). GC count/time/objects-copied identical OFF vs ON — **the win is pure mutator time.**
+
+**Recovery (the quick panel was the decision vehicle):** spectralnorm **+21.9%** (CLBG; memset hotspot
+~19%→~1% of cycles); panel ON-vs-OFF per plan — alloc +2.4–6.1%, mutate +2.8–10.2%, binarytrees +2.1–4.9%,
+**nbody +0.0%** (compute control neutral — red-flag check passes); parallel scaling preserved (par_* ON-faster
+at every domain count). RQ8's hypothesis (eager-zero redundant for OCaml; ~15–20% on alloc-bound) **confirmed.**
+
+**Landing — one design point.** `no_zero` is a *compile-time* cargo feature, so a default-on build would also
+no-zero **ConcurrentImmix** (unsafe — RQ8's RED FLAG). Landing it default-on therefore needs a **runtime
+plan-gate**: skip alloc-zeroing only for STW Immix-family plans, retain it for ConcurrentImmix, so one binary
+is correct across all plans (the platform switches plans via `MMTK_PLAN`). That's the productionization step
+(a runtime "zero-on-alloc" flag set from the plan, threaded to the two sites) — to implement on the fork
+alongside GH#5.
+
+**Independent finding (follow-up, NOT no-zero):** the panel's large alloc sizes (40–64 M) are pathologically
+slow under MMTk — `alloc 40000000` = 2m43s; GenImmix copies ~13–19 M cells once the fixed heap fills
+(reproduces OFF). Worth a separate look at copy-nursery behaviour under extreme allocation + fixed heap.
+Writeup: `~/rq8-nozero-results.md` on turing.
+
+---
+
 ## GenImmix-default validated: throughput win over Immix, but a confirmed generational-minor weak-clear regression (GH#5)
 
 *2026-06-24*

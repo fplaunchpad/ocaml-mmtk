@@ -518,6 +518,14 @@ no-zero throughput with concurrent-mark latency needs an **init-publishing (zero
 allocation barrier**. Net: RQ8 is a clean win on the **default (GenImmix, STW) today**; the concurrent
 combination is a sharper sub-question that couples RQ8 ↔ RQ1 ↔ RQ7. Design: `~/rq8-nozero-design.md` on turing.
 
+**CONFIRMED (2026-06-24).** Implemented on the `0.32-ocaml` fork + measured. **SAFE on STW plans** (sanity 0
+invalid-ref incl. the load-bearing closure self-compile; CLBG byte-identical ON vs OFF 15/15; GC count/time/
+copies identical — pure mutator win). **Recovery materialized:** spectralnorm **+21.9%** (memset cycle-share
+~19%→~1%), alloc/mutate/binarytrees +2–10%, **nbody +0.0%** (compute control flat); parallel scaling preserved.
+So RQ8's core claim holds: **MMTk's eager zero-fill is redundant for OCaml and removing it recovers ~15–20% on
+allocation-bound code with zero pause impact** — the lever exists and is real. Landing default-on needs a
+runtime plan-gate (no-zero auto-off for ConcurrentImmix). Writeup: `~/rq8-nozero-results.md`.
+
 ---
 
 ## What each question needs from the platform
