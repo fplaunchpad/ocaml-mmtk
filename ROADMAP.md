@@ -20,7 +20,8 @@ major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix
 Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it requires a
 plan whose Default allocator is a bump/Immix region (the seven:
 `Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
-knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (default 1024, fixed heap), `MMTK_VERBOSE`;
+knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
+**dynamic** MemBalancer heap `16 MiB..physical-RAM` — the old fixed-1 GB default used ~15× stock RSS), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
@@ -135,9 +136,18 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      runtime_events_tools` (perf/turbo already OK).
    - **Prereqs that don't exist yet:** a lifetime-dispersion (Gini) profiler (#P1) + a
      per-GC survival/mutation meter (#P2) — RQ2's workload fingerprint needs them.
-   - Earlier first-round levers (heap sizing — small-min `DynamicHeapSize` *regressed*;
-     StickyImmix closes much of the gap; GC-thread-count `nproc` oversized). → full ranked
-     backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
+   - **Heap/nursery defaults + the MMTk minor-GC cost (2026-06-24, partly LANDED).** The
+     fixed-1 GB heap (→ ~15× stock RSS; binarytrees-18 589 MB vs 39 MB) is now a **dynamic
+     MemBalancer heap `16 MiB..RAM`** (landed `8777a22082`; the first-round small-min
+     regression did *not* reproduce). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**
+     (~1.2 ms vs 0.3–0.4 ms/collection at a 2 MiB nursery) — every nursery collection goes
+     through the full STW + GC-worker + work-packet machinery vs stock's inline on-mutator
+     Cheney copy. Being profiled on turing to attribute the floor. The nursery should be an
+     **adaptive survival-rate (~10%) controller with a per-GC-cost amortization floor** (not
+     heap-proportional, not a fixed cap) — future work, isolated as an opt-in *mode* (a
+     trigger/policy feature, not a new plan); keep a frozen baseline config. → NOTES 2026-06-24.
+   - Earlier first-round levers (StickyImmix closes much of the gap; GC-thread-count `nproc`
+     oversized). → full ranked backlog in `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
 
 8. **`ConcurrentImmix` + SATB write barrier — RQ1 flagship (LANDED, bytecode + native, 2026-06-23; `lazy`-clean; Q3 continuations fixed).**
    The low-latency line (`RESEARCH_QUESTIONS.md` RQ1: does OCaml's immutability make
