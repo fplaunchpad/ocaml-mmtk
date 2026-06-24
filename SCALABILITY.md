@@ -14,6 +14,19 @@ up. The clean, already-implemented win is to move marking off the STW path: Conc
 turns S(8) ≈ 0.64 (anti-scaling) into S(8) ≈ 1.65–1.9 (scaling) on the same benchmark with
 identical checksums; Immix is the production-ready intermediate.
 
+**Refinement (§10).** A later round of runs splits the problem cleanly. GenImmix's
+*single-domain* weakness on alloc-heavy code is a **mis-sized 8 MB default nursery**, not the
+plan: enlarging it to 32–64 MB makes GenImmix 1.3–3× faster *and* lowers RSS, and at memory
+parity GenImmix(64 MB) is competitive-to-best single-domain (fastest *and* leanest on
+spectralnorm). But the nursery does **not** fix the *multi-domain* anti-scaling (S(8) stays
+0.71 with 8× fewer collections — the per-collection STW cost grows with domains regardless of
+frequency), and at high domain count the generational plans **cliff** (GenImmix times out
+past 16 domains on a 56-core box). So the actionable conclusion is **not** a blanket switch to
+Immix (whose single-domain edge largely evaporates once GenImmix's nursery is tuned, at 3–4×
+the RSS): it is (1) **enlarge the default nursery** for the common single-/few-domain case,
+and (2) **steer parallel-heavy workloads to Immix/ConcurrentImmix by plan selection**, with
+**ConcurrentImmix the genuinely better default once its production work (#30) lands.**
+
 Host: Apple M4 Pro / macOS, 12 cores (and godel, 56-core Xeon, for the high-domain sweep).
 Primary benchmark: `par_binarytrees` (stdlib-only `Domain.spawn` port of the
 Benchmarks-Game program), depth 21, a fixed iteration count **divided** across domains (so
@@ -401,3 +414,107 @@ data most strongly motivates.
 - **GenCopy could not complete d21 in 90 s at any domain count** and SemiSpace runs 17–23 s
   (vs ~3 s for the Immix family) — both are copy-dominated at this live-set size and are not
   viable defaults for allocation-heavy parallel work regardless of scaling.
+
+---
+
+## 10. Overnight expansion — high-domain matrix, nursery sizing, refined recommendation
+
+Three follow-up runs sharpen Sections 6–7. **Net: GenImmix's single-domain weakness is a
+mis-sized default nursery, not the plan — but its multi-domain anti-scaling is structural,
+and nursery sizing does not fix it.**
+
+### 10.1 High-domain plan matrix — `par_binarytrees` ONCE d21, church (56-core Xeon)
+
+Per-plan S(n) = wall(d1)/wall(dn); default heap, default workers (= nproc = 56). The
+*within-plan* S(n) shape is valid; cross-plan *absolute* walls are confounded by the
+56-worker default (oversubscription at low domain counts), so read the shape, not the
+seconds. `d1` column is absolute seconds; the rest are S(n).
+
+| plan | d1 (s) | S(8) | S(16) | S(28) | S(56) | shape |
+|---|--:|:--:|:--:|:--:|:--:|---|
+| GenImmix | 14.6 | 0.65 | 0.50 | **TIMEOUT** | **TIMEOUT** | cliff past d16 |
+| StickyImmix | 16.9 | 0.77 | 0.54 | 0.41 | 0.24 | monotonic collapse |
+| Immix | 26.8 | 1.08 | 1.06 | 0.95 | 0.63 | flat to ~d28 |
+| ConcurrentImmix | 9.3 | 1.14 | 1.06 | 0.99 | 0.74 | flat to ~d28, **fastest absolute everywhere** |
+
+Extends Experiment 5: the generational plans don't merely anti-scale, they **fall off a
+cliff** — GenImmix cannot finish d21 within 90 s once domains ≥ 28. ConcurrentImmix is the
+fastest plan at *every* domain count and holds flat to 28 domains; Immix holds flat too but
+is slow single-domain here (56-worker whole-heap mark). GC time climbs with domains for the
+copying plans (GenImmix 10.5→28.6 s d1→d16; StickyImmix 12.6→67.2 s d1→d56) and stays
+low/flat for ConcurrentImmix (3.2→5.5 s) — the Section-2 signature, confirmed to 56 cores.
+
+### 10.2 Nursery sizing — fixes single-domain, NOT multi-domain (Experiment 6)
+
+The 8 MB default nursery is too small for high-allocation-rate workloads: it forces
+hundreds-to-thousands of near-empty minor collections. Enlarging it (single-domain,
+isolated, @512 MB heap):
+
+| bench | GenImmix (8 MB default) | GenImmix (64 MB) | Δ |
+|---|---|---|---|
+| spectralnorm 3000 | 0.879 s, 723 GCs, 75 MB | **0.692 s, 89 GCs, 131 MB** | 1.27× faster, 8× fewer GCs |
+| binarytrees 18 | 0.423 s, 110 GCs, 262 MB | **0.142 s, 20 GCs, 185 MB** | 3.0× faster, *lower* RSS |
+
+But a bigger nursery does **not** rescue multi-domain scaling. `par_binarytrees` ONCE d21,
+GenImmix, @1 GB:
+
+| nursery | d1 | d2 | d4 | d8 | S(8) | GCs d1→d8 | GC ms d1→d8 |
+|---|--:|--:|--:|--:|:--:|---|---|
+| default 2–8 MB | 3.58 | 3.76 | 4.33 | 5.63 | 0.64 | 923→959 | 2383→5318 |
+| 64 MB | 2.12 | 1.70 | 2.38 | 2.97 | **0.71** | 114→118 | 822→2667 |
+
+The 64 MB nursery is uniformly ~1.9× faster (8× fewer collections) and **best absolute at
+every domain count**, yet it still **anti-scales** (S(8) = 0.71 < 1): even with 8× fewer
+collections, GC time still climbs ~3.2× with domains (822→2667 ms). This is the clean
+confirmation of Attribution #1 (§4): the anti-scaling is the **per-collection STW cost
+growing with domain count**, independent of collection *frequency*. Reducing frequency
+lowers the whole curve; it does not change its upward slope.
+
+### 10.3 Clean single-domain GC-heavy panel at memory parity
+
+Isolated (no concurrent runs — the Section-6 sequential panel was contention-polluted on
+its absolute walls and is superseded here for the GC-heavy cells), @512 MB heap, best-of-2,
+wall s / maxRSS:
+
+| bench | GenImmix(def) | GenImmix(64 MB) | Immix | ConcurrentImmix |
+|---|---|---|---|---|
+| spectralnorm | 0.879 / 75 MB | **0.692 / 131 MB** | 0.765 / 556 MB | 0.758 / 320 MB |
+| binarytrees | 0.423 / 262 MB | 0.142 / 185 MB | **0.095 / 554 MB** | 0.098 / 325 MB |
+
+At memory parity the naive read inverts: **GenImmix(64 MB) is the fastest *and* most
+memory-efficient plan on spectralnorm**, and on binarytrees it closes most of the gap (1.5×
+of Immix) at **3× less RSS**. Immix/ConcurrentImmix win binarytrees outright (promotion-heavy:
+the trees survive the nursery, so GenImmix copies them while Immix marks in place) but pay
+3–4× the RSS for it. Compute-bound benches (fasta/nbody/mandelbrot/fannkuchredux) are a
+three-way tie (GC negligible: 0–12 collections).
+
+### 10.4 Refined recommendation (supersedes §7 for the single-domain case)
+
+The §7 ranking holds for *parallel* workloads; the nursery finding refines it for the common
+single-/few-domain case:
+
+1. **Enlarge the default nursery (8 MB → 32–64 MB). NEW — highest impact-per-effort for the
+   common case.** It makes GenImmix 1.3–3× faster on alloc-heavy single-domain workloads
+   *and lowers RSS*, and at memory parity makes the generational plan competitive-to-best
+   single-domain. The 8 MB default — chosen for bounded RSS (#44) — is simply too small once
+   allocation rate is high. No plan change, low risk. (It does **not** fix multi-domain
+   anti-scaling.)
+2. **For parallel/multi-domain workloads, plan choice is the lever, not the nursery.**
+   GenImmix and StickyImmix structurally anti-scale and cliff past ~16–28 domains;
+   ConcurrentImmix (research, #30) is the only plan both fastest single-domain *and* scaling;
+   Immix is the production-ready scaler (at a RSS premium). Steer parallel-heavy workloads to
+   `MMTK_PLAN=Immix`/`ConcurrentImmix` until ConcurrentImmix is production-ready.
+3. **On the default-plan question itself:** with a right-sized nursery, **GenImmix remains a
+   defensible default** for the common case — memory-efficient, competitive single-domain,
+   stock-faithful — *provided* the multi-domain limitation is documented and steerable by
+   plan selection. A blanket switch to Immix is **not** warranted: Immix's single-domain edge
+   largely evaporates once GenImmix's nursery is tuned, and it costs 3–4× RSS. The genuinely
+   better default is **ConcurrentImmix once #30 lands** (fastest single-domain *and* the only
+   plan that scales).
+
+> **Method note.** Several absolute walls in §6's sequential panel were inflated by running
+> the panel concurrently with other jobs (benchmarks contend for cores → invalid timing); the
+> §10.3 numbers are the clean isolated re-measurement and should be cited in preference. GC
+> *counts* in §6 are unaffected. A clean re-run of the full §2 matrix with `MMTK_THREADS`
+> pinned (to remove the worker-oversubscription confound flagged in §10.1) is the remaining
+> follow-up.
