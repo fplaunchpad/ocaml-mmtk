@@ -57,6 +57,50 @@ scalability* — it turns a 3.6× vanilla speedup into a ~2× slowdown — becau
 (all-domains STW minor GC + full-GC-per-terminate), independent of GC worker count. The levers worth
 chasing: per-domain-local / concurrent minor collection (avoid the all-domains rendezvous) and a cheap
 domain terminate (no full GC). Plus the single-thread per-collection cost (the 1.27× residual, #G1).
+---
+
+## Stock-GC dead-code audit — M9 excision is structurally complete; the inert residue is mostly load-bearing
+
+*2026-06-24*
+
+Audited `runtime/` for stock-GC code that could still be deleted (ROADMAP #18). Verdict: the heavy
+bodies are gone; what remains is a **small** deletable residue plus a large amount of
+inert-looking-but-**load-bearing** scaffolding. **Recording the classification so a future cleanup
+pass doesn't delete code whose absence breaks the link, deadlocks teardown, or spins the mutator.**
+
+**Deletable now (no dependencies):**
+- `caml_final_update_first` / `caml_final_update_last` (`finalise.c:118-142`) + their
+  `EV_FINALISE_UPDATE_*` spans + `finalise.h:72-73` decls — **zero in-tree callers** (the live
+  finaliser path is `caml_final_update_last_minor`, `finalise.c:413` ← `minor_gc.c:419`). Truly
+  dead; the backlog had not catalogued these.
+- ~8 phantom `runtime_events` spans wrapping no-ops — perf-backlog #R3 (`EV_MINOR`/`EV_MAJOR`/
+  `EV_C_MAJOR_*`/opportunistic-mark). Removing them is what stops olly reporting fictional pauses.
+- `caml_compactions_count` (`major_gc.c:108`) — written nowhere; collapse the two `Gc.stat` reads
+  (`gc_ctrl.c:77`) to literal `0`, then drop the symbol.
+
+**Inert but LOAD-BEARING — do NOT delete:**
+- No-op `caml_darken`/`caml_darken_cont`/`caml_finish_marking`/`caml_finish_sweeping`/
+  `caml_finish_major_cycle`/`caml_major_collection_slice`/`caml_opportunistic_major_collection_slice`/
+  `caml_mark_roots_stw`/`caml_orphan_ephemerons` — link symbols the weak/ephemeron/finaliser/
+  continuation/teardown paths call. Two carry load-bearing side effects:
+  `caml_major_collection_slice` records `major_slice_epoch` (else bytecode spins in
+  `caml_poll_gc_work` — `major_gc.c:1064-1069`); `caml_finish_marking`/`_sweeping` set the
+  `*_done` flags domain teardown waits on (`domain.c:2127,2136`).
+- `caml_gc_phase` frozen at `Phase_sweep_main` (set once `gc_ctrl.c:392`) gates the stock
+  weak/ephemeron paths into their no-op branch — deleting the init store would flip the guards.
+- `young_start/end/ptr/limit/trigger` — NOT dead: alias the MMTk TLAB/Immix-nursery block
+  (`domain.c:460-462`, `mmtk.c:332-336`); back the native bump + minor-words odometer.
+- `caml_do_roots` link anchor (`mmtk.c:49`) forces `roots.o` into the link.
+- `caml_adjust_gc_speed`/`caml_adjust_minor_gc_speed`/`caml_alloc_dependent_memory`/
+  `caml_free_dependent_memory` — dead *for GC* but exported `CAMLextern` ABI (`memory.h:40-43`)
+  + called from `custom.c`. Internally dead, ABI-undeletable.
+
+**The big deletion is gated on bug #3c, not independent.** The entire OCaml minor-STW rendezvous
+(`caml_empty_minor_heaps_once`/`caml_try_empty_minor_heap_on_all_domains`/neutered
+`caml_empty_minor_heap_promote`/minor barriers/`caml_minor_cycles_started`) is inert as collection
+but is the live `Domain.spawn`/terminate STW rendezvous (MMTk drives it via `mmtk.c`). Retiring it
+= making MMTk's STW the sole rendezvous = the #3c fix; do that once and a swath of `minor_gc.c` +
+barrier machinery becomes deletable as a side effect.
 
 ---
 

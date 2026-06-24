@@ -187,6 +187,29 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    characterization showed the SATB barrier is ~free (<0.1% self), so the gate is empirically a non-issue;
    the sanity-build-only ~10 MB deadlock (`rr`) remains. → RESEARCH_QUESTIONS RQ1; NOTES (2026-06-23).
 
+9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
+   confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
+   inert-looking stock-GC code is **load-bearing** — link symbols the weak/ephemeron/finaliser/
+   teardown paths call, the `*_done` teardown flags (`domain.c:2127,2136`), the major-slice
+   **epoch** record that stops the bytecode mutator spinning in `caml_poll_gc_work`
+   (`major_gc.c:1064-1069`), frozen `caml_gc_phase` gating the stock no-op branches, the `young_*`
+   fields that **alias the MMTk TLAB** (`mmtk.c:332-336`), the `caml_do_roots` link anchor
+   (`mmtk.c:49`), and the dependent-memory / `caml_adjust_gc_speed` exported `CAMLextern` ABI.
+   **Genuinely deletable now:**
+   - `caml_final_update_first`/`caml_final_update_last` (`finalise.c:118-142`) + their
+     `EV_FINALISE_UPDATE_*` spans + `finalise.h` decls — **zero in-tree callers** (live path is
+     `caml_final_update_last_minor`). Trivial removal; not previously catalogued.
+   - the ~8 phantom `runtime_events` spans wrapping no-ops (`EV_MINOR`/`EV_MAJOR`/`EV_C_MAJOR_*`/
+     opportunistic-mark) — this is perf-backlog **#R3**; removing them is what stops olly
+     reporting fictional pauses, so it doubles as a measurement unblock (Risk: LOW).
+   - collapse `caml_compactions_count` (`major_gc.c:108`, written nowhere) to literal `0` at its
+     two `Gc.stat` reads (`gc_ctrl.c:77`), then drop the symbol.
+   **The big deletion is gated on #3c, not independent:** the whole OCaml minor-STW rendezvous
+   (`caml_empty_minor_heaps_once`/`caml_try_empty_minor_heap_on_all_domains`/neutered
+   `caml_empty_minor_heap_promote`/minor barriers/`caml_minor_cycles_started`) is inert *as
+   collection* but is the live `Domain.spawn`/terminate STW rendezvous — retiring it needs MMTk's
+   STW to become the sole rendezvous, **the same rework as #3c (item 1)**. → NOTES 2026-06-24.
+
 ### Research & measurement workstreams (M8 / RQ-driven)
 
 The active research/measurement threads behind the M8 milestone — the index; depth in `gc/mmtk/NOTES.md`,
