@@ -113,22 +113,18 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
             "failed to set default nursery"
         );
     }
-    // GC worker count. mmtk-core defaults this to nproc, but EVERY worker parks/wakes on
-    // EVERY collection, contending on a single monitor mutex+condvar; for OCaml's common
-    // single-domain, high-frequency *minor* GC that is pure overhead (measured ~38% slower
-    // at nproc vs 1 on binarytrees; perf: ~82% of GC-worker CPU is park/contend doing zero
-    // work). Default to 1 worker when MMTK_THREADS is unset — the single-domain-optimal
-    // count and a sane start. The intended policy is "workers = number of running domains",
-    // but mmtk-core fixes the pool size at init (no runtime resize), so scaling it to the
-    // live domain count is a gc/mmtk-core-fork follow-up (see gc/mmtk/NOTES.md); until then
-    // parallel/multi-domain workloads should set MMTK_THREADS. Other mmtk-core knobs
-    // (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …) pass through via MMTKBuilder::new.
-    if std::env::var_os("MMTK_THREADS").is_none() {
-        assert!(
-            memory_manager::process(&mut builder, "threads", "1"),
-            "failed to set default GC worker count"
-        );
-    }
+    // GC worker count: use mmtk-core's own default (num_cpus::get() = nproc). We do NOT
+    // pin a custom default. We previously forced 1 worker to dodge the single-domain minor-GC
+    // futex cost (every worker parks/wakes per collection — ~1.37× slower, ~82% of GC-worker
+    // CPU on park/contend for minor-bound single-domain work), but that is a band-aid: worker
+    // count does NOT fix multi-domain throughput scaling — that is bound by the all-domains
+    // stop-the-world, not the thread pool (measured: par_binarytrees anti-scales at BOTH 1 and
+    // nproc workers while vanilla scales ~3.6×; see gc/mmtk/NOTES.md 2026-06-24). So pinning 1
+    // bought only a single-domain win at the price of deviating from MMTk's default; we keep
+    // the MMTk default and treat that futex contention as a documented integration cost.
+    // MMTK_THREADS overrides it (e.g. =1 for latency-sensitive single-domain runs); it and the
+    // other mmtk-core knobs (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …) are read from the
+    // environment by MMTKBuilder::new.
 
     let mmtk_instance = memory_manager::mmtk_init::<OCamlVM>(&builder);
     let constraints = mmtk_instance.get_plan().constraints();
