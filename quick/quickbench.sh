@@ -10,8 +10,10 @@
 # USAGE
 #   quickbench.sh [seq|par|all] [options]
 #
-#     seq   sequential benches only (alloc, mutate, binarytrees, nbody)
-#     par   parallel benches only  (par_alloc, par_binarytrees), domain sweep
+#     seq   sequential benches only (binarytrees, nbody, fannkuchredux,
+#           spectralnorm, mandelbrot, matrix_multiplication, LU_decomposition)
+#     par   parallel benches only  (par_spectralnorm, par_matmul,
+#           par_binarytrees), domain sweep
 #     all   both (default)
 #
 #   OPTIONS
@@ -43,12 +45,19 @@
 #     -h|--help                 this help.
 #
 # WHAT EACH BENCH PROBES (GC axis)
-#   alloc            nursery / minor-alloc throughput (no-zero probe; ~all DOA)
-#   binarytrees      mixed lifetime -> generational promotion
-#   mutate           write barrier / remembered-set (old->young stores)
-#   nbody            compute-bound control, ~0 alloc (codegen/mutator regress)
-#   par_alloc        parallel nursery + GC-worker scaling
-#   par_binarytrees  parallel alloc + live set + cross-domain STW coordination
+#   binarytrees           mixed lifetime -> generational promotion (CLBG)
+#   nbody                 compute-bound control, ~0 alloc (codegen/mutator) (CLBG)
+#   fannkuchredux         small fixed arrays, compute-bound, ~0 alloc (CLBG)
+#   spectralnorm          float arrays, compute-bound, light alloc (CLBG)
+#   mandelbrot            compute-bound escape-time, ~0 alloc (CLBG, checksummed)
+#   matrix_multiplication boxed int matrices -> mature live set (sandmark)
+#   LU_decomposition      large flat float array, in-place (sandmark)
+#   par_spectralnorm      parallel float compute, GC-worker scaling (sandmark)
+#   par_matmul            parallel boxed-matrix alloc + live set scaling (sandmark)
+#   par_binarytrees       parallel alloc + live set + cross-domain STW (sandmark)
+#
+# All ten are dependency-free (stdlib only). The three par_* benches use raw
+# Domain.spawn (no Domainslib) and are domain-count-INDEPENDENT by construction.
 #
 # OUTPUT
 #   seq: per (bench × variant) median±σ wall time + ratio vs baseline (the
@@ -88,24 +97,32 @@ CORES=""; PIN=1; USE_SETARCH=1; SHOW_GC=0
 # real allocation volume — see README "Input sizes". CI sizes: fast, tiny,
 # deterministic, still GC-touching; they define the goldens.
 perf_args(){ case "$1" in
-  alloc)           echo "40000000";;         # ~40M cons cells, ~all dead-on-arrival
-  mutate)          echo "500000 20000000";;  # 500k-box old array, 20M old->young stores
-  binarytrees)     echo "18";;               # CLBG depth 18 — mixed lifetime, promotion
-  nbody)           echo "20000000";;         # 20M steps, ~0 allocation, compute control
-  par_alloc)       echo "64000000";;         # 64M cells total, split across domains
-  par_binarytrees) echo "18";;               # depth 18 task set, split across domains
+  binarytrees)           echo "20";;        # depth 20 — mixed lifetime, promotion
+  nbody)                 echo "20000000";;  # 20M steps, ~0 alloc, compute control
+  fannkuchredux)         echo "11";;        # n=11 permutation enumeration
+  spectralnorm)          echo "3000";;      # 3000 float vector, 10 AtA iterations
+  mandelbrot)            echo "4000";;      # 4000x4000 escape-time, byte checksum
+  matrix_multiplication) echo "768";;       # 768x768 boxed-int matmul
+  LU_decomposition)      echo "900";;       # 900x900 in-place LU
+  par_spectralnorm)      echo "4000";;      # 4000 vector, parallel A/At passes
+  par_matmul)            echo "768";;       # 768x768 matmul, row loop split
+  par_binarytrees)       echo "20";;        # depth-20 class set, split across domains
 esac; }
 ci_args(){ case "$1" in
-  alloc)           echo "50000";;
-  mutate)          echo "2000 50000";;
-  binarytrees)     echo "8";;
-  nbody)           echo "1000";;
-  par_alloc)       echo "200000";;
-  par_binarytrees) echo "10";;
+  binarytrees)           echo "10";;
+  nbody)                 echo "10000";;
+  fannkuchredux)         echo "8";;
+  spectralnorm)          echo "200";;
+  mandelbrot)            echo "200";;
+  matrix_multiplication) echo "64";;
+  LU_decomposition)      echo "64";;
+  par_spectralnorm)      echo "200";;
+  par_matmul)            echo "64";;
+  par_binarytrees)       echo "12";;
 esac; }
 
-SEQ_BENCHES="alloc binarytrees mutate nbody"
-PAR_BENCHES="par_alloc par_binarytrees"
+SEQ_BENCHES="binarytrees nbody fannkuchredux spectralnorm mandelbrot matrix_multiplication LU_decomposition"
+PAR_BENCHES="par_spectralnorm par_matmul par_binarytrees"
 
 usage(){ sed -n '2,/^set -u/p' "$0" | sed 's/^# \{0,1\}//; s/^#$//' | sed '$d'; exit "${1:-0}"; }
 

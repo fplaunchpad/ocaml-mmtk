@@ -10,53 +10,81 @@ suite, and the CLBG cross-plan correctness suite at the branch root.
 **~5 minutes** at the default perf sizes and default reps (3 reps, 1 warmup). So
 comparing e.g. vanilla + GenImmix-OFF + GenImmix-ON for a no-zero decision is
 ~15 min. Inputs are sized to stay inside that budget **while still actually
-exercising the GC** (several collections / real allocation volume / real
-promotion / real barrier traffic per bench — not toy sizes).
+exercising the GC** (each bench's 1-domain wall is ~0.5–1.5s on an M4 Pro at
+GenImmix / heap 512MB; the seven sequential + three parallel 1-domain runs sum to
+under 10s, leaving plenty of headroom for reps + the parallel domain sweep).
 
-## The panel (six benches, one per GC axis)
+## The panel (ten dependency-free sandmark/CLBG benches)
+
+All ten are **real, stdlib-only** programs adapted verbatim (or with a minimal,
+documented checksum tweak) from the sandmark suite under `benchmarks/` — no opam,
+no Domainslib, no Core. The three parallel benches port Domainslib's
+`Task.parallel_for` to **raw `Domain.spawn`** via a tiny in-file helper.
 
 | Bench | Par? | GC axis it probes | Source |
 |---|---|---|---|
-| `alloc`           | seq | **nursery / minor-alloc throughput** — tight loop allocating short-lived 3-word cons cells, ~all dead-on-arrival. The **no-zero / nursery probe**. | new (`src/alloc.ml`) |
-| `binarytrees`     | seq | **mixed lifetime → generational promotion** — short-lived trees + a long-lived tree. | CLBG (`src/binarytrees.ml`, reused) |
-| `mutate`          | seq | **write barrier / remembered-set** — large long-lived array of boxed refs, then many `a.(i) <- fresh_alloc` old→young overwrites, firing the generational barrier on every store. CLBG has no barrier bench; this fills that gap. | new (`src/mutate.ml`) |
-| `nbody`           | seq | **compute-bound control, ≈0 allocation** — catches codegen/mutator regressions and confirms a GC change is free where it should be. | CLBG (`src/nbody.ml`, reused) |
-| `par_alloc`       | **par** | **parallel nursery + GC-worker scaling** — N domains each churning the `alloc` loop; fixed total work split across domains. | new (`src/par_alloc.ml`) |
-| `par_binarytrees` | **par** | **parallel alloc + live set + cross-domain STW coordination** — N domains each building/checking trees; fixed task set split across domains. | new (`src/par_binarytrees.ml`) |
+| `binarytrees`           | seq | **mixed lifetime → generational promotion** — short-lived trees + a long-lived tree. | `benchmarksgame/binarytrees5.ml` (verbatim) |
+| `nbody`                 | seq | **compute-bound control, ≈0 allocation** — catches codegen/mutator regressions. | `benchmarksgame/nbody.ml` (verbatim) |
+| `fannkuchredux`         | seq | **small fixed arrays, compute-bound, ≈0 alloc** — permutation enumeration. | `benchmarksgame/fannkuchredux.ml` (one-line bounds fix — see note) |
+| `spectralnorm`          | seq | **float vectors, compute-bound, light alloc**. | `benchmarksgame/spectralnorm2.ml` (verbatim) |
+| `mandelbrot`            | seq | **escape-time compute, ≈0 alloc** — emits an integer checksum over the P4 byte stream instead of a binary bitmap. | `benchmarksgame/mandelbrot6.ml` (checksummed) |
+| `matrix_multiplication` | seq | **boxed-int matrices → mature live set**. | `multicore-numerical/matrix_multiplication.ml` (seeded + checksummed) |
+| `LU_decomposition`      | seq | **large flat float array, in-place updates**. | `multicore-numerical/LU_decomposition.ml` (seeded + bit-checksummed) |
+| `par_spectralnorm`      | **par** | **parallel float compute + GC-worker scaling**. | `multicore-numerical/spectralnorm2_multicore.ml` → raw `Domain.spawn` |
+| `par_matmul`            | **par** | **parallel boxed-matrix alloc + live set scaling**. | `multicore-numerical/matrix_multiplication_multicore.ml` → raw `Domain.spawn` |
+| `par_binarytrees`       | **par** | **parallel alloc + live set + cross-domain STW coordination**. | `multicore-numerical/binarytrees5_multicore.ml` → raw `Domain.spawn` |
 
-Every bench is **deterministic and self-checking**: it prints a checksum line,
-compared byte-for-byte against `golden/`. The two parallel benches are
-**domain-count-independent by construction** — the same answer at 1, 2, 4, 8
-domains (only the `domains=` field changes), which is itself a correctness check
-that the parallel split is sound.
+Every bench is **deterministic and self-checking**: it prints a stable result /
+checksum line, compared byte-for-byte against `golden/`. Each `Random`-using bench
+seeds `Random.init 42` for reproducibility. The three parallel benches are
+**domain-count-independent by construction** — the same output at 1, 2, 4, 8
+domains (verified at 1 vs 4), which is itself a correctness check that the
+parallel split is sound. Additionally, `par_matmul`'s checksum **equals**
+`matrix_multiplication`'s at the same size (same seeded operands, same fold) — a
+cross-check that the parallel matmul computes the identical result.
+
+> **`fannkuchredux` note.** The upstream sandmark `fannkuchredux.ml` crashes with
+> `Invalid_argument("index out of bounds")` at *every* `n` (including its own
+> default and the sandmark config size): the carry loop in `Perm.next` indexes
+> `c.(!i)` / `p.(!i)` one past the length-`plen` permutation. The port adds the
+> same `plen > !i` guard the adjacent `p.(!i)` write already has. The result is
+> verified against the canonical CLBG values (`Pfannkuchen(11) = 51`).
+
+> The `par_*` benches take **size from `argv[1]` and domain count from `argv[2]`
+> OR the `DOMAINS` env var** (default 1) — note this is the *reverse* of the
+> sandmark multicore programs, which take domains first.
 
 ## Input sizes
 
-CI/tiny sizes (define the goldens; ~tens of ms each in bytecode):
+Perf sizes (the panel sizes — what `quickbench.sh` and the goldens use; each ~0.5–1.5s
+on an M4 Pro at GenImmix / heap 512MB, native):
 
-| Bench | CI args |
-|---|---|
-| `alloc` | `50000` |
-| `binarytrees` | `8` |
-| `mutate` | `2000 50000` |
-| `nbody` | `1000` |
-| `par_alloc` | `200000` |
-| `par_binarytrees` | `10` |
-
-Perf sizes (native target: each run a few seconds and triggers real GC activity —
-counts below are indicative, measure with `--gc` / `MMTK_VERBOSE=1`):
-
-| Bench | Perf args | Roughly exercises |
+| Bench | Perf args | ~1-dom wall |
 |---|---|---|
-| `alloc` | `40000000` | ~40M cons cells, ~all dead-on-arrival → many minor GCs |
-| `binarytrees` | `18` | CLBG depth 18 — sustained alloc + promotion of the long-lived tree |
-| `mutate` | `500000 20000000` | 500k-box old array (force-promoted), 20M old→young barrier stores |
-| `nbody` | `20000000` | 20M steps, ≈0 allocation (compute/codegen control) |
-| `par_alloc` | `64000000` | 64M cells total, split across the domain sweep |
-| `par_binarytrees` | `18` | depth-18 task set, split across the domain sweep |
+| `binarytrees` | `20` | ~0.8s |
+| `nbody` | `20000000` | ~0.6s |
+| `fannkuchredux` | `11` | ~1.4s |
+| `spectralnorm` | `3000` | ~0.7s |
+| `mandelbrot` | `4000` | ~0.7s |
+| `matrix_multiplication` | `768` | ~0.6s |
+| `LU_decomposition` | `900` | ~0.9s |
+| `par_spectralnorm` | `4000` | ~1.3s |
+| `par_matmul` | `768` | ~0.7s |
+| `par_binarytrees` | `20` | ~0.9s |
 
-Override any perf size by editing `quickbench.sh`'s `perf_args`; tune for your
-heap and core count if needed.
+CI/tiny sizes (fast smoke; `--ci` / `--quick` use these):
+
+| Bench | CI args |  | Bench | CI args |
+|---|---|---|---|---|
+| `binarytrees` | `10` | | `LU_decomposition` | `64` |
+| `nbody` | `10000` | | `par_spectralnorm` | `200` |
+| `fannkuchredux` | `8` | | `par_matmul` | `64` |
+| `spectralnorm` | `200` | | `par_binarytrees` | `12` |
+| `mandelbrot` | `200` | | | |
+| `matrix_multiplication` | `64` | | | |
+
+Override any size by editing `quickbench.sh`'s `perf_args` / `ci_args`; the
+goldens (regenerate with `make golden`) are tied to the perf sizes.
 
 ## Building
 
@@ -72,11 +100,15 @@ make -C quick bytecode ROOT=/path/to/fork
 # native (Immix-family plans only) — what quickbench.sh times
 make -C quick native ROOT=/path/to/fork
 
-# regenerate goldens (bytecode, GenImmix, CI sizes)
+# regenerate goldens (native, GenImmix, perf/panel sizes)
 make -C quick golden ROOT=/path/to/fork
 ```
 
-> **macOS** builds + runs **bytecode** fine (the correctness smoke). **Native
+> **macOS (Apple Silicon)** builds + runs **native** fine (the MMTk Rust
+> staticlib links into the native runtime locally), so the panel and its goldens
+> are produced natively on macOS too. Bytecode also works for a quick smoke.
+
+> **Native
 > MMTk links only on Linux** (the Rust staticlib is linked into the native
 > runtime there) — do native perf runs on a Linux box.
 
@@ -153,10 +185,11 @@ make -C quick native ROOT=/path/to/fork-ON  BUILD=$PWD/bins/on
     --plans GenImmix --domains 1,2,4,8 --gc
 ```
 
-Read it as: **`alloc` should improve** (ratio < 1.00x — the no-zero win shows up
-most strongly where allocation is high and dead-on-arrival); **`nbody` should
-stay neutral** (≈1.00x — it barely allocates, so a regression there means the
-change leaked into codegen/the mutator); **`binarytrees`/`mutate`** show the
-effect on promotion- and barrier-heavy mixes; and the **`par_*` speedup columns**
-confirm the change still scales (or reveal a parallel-nursery regression). For an
-authoritative verdict, follow a positive quick signal with the heavyweight suite.
+Read it as: **`binarytrees`/`matrix_multiplication` should improve** (ratio <
+1.00x — the no-zero win shows up most strongly in the alloc-heavy, promotion-heavy
+benches); **`nbody`/`fannkuchredux`/`mandelbrot` should stay neutral** (≈1.00x —
+they barely allocate, so a regression there means the change leaked into
+codegen/the mutator); **`spectralnorm`/`LU_decomposition`** sit in between; and
+the **`par_*` speedup columns** confirm the change still scales (or reveal a
+parallel-nursery regression). For an authoritative verdict, follow a positive
+quick signal with the heavyweight suite.

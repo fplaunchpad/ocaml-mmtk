@@ -1,6 +1,6 @@
 # quick — the quick-decision GC benchmark panel (see README.md "Quick panel").
 #
-# Builds the six panel benches with the in-tree fork compiler. Two outputs per
+# Builds the ten panel benches with the in-tree fork compiler. Two outputs per
 # bench (like the CLBG suite):
 #   build/<b>.byte    bytecode  (any MMTk plan; correctness smoke + goldens)
 #   build/<b>.native  native    (Immix-family plans; what quickbench.sh times)
@@ -23,7 +23,10 @@ OCAMLOPT ?= $(ROOT)/ocamlopt.opt
 STDLIB   ?= $(ROOT)/stdlib
 BUILD    ?= build
 
-BENCHES  := alloc binarytrees mutate nbody par_alloc par_binarytrees
+SEQ_BENCHES := binarytrees nbody fannkuchredux spectralnorm mandelbrot \
+               matrix_multiplication LU_decomposition
+PAR_BENCHES := par_spectralnorm par_matmul par_binarytrees
+BENCHES     := $(SEQ_BENCHES) $(PAR_BENCHES)
 BYTECODE := $(addprefix $(BUILD)/,$(addsuffix .byte,$(BENCHES)))
 NATIVE   := $(addprefix $(BUILD)/,$(addsuffix .native,$(BENCHES)))
 
@@ -48,9 +51,9 @@ $(BUILD)/%.native: src/%.ml | $(BUILD)
 	cp $< $(BUILD)/$*.ml
 	cd $(BUILD) && OCAMLLIB=$(STDLIB) $(OCAMLOPT) -I $(STDLIB) -o $*.native $*.ml
 
-# Regenerate golden outputs at CI/tiny sizes (bytecode, GenImmix). Keep in sync
-# with quickbench.sh CI_ARGS.
-golden: bytecode
+# Regenerate golden outputs at the panel (perf) sizes (native, GenImmix). Keep
+# in sync with quickbench.sh perf_args. (Set LINK=bytecode for a bytecode run.)
+golden: native
 	./mkgolden.sh
 
 clean:

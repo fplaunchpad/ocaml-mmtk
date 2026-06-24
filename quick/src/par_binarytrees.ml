@@ -1,70 +1,78 @@
-(* par_binarytrees — parallel binary-trees (GC axis: parallel allocation + a
- * real live set + cross-domain STW coordination).
+(* Parallel port of sandmark multicore-numerical/binarytrees5_multicore.ml to
+ * raw Domain.spawn (no Domainslib).
  *
- * Based on the CLBG binarytrees kernel (make/check), but restructured so the
- * TOTAL work is fixed and partitioned across DOMAINS worker domains, so:
- *   - DOMAINS=1 vs k measures parallel speedup on alloc-heavy work that also
- *     keeps a live set (the long-lived tree + in-flight trees), exercising STW
- *     coordination across domains, and
- *   - the checksum is DOMAINS-INDEPENDENT: the set of (depth, iteration) tasks
- *     and their contributions are fixed; only their assignment to domains
- *     changes. So 1 vs 4 domains must produce identical output -> self-check.
+ * The upstream multicore version splits, within each depth class, the [niter]
+ * tree builds across domains (Domainslib async/await over i*niter/num_domains
+ * .. (i+1)*niter/num_domains-1) and sums the per-domain checks. We do the same
+ * with the stdlib-only parallel_for helper, accumulating each domain's partial
+ * sum into a per-class total. Because every tree of depth d has the same check
+ * value, the per-class total is the SAME however the niter builds are split
+ * across domains, so the folded checksum is domain-count-INDEPENDENT — a
+ * parallel-correctness self-check.
  *
- *   par_binarytrees DEPTH [DOMAINS]    DOMAINS also from env DOMAINS
- *                                      (defaults: DEPTH=16, DOMAINS=1)
- *
- * Total allocation is dominated by the depth classes 4,6,...,DEPTH, each built
- * 2^(DEPTH-d+4) times — the standard CLBG schedule — distributed round-robin
- * across the domains so each domain does a comparable mix of cheap (deep, few)
- * and expensive (shallow, many) classes. *)
+ *   par_binarytrees DEPTH [DOMAINS]      DOMAINS also from env DOMAINS
+ *                                        (defaults: DEPTH=10, DOMAINS=1) *)
 
-type tree = Empty | Node of tree * tree
+let parallel_for lo hi body ndom =
+  if ndom <= 1 then for i = lo to hi do body i done
+  else begin
+    let n = hi - lo + 1 in let chunk = (n + ndom - 1) / ndom in
+    let ds = Array.init ndom (fun k ->
+      let s = lo + k*chunk in let e = min hi (s+chunk-1) in
+      Domain.spawn (fun () -> for i = s to e do body i done)) in
+    Array.iter Domain.join ds
+  end
 
-let rec make d = if d = 0 then Node (Empty, Empty) else let d = d - 1 in Node (make d, make d)
-let rec check = function Empty -> 0 | Node (l, r) -> 1 + check l + check r
+type 'a tree = Empty | Node of 'a tree * 'a tree
+
+let rec make d =
+(* if d = 0 then Empty *)
+  if d = 0 then Node(Empty, Empty)
+  else let d = d - 1 in Node(make d, make d)
+
+let rec check t =
+  match t with
+  | Empty -> 0
+  | Node(l, r) -> 1 + check l + check r
+
+let depth = try int_of_string Sys.argv.(1) with _ -> 10
+let num_domains =
+  try int_of_string Sys.argv.(2)
+  with _ -> (try int_of_string (Sys.getenv "DOMAINS") with _ -> 1)
+let num_domains = max 1 num_domains
 
 let min_depth = 4
-
-(* One depth class: build [niter] trees of depth [d], sum their checks.
-   Contribution depends only on (d, niter), not on which domain runs it. *)
-let depth_class d niter =
-  let c = ref 0 in
-  for _ = 1 to niter do c := !c + check (make d) done;
-  (d, niter, !c)
+let max_depth = max (min_depth + 2) depth
+let stretch_depth = max_depth + 1
 
 let () =
-  let max_depth =
-    let n = try int_of_string Sys.argv.(1) with _ -> 16 in
-    max (min_depth + 2) n
-  in
-  let domains =
-    try int_of_string Sys.argv.(2)
-    with _ -> (try int_of_string (Sys.getenv "DOMAINS") with _ -> 1)
-  in
-  let domains = max 1 domains in
-  (* a long-lived tree kept alive across the whole run (a real mature live set) *)
-  let long_lived = make max_depth in
-  (* the fixed task list: one per depth class 4,6,...,max_depth *)
-  let depths = Array.init ((max_depth - min_depth) / 2 + 1) (fun i -> min_depth + i * 2) in
-  let tasks =
-    Array.map (fun d -> (d, 1 lsl (max_depth - d + min_depth))) depths
-  in
-  (* round-robin tasks to domains; each domain runs its assigned classes *)
-  let assigned = Array.make domains [] in
-  Array.iteri (fun i (d, niter) ->
-    let dom = i mod domains in
-    assigned.(dom) <- (d, niter) :: assigned.(dom)) tasks;
-  let spawned =
-    Array.init domains (fun dom ->
-      let my = assigned.(dom) in
-      Domain.spawn (fun () -> List.map (fun (d, niter) -> depth_class d niter) my))
-  in
-  (* gather all class results, sum into a single domain-independent checksum *)
+  (* the stretch tree (built once, discarded) *)
+  let _ = check (make stretch_depth) in
+  ()
+
+(* a long-lived tree kept alive across the whole run (a real mature live set) *)
+let long_lived_tree = make max_depth
+
+(* Build [niter] trees of depth [d] split across [num_domains], sum the checks.
+   The total is independent of how the niter builds are distributed. *)
+let depth_class d niter =
+  let parts = Array.make num_domains 0 in
+  parallel_for 0 (num_domains - 1) (fun ind ->
+    let st = ind * niter / num_domains in
+    let en = ((ind + 1) * niter / num_domains) - 1 in
+    let c = ref 0 in
+    for _ = st to en do c := !c + check (make d) done;
+    parts.(ind) <- !c) num_domains;
+  Array.fold_left (+) 0 parts
+
+let () =
   let checksum = ref 0 in
-  Array.iter (fun dom ->
-    List.iter (fun (d, niter, c) ->
-      checksum := (!checksum + d * 1000003 + niter * 31 + c) land 0x3FFFFFFF)
-      (Domain.join dom)) spawned;
-  let ll_check = check long_lived in
-  Printf.printf "par_binarytrees depth=%d domains=%d checksum=%d long_lived_check=%d\n"
-    max_depth domains !checksum ll_check
+  for i = 0 to ((max_depth - min_depth) / 2 + 1) - 1 do
+    let d = min_depth + i * 2 in
+    let niter = 1 lsl (max_depth - d + min_depth) in
+    let total = depth_class d niter in
+    checksum := (!checksum * 1000003 + d * 31 + niter + total) land 0x3FFFFFFF
+  done;
+  let ll_check = check long_lived_tree in
+  Printf.printf "par_binarytrees depth=%d checksum=%d long_lived_check=%d\n"
+    max_depth !checksum ll_check
