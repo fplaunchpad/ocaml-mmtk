@@ -19,6 +19,13 @@ use mmtk_ocaml_common::slot::OCamlMemorySlice;
 use crate::active_plan::{deregister_by_ptr, register_mutator};
 use crate::{mmtk, OCamlVM, SINGLETON};
 
+/// Dynamic worker scaling enabled (MMTK_THREADS unset).  When true,
+/// `mmtk_ocaml_initialize_collection` defers GC-worker-thread spawning to the first GC, where the
+/// pool is sized to the live domain count (clamped to [1, nproc]).  When false (MMTK_THREADS set),
+/// the worker pool is a fixed size spawned eagerly.  Set in `mmtk_ocaml_init`.
+static DYNAMIC_WORKER_SCALING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Best-effort physical RAM size in bytes — the upper bound for the default dynamic
 /// heap. Returns 0 if it can't be determined (caller falls back to a large constant).
 fn physical_memory_bytes() -> usize {
@@ -113,19 +120,32 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
             "failed to set default nursery"
         );
     }
-    // GC worker count. mmtk-core defaults this to nproc, but EVERY worker parks/wakes on
-    // EVERY collection, contending on a single monitor mutex+condvar; for OCaml's common
-    // single-domain, high-frequency *minor* GC that is pure overhead (measured ~38% slower
-    // at nproc vs 1 on binarytrees; perf: ~82% of GC-worker CPU is park/contend doing zero
-    // work). Default to 1 worker when MMTK_THREADS is unset — the single-domain-optimal
-    // count and a sane start. The intended policy is "workers = number of running domains",
-    // but mmtk-core fixes the pool size at init (no runtime resize), so scaling it to the
-    // live domain count is a gc/mmtk-core-fork follow-up (see gc/mmtk/NOTES.md); until then
-    // parallel/multi-domain workloads should set MMTK_THREADS. Other mmtk-core knobs
-    // (MMTK_STRESS_FACTOR, MMTK_IMMIX_ALWAYS_DEFRAG, …) pass through via MMTKBuilder::new.
+    // GC worker count / dynamic worker scaling.
+    //
+    // mmtk-core defaults this to nproc, but EVERY worker parks/wakes on EVERY collection,
+    // contending on a single monitor mutex+condvar; for OCaml's common single-domain,
+    // high-frequency *minor* GC that is pure overhead (measured ~38% slower at nproc vs 1 on
+    // binarytrees; perf: ~82% of GC-worker CPU is park/contend doing zero work). But fixing the
+    // pool at 1 serialises the parallel *major* GC for multi-domain programs (par_binarytrees
+    // anti-scales d1->d2->d4 = 1.0->0.86->0.68x).
+    //
+    // Policy: GC workers = the maximum concurrent mutator (domain) count, clamped to [1, nproc].
+    // Single-domain -> 1 worker (futex win preserved); N-domain -> N workers (parallel GC scales).
+    // mmtk-core's pool size is still fixed at init, so we PREALLOCATE nproc worker slots
+    // (queues/stealers/shared state) by setting threads=nproc, then DEFER the actual thread spawn
+    // to the first GC via initialize_collection_deferred — at which point mmtk-core sizes the live
+    // thread count to the domain count (see GCWorkScheduler::ensure_workers_spawned).
+    //
+    // If MMTK_THREADS is set, respect it as a FIXED worker count (no dynamic scaling) — an escape
+    // hatch for benchmarking. Other mmtk-core knobs (MMTK_STRESS_FACTOR, …) pass through via
+    // MMTKBuilder::new.
     if std::env::var_os("MMTK_THREADS").is_none() {
+        DYNAMIC_WORKER_SCALING.store(true, std::sync::atomic::Ordering::SeqCst);
+        let nproc = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
         assert!(
-            memory_manager::process(&mut builder, "threads", "1"),
+            memory_manager::process(&mut builder, "threads", &nproc.to_string()),
             "failed to set default GC worker count"
         );
     }
@@ -175,7 +195,13 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_initialize_collection(tls: usize) {
     let tls = VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(tls) }));
-    memory_manager::initialize_collection::<OCamlVM>(mmtk(), tls);
+    if DYNAMIC_WORKER_SCALING.load(std::sync::atomic::Ordering::SeqCst) {
+        // Defer the worker-thread spawn to the first GC, sized to the live domain count.
+        memory_manager::initialize_collection_deferred::<OCamlVM>(mmtk(), tls);
+    } else {
+        // MMTK_THREADS was set: fixed-size pool, spawned eagerly.
+        memory_manager::initialize_collection::<OCamlVM>(mmtk(), tls);
+    }
 }
 
 // ── Mutator (domain) lifecycle ────────────────────────────────────────────
