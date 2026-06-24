@@ -72,18 +72,25 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         "unknown MMTk plan: {}", plan_str
     );
     // Heap sizing. `heap_size == 0` is the runtime's "dynamic" request (the default,
-    // when MMTK_HEAP_SIZE_MB is unset): use MMTk's MemBalancer trigger growing from a
-    // small floor up to physical RAM, so RSS tracks the live set like stock OCaml
-    // instead of pinning a fixed (formerly 1 GB) heap that ballooned footprint ~15x.
-    // A non-zero heap_size pins a fixed heap. An explicit MMTK_GC_TRIGGER env (already
-    // read by MMTKBuilder::new) is honoured: we don't override it in the dynamic case.
+    // when MMTK_HEAP_SIZE_MB is unset): size the heap to a fixed multiple of the live
+    // set after each GC (stock OCaml's `space_overhead`), growing from a small floor up
+    // to physical RAM. RSS tracks the live set (vs the old fixed-1 GB heap, ~15x stock
+    // footprint) while keeping headroom LINEAR in live — unlike MemBalancer's sqrt rule,
+    // which underprovisions large-live-set programs (binarytrees was 3.5x slower under
+    // it). A non-zero heap_size pins a fixed heap. An explicit MMTK_GC_TRIGGER env
+    // (already read by MMTKBuilder::new) is honoured: we don't override it here.
     let trigger = if heap_size != 0 {
         Some(format!("FixedHeapSize:{}", heap_size))
     } else if std::env::var_os("MMTK_GC_TRIGGER").is_none() {
         const MIN_HEAP: usize = 16 * 1024 * 1024;
+        // heap = live × (1 + overhead/100); 120% ≈ stock OCaml's default space_overhead.
+        const OVERHEAD_PCT: usize = 120;
         let ram = physical_memory_bytes();
         let max_heap = if ram > MIN_HEAP { ram } else { 64usize << 30 }; // RAM, or 64 GiB if unknown
-        Some(format!("DynamicHeapSize:{},{}", MIN_HEAP, max_heap))
+        Some(format!(
+            "SpaceOverheadSize:{},{},{}",
+            MIN_HEAP, max_heap, OVERHEAD_PCT
+        ))
     } else {
         None // respect the user's MMTK_GC_TRIGGER
     };
@@ -94,14 +101,18 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         );
     }
 
-    // Nursery: deliberately left on mmtk-core's default (ProportionalBounded 0.25..1.0
-    // of the now-dynamic heap; absolute floor 2 MiB, ceiling 1 TiB/64-bit). A fixed or
-    // heap-proportional nursery is the wrong long-term model for OCaml under MMTk — the
-    // nursery should be sized to a target survival rate (~10%) with a floor that
-    // amortizes MMTk's (relatively high) per-collection cost. That adaptive controller
-    // is future work (see gc/mmtk/NOTES.md). Until then we keep the upstream proportional
-    // default rather than pin the baseline to a guessed constant. Overridable via
-    // MMTK_NURSERY (read by MMTKBuilder::new).
+    // Nursery: a small *bounded* (absolute) nursery. The major heap is sized separately
+    // by the space-overhead trigger above, so the nursery must NOT be a proportion of it
+    // (a proportional nursery grows with the heap → footprint blows up and it stops being
+    // generational). A bounded 2–8 MiB nursery keeps GenImmix generational at low
+    // footprint; with 1 GC worker its frequent minor collections are cheap. Overridable
+    // via MMTK_NURSERY (read by MMTKBuilder::new): only install our default when unset.
+    if std::env::var_os("MMTK_NURSERY").is_none() {
+        assert!(
+            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,8388608"),
+            "failed to set default nursery"
+        );
+    }
     // GC worker count. mmtk-core defaults this to nproc, but EVERY worker parks/wakes on
     // EVERY collection, contending on a single monitor mutex+condvar; for OCaml's common
     // single-domain, high-frequency *minor* GC that is pure overhead (measured ~38% slower
