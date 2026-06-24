@@ -460,6 +460,34 @@ but the faithful choice.
 
 ---
 
+### RQ8 — Is MMTk's eager zero-fill redundant for OCaml? A no-zero allocation mode *(allocation-path overhead; concrete, with an existence proof)*
+
+The sharpest *measured* structural overhead on allocation-heavy OCaml is not the collector at all — it is the
+**allocation path**. mmtk-core 0.32 **eagerly zero-fills every recyclable line/region before the mutator fills
+it** (`immix_allocator.rs` → `util::memory::zero`), unconditionally, on every plan. OCaml then writes every
+word again during initialization, so **every allocated word is written twice**. On spectralnorm this eager
+memset is **~20% of cycles** — the single largest component of the 1.74× gap (NOTES 2026-06-24), plan-independent
+and explicitly not heap-fixable.
+
+**Why it is plausibly removable — and the existence proof.** OCaml fully initializes every block before the
+next safepoint, and **vanilla OCaml's minor heap is never zeroed** — it bump-allocates into recycled,
+uninitialized young memory and relies on "no GC between `caml_alloc` and field-fill." That is a *standing proof*
+that OCaml's allocation discipline is safe on unzeroed young memory; MMTk's unconditional zeroing duplicates
+work OCaml already does. The research: **(1)** a no-zero (or zero-on-demand) allocation mode in mmtk-core, gated
+on the binding asserting the host fully-initializes before any GC-observable point; **(2)** the correctness
+argument that no GC scans a partially-initialized object on the unzeroed TLAB path (the native poll sits at the
+alloc/back-edge, not mid-object) — porting vanilla's invariant into the MMTk contract; **(3)** quantify the
+recovery (hypothesis ~15–20% on allocation-bound workloads) and the nursery-sizing/locality interaction,
+**without** touching pause behavior.
+
+**Novelty/payoff.** A general GC framework pays a zeroing tax the host language's own discipline makes
+unnecessary; measuring and removing it is a concrete framework-vs-bespoke-runtime finding (RQ4-adjacent) with a
+clean lever and an existence proof. **Independent of and complementary to RQ7** — RQ8 is the *mutator/allocation*
+axis, RQ7 the *collector* axis. **Venue:** MPLR/ISMM. **Risk:** medium (mmtk-core change + safety argument).
+**Novelty: strong**, and the **biggest single measured lever** — immediately actionable.
+
+---
+
 ## What each question needs from the platform
 
 - **Common prerequisite:** finish M9 (ROADMAP #8 — retire the always-false `Is_young` reservation +

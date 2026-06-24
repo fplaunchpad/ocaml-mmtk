@@ -5,6 +5,51 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## spectralnorm's 1.74× = MMTk's eager zero-fill double-write + nursery-locality loss — NOT heap-fixable; generational recovers only ~8%
+
+*2026-06-24*
+
+Drilled into the one structural MMTk-vs-vanilla loss (spectralnorm, native Immix 1.74× @256MB). The verdict is
+**(c) intrinsic allocation-path cost, with a partial (a) plan component, and explicitly NOT (b) heap-bound** —
+and it points at a concrete, publishable lever (see RQ8).
+
+1. **Allocation profile.** 720 M minor words ≈ **5.76 GB, 100% dead-on-arrival** (`promoted=0`, `major_words=0`).
+   The driver is **boxed floats**, not the float arrays (~0.5 MB total): the build is **non-flambda**, so
+   `eval_A` isn't inlined and returns a 2-word boxed float — 360 M boxes × 2 words = 720 M words (matches
+   `Gc.stat`). The 23 GCs are **allocation-volume-driven** (5.76 GB ÷ 256 MB), NOT a poll storm: `caml_call_gc`
+   = 0.29% of cycles, total GC time ~106 ms (<3% of wall). **Benchmark-fidelity caveat:** a *flambda* build
+   would unbox these floats and likely erase most of the allocation — so spectralnorm is allocation-heavy
+   partly as a non-flambda artifact. Measure both flambda and non-flambda (Sandmark does); the structural
+   finding below holds for any allocation-heavy OCaml regardless.
+
+2. **Plan sweep @256MB** (ratio vs vanilla 2.165 s): GenImmix **1.60×** = GenCopy 1.60× < SemiSpace 1.65× <
+   ConcurrentImmix 1.68× < StickyImmix 1.71× < Immix 1.74×. **Generational helps but does not close it** —
+   it removes the whole-heap line sweep (1.74→1.60) but the residual 1.60× is shared mutator-/alloc-side cost
+   no plan removes. (Confirms the GenImmix-default decision is right, but worth only ~8% here.)
+
+3. **Heap-multiple curve — ANTI-frequency regime.** Immix 1.74×(24 GC)@256 → 1.87×(12)@512 → 2.08×(6)@1G →
+   2.52×(3)@2G. Bigger heap ⇒ fewer GCs but **worse** ratio; Immix GC time stays ~flat (~106–120 ms) as GC
+   count drops 8×, so per-GC sweep scales with heap. **Not heap-fixable — run at the smallest heap that fits
+   the live set.**
+
+4. **Sweep-cost anatomy (`perf record`).** vanilla: 99.6% mutator, **zero memset**. Immix: mutator 51%, **libc
+   memset 20.3%**, bzero_metadata 4.6% + SweepChunk 2.2% + Line::is_marked 1.0% (~8% sweep), page-faults ~5%.
+   **The 20% memset is eager line-zeroing** (`immix_allocator.rs:253` → `util::memory::zero` → `write_bytes`):
+   mmtk-core zero-fills every recyclable line before the mutator fills it, so **every word is written twice**
+   (MMTk zeroes, then OCaml initializes) vs once in vanilla. It is **unconditional in mmtk-core 0.32** — no VM
+   flag to skip — and present in **every** plan incl. GenImmix. IPC collapses 3.65→2.32 with 115× cache-misses
+   / 124× dTLB-misses: vanilla's 256 KB minor heap stays cache-hot; MMTk bump-allocates across a multi-MB heap.
+
+**The lever (→ RQ8).** OCaml fully initializes every object before any safepoint, and **vanilla OCaml already
+runs on an *unzeroed* minor heap** — an existence proof that OCaml's allocation discipline tolerates non-zeroed
+young memory. So MMTk's eager zero-fill is **redundant for OCaml**, and a **no-zero allocation mode** in
+mmtk-core (gated on the binding asserting full-init-before-GC-observable) should recover ~20% on
+allocation-heavy code, with **zero pause-time impact**. The correctness crux — can a GC observe a
+partially-initialized object on the unzeroed path? — is exactly what vanilla's design already answers (no GC
+between alloc and field-fill). Full writeup: `~/spectralnorm-investigation.md` on turing.
+
+---
+
 ## perf: the obvious-removal micro-levers buy ~1.5% (one load-bearing: C1-sftbound) — the MMTk-vs-vanilla gap is structural
 
 *2026-06-24*

@@ -286,6 +286,16 @@ The full ranked backlog is **Appendix A** of this document (canonical); ROADMAP 
 > correctness-gated); the neutral cleanups live on `perf-lever-*`. Detail: `gc/mmtk/NOTES.md` (2026-06-24);
 > `~/postfix-baseline-findings.md`, `~/perf_opt_findings.md` on turing. **Nothing merged** to `5.5+mmtk`.
 
+> **spectralnorm drill-down (2026-06-24) — the biggest single measured structural lever.** The lone loss
+> (spectralnorm 1.74×) is **not** the collector: it is mmtk-core's **unconditional eager zero-fill** (memsets
+> every recyclable line before the mutator fills it → every word written twice → **~20% of cycles**,
+> plan-independent, **not heap-fixable**: bigger heap ⇒ fewer GCs but *worse* ratio). Generational (the new
+> GenImmix default) recovers only ~8% (whole-heap line-sweep removal). **The lever → RQ8: a no-zero allocation
+> mode** — vanilla OCaml already runs on an *unzeroed* minor heap, so the zeroing is redundant for OCaml;
+> removing it should recover ~15–20% on allocation-bound code with zero pause impact. **Flambda confound:**
+> spectralnorm's 5.76 GB is non-flambda boxed floats (`eval_A` not inlined) — measure flambda too. Detail:
+> NOTES 2026-06-24; `~/spectralnorm-investigation.md` on turing.
+
 ## #17 / M8 — ranked optimization backlog (perf work)
 
 Adopt `PERFORMANCE.md` as the method of record FIRST; do obvious removals, then measure each
