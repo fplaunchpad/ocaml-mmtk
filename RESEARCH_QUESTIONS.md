@@ -498,6 +498,26 @@ clean lever and an existence proof. **Independent of and complementary to RQ7** 
 axis, RQ7 the *collector* axis. **Venue:** MPLR/ISMM. **Risk:** medium (mmtk-core change + safety argument).
 **Novelty: strong**, and the **biggest single measured lever** — immediately actionable.
 
+**Scoped (2026-06-24) — design ready; SAFE for STW plans, must be gated OFF for concurrent.** Allocation-time
+zeroing has exactly **two** sites in mmtk-core 0.32, both → `util/memory.rs:167 zero()`: **site 1** (dominant)
+`immix_allocator.rs:253` `acquire_recyclable_lines` (recycled holes in reused Immix blocks, **unconditional**),
+and **site 2** `policy/space.rs:229` `get_new_pages_and_initialize` (`if zeroed` — clean Immix blocks + the
+GenImmix/GenCopy CopySpace nursery + LOS). The **default GenImmix needs both killed** (nursery = site 2, mature
+= site 1). GC-time metadata bzero is separate — leave it. **No knob exists** (per-space `zeroed` is hardcoded
+true, binding-invisible, and governs only site 2) → **a fork of mmtk-core is required**; minimal patch is a
+`no_zero_alloc` Cargo feature `#[cfg(not(...))]`-ing the two sites. **Correctness: SAFE for STW plans** by
+vanilla's own invariant (minor heap never zeroed; native `Ialloc` polls *before* the field `Istore`s with no
+safepoint between; the scanner is header-driven and the header is always written; no-scan tags
+String/Bytes/Double/Custom read zero fields → strict wins). One load-bearing case: **`Closure_tag`** (the
+scanner reads field 1 `closinfo` to compute `start_env`; OCaml already forbids a GC before `closinfo` is set —
+issue #11482 — so the gate must stress closure-heavy code). **RED FLAG — incompatible with concurrent marking:**
+a concurrent marker can observe an object in the header-written / fields-unwritten window; **with** zeroing the
+unwritten fields read as safe immediates, **without** it as garbage pointers. So no-zero must be **gated OFF for
+ConcurrentImmix**, and the **GenConcurrentImmix hybrid (RQ7) inherits this as a design problem** — combining
+no-zero throughput with concurrent-mark latency needs an **init-publishing (zero-on-publish / SATB-style)
+allocation barrier**. Net: RQ8 is a clean win on the **default (GenImmix, STW) today**; the concurrent
+combination is a sharper sub-question that couples RQ8 ↔ RQ1 ↔ RQ7. Design: `~/rq8-nozero-design.md` on turing.
+
 ---
 
 ## What each question needs from the platform
