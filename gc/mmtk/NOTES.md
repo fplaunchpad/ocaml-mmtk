@@ -5,6 +5,28 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## finaliser_handover UAF — FIXED (root orphaned finalisers every GC); + a separate adoption-routing residual
+
+*2026-06-24*
+
+FIXED the orphaned-finaliser use-after-free (rr diagnosis below). `caml_mmtk_scan_orphaned_finalisers`
+(`runtime/major_gc.c`) walks `orph_structs.final_info` under `orphaned_lock` and roots it — first/last
+`.fun` always, `.val` only `if (do_val)`; every `todo` run-queue `.fun`/`.val` unconditionally — mirroring
+`caml_final_do_roots` via `Call_action` (slot-passing, so the moving GC fixes the `caml_stat_alloc`'d table
+slots). The binding's `scan_vm_specific_roots` calls it with `do_final_val = weak_refs ? 0 : 1` (matching the
+live-domain `scan_roots_in_mutator_thread` path). `finaliser_handover.ml`: **3/3 SIGSEGV → 0/62** at
+`GenImmix MMTK_HEAP_SIZE_MB=64`. Landed **`a1971a465d`** (+84/-4, 3 files). `weak-ephe-final` dir now 9/14
+(finaliser_handover passes; the 5 fails are the pre-existing GH#5 weak-clear, single-domain, untouched).
+
+**Separate residual the crash was masking (NOT introduced by the fix):** `assert(finalise_count ==
+work_count)` in finaliser_handover fails **~2/30 at 64 MB** — a **multi-domain orphan-adoption-routing**
+issue (0/20 single-domain, 0/20 default heap; only under small-heap multidomain GC pressure). `diff = 502 =
+251×2` = one terminated domain's *entire* finaliser set: adopted finalisers get queued onto
+`domain_addrs().first()`, which then never reaches a safepoint to drain them, so not all run. This is an
+under-execution/liveness bug (finalisers adopted but not all run), **not** a crash. Follow-up.
+
+---
+
 ## bug #3c (rare multidomain spawn hang) — rr-diagnosed: orphaned `gc_active` STW shadow flag
 
 *2026-06-24*
