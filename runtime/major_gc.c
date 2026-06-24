@@ -629,6 +629,55 @@ void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
   }
 }
 
+/* ── Scan orphaned finalisers as roots (fixes finaliser_handover use-after-free) ──
+   Finaliser values handed off by a terminated domain sit in [orph_structs.final_info]
+   between orphaning and adoption (caml_mmtk_adopt_orphaned_finalisers, above). Until
+   adopted they are referenced only from those orphaned tables, which no domain root
+   scan covers — so the nursery objects they point at are neither rooted nor forwarded
+   by the GCs that run in between, and the copy-nursery is recycled over them. A
+   queued finaliser then runs against aliased garbage (the finaliser_handover SIGSEGV).
+
+   Mirror caml_final_do_roots (runtime/finalise.c) over every orphaned struct so the
+   binding can report these slots as roots in scan_vm_specific_roots, exactly as a
+   *live* domain's finalisers are rooted via caml_do_roots. The tables are
+   caml_stat_alloc'd C-heap arrays (like global roots), so we pass each slot's
+   address and the moving GC updates it in place. [do_val] gates rooting first/last
+   *values*: with MMTK_WEAK_REFS on it must be 0 (matching caml_do_roots) so dead
+   finalisable values can be detected and their finalisers fire; the run-queue
+   (todo) values are unconditionally rooted — they are already scheduled to run, so
+   they MUST survive (this is the crash case). The orphaned_lock guards against a
+   concurrent orphaning (cheap; we are under STW). */
+#define Call_action(act,fdata,x) ((*(act)) ((fdata), (x), &(x)))
+void caml_mmtk_scan_orphaned_finalisers(scanning_action act,
+                                        scanning_action_flags fflags,
+                                        void* fdata, int do_val)
+{
+  (void)fflags;
+  caml_plat_lock_blocking(&orphaned_lock);
+  for (struct caml_final_info* fi = orph_structs.final_info;
+       fi != NULL; fi = fi->next) {
+    for (uintnat i = 0; i < fi->first.young; i++) {
+      Call_action (act, fdata, fi->first.table[i].fun);
+      if (do_val)
+        Call_action (act, fdata, fi->first.table[i].val);
+    }
+    for (uintnat i = 0; i < fi->last.young; i++) {
+      Call_action (act, fdata, fi->last.table[i].fun);
+      if (do_val)
+        Call_action (act, fdata, fi->last.table[i].val);
+    }
+    for (struct final_todo* todo = fi->todo_head;
+         todo != NULL; todo = todo->next) {
+      for (uintnat i = 0; i < todo->size; i++) {
+        Call_action (act, fdata, todo->item[i].fun);
+        Call_action (act, fdata, todo->item[i].val);
+      }
+    }
+  }
+  caml_plat_unlock(&orphaned_lock);
+}
+#undef Call_action
+
 /*******************************************************************************
  * Pacing
  ******************************************************************************/
