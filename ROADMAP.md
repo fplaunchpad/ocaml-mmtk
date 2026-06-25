@@ -282,16 +282,17 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    Feasibility: FEASIBLE against a non-generational **Immix** major with **zero mmtk-core changes** (mutator
    `Default` maps to mature Immix; promotion = `mmtk_ocaml_alloc(.., Default)`; barrier clean — under Immix
    `caml_mmtk_generational==0` so MMTk's nursery barrier is off and stock `ref_table` is reusable), and **NOVEL**
-   (no MMTk binding keeps a VM nursery in front of an MMTk major). **But the experiment kills the motivation:**
-   the controlled multi-domain anti-scaling is **mostly a too-small DEFAULT NURSERY** — GenImmix's shared
-   copy-nursery (cap 64 MiB) split across N domains fills N× faster → N× more minor STWs. Measured (church,
-   pinned, `MMTK_THREADS=domains`, par_binarytrees d21): GenImmix default S(8)=**1.13**; **raise the cap to
-   512 MiB → S(8)=2.63 and ~2× faster single-domain, 4.3× faster at d8** (best absolute time of all plans, +0.3 GB
-   RSS). StickyImmix (in-place nursery, same STW) S(8)=**2.86** — confirming the STW rendezvous is **not** the
-   bottleneck, the under-provisioned shared nursery is. **→ Pole-B NO-GO** (a config knob and/or existing
-   StickyImmix already beat it; a VM-ParMinor rebuild is unjustified). **Actionable spin-off (NEW, cheap, ships
-   now): scale the default nursery cap with domain count** (`≈ base × num_domains`) or raise it substantially —
-   helps the default plan directly. → see item below.
+   (no MMTk binding keeps a VM nursery in front of an MMTk major). **But the experiment kills the motivation — it's nursery PROVISIONING, not architecture**
+   (church, pinned, `MMTK_THREADS=domains`, par_binarytrees d21; NOTES 2026-06-25): StickyImmix (in-place
+   nursery, *same* all-domains STW + root-scan) scales S(8)=**2.86** vs GenImmix-default **1.13** ⇒ the STW
+   rendezvous is **not** the bottleneck. A correctly-applied larger GenImmix nursery also recovers it
+   (dose-response, explicit raw-byte cap: 64 MiB S(8)=1.60 → **256 MiB S(8)=2.58 at only ~360 MB RSS,
+   commit-on-demand**). **→ Pole-B NO-GO** — fixed in-framework (nursery and/or StickyImmix); a VM-ParMinor
+   rebuild is unjustified. The probe also uncovered **two nursery BUGS** (now ROADMAP #21): (A) the
+   **default-nursery install is degenerate** — the unset path does 913 minor GCs / d1=11.62 s while an
+   *explicit identical 64 MiB* env does ~half (6.72 s), i.e. `api.rs:118`'s default `process("nursery", …)`
+   doesn't take effect like the env path; (B) the documented **`MMTK_NURSERY="Bounded:2m,64m"` suffix syntax
+   silently parse-fails** (raw bytes only). → see item below.
 
 10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (ongoing).** Work
     through the remaining testsuite non-pass (M7: ~1450/1547 pass under Immix/StickyImmix; the ~97 non-pass
@@ -339,17 +340,29 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     that flag (a domain that released its lock is absent → not awaited; `mmtk_ocaml_try_mark_running` is the
     return-edge re-check). Deleting the backup thread = **Phase 3** of the #18 verified plan.
 
-12. **#21 — scale the default nursery cap with domain count (cheap, high-impact; spin-off of RQ10 pole-B
-    experiment).** The shared copy-nursery default (`Bounded 2–64 MiB`) is **too small for multicore**: split
-    across N domains it fills ~N× faster → ~N× more all-domains minor STWs → the GenImmix multi-domain
-    anti-scaling (measured: par_binarytrees d21, S(8)=1.13 at 64 MiB → **2.63 at 512 MiB**, with **~2× faster
-    single-domain and 4.3× faster at d8**, +0.3 GB RSS; NOTES 2026-06-25). Fix: make the default nursery cap
-    **scale with `num_domains`** (≈`base × num_domains`, so each domain keeps a constant effective slice) instead
-    of a fixed 64 MiB, clamped to a fraction of the heap. Touch points: the nursery default in `runtime/mmtk.c`
-    init + the `MMTK_NURSERY` parse (`api.rs`); `num_domains` is known/queryable. **Validate** the default-plan
-    (GenImmix) sequential panel doesn't regress (a too-big nursery over-provisions tiny single-domain heaps —
-    that's why it was capped 64 MiB; the domain-scaling keeps d1 at ~64 MiB) + the d2/4/8 scaling win. This is the
-    concrete, shippable answer to the RQ10 anti-scaling question — it improves the plan everyone uses by default.
+12. **#21 — fix the nursery (two bugs + a cheap default raise; high-impact spin-off of the RQ10 pole-B
+    experiment).** The pole-B probe (NOTES 2026-06-25) found the GenImmix multi-domain anti-scaling is a
+    **nursery-provisioning** effect and uncovered two concrete bugs. In priority order:
+    - **(a) BUG A — the default-nursery install is degenerate (highest impact).** The binding sets the default to
+      `Bounded:2097152,67108864` (= 64 MiB) when `MMTK_NURSERY` is unset (`gc/mmtk/binding/src/api.rs:116-119`),
+      but the unset path runs **913 minor GCs / d1=11.62 s / S(8)=1.13** (verbose-confirmed), while setting the
+      *identical 64 MiB* via env (raw bytes) runs ~half the time (**6.72 s, S(8)=1.60**). Same string, two code
+      paths (binding's `memory_manager::process("nursery", …)` *after* `MMTKBuilder::new` vs the env-read *inside*
+      `new`), two behaviours — so `api.rs:118` does not take effect like the env path. **Corroborated by
+      SCALABILITY §10.2's GC counts** (923 GCs @2–8 MiB, 114 @64 MiB; this probe's unset-default = 913 ⇒ the
+      *8 MiB* behaviour, not the intended 64 MiB): the default plan is silently on an ~8 MiB nursery — the single
+      root cause of GenImmix's single-domain slowness *and* multi-domain anti-scaling. This degrades the
+      **default GenImmix everyone runs**. Root-cause (church needed: verbose GC-count of explicit-64M, expected
+      ~114; check whether a post-`new` `process()` is honoured) and fix.
+    - **(b) Raise the default bounded cap to ~256 MiB.** Dose-response (explicit raw-byte caps): 64 MiB S(8)=1.60
+      → **256 MiB S(8)=2.58 at only ~360 MB RSS** (the bounded nursery is **commit-on-demand**, so a higher cap is
+      ~free for small programs — it costs RSS only if the program allocates that fast) → 1024 MiB S(8)=2.60
+      (plateau). This weakens the original footprint argument for 64 MiB (which targeted a *proportional* nursery).
+      Validate the GenImmix sequential panel doesn't regress + the d2/4/8 win + RSS at memory parity.
+    - **(c) BUG B — `MMTK_NURSERY` suffix syntax is broken.** `Bounded:2m,64m` (documented in CLAUDE.md/README)
+      silently parse-fails → falls back to mmtk-core's default; only raw bytes parse. Fix the parser to accept
+      `k/m/g` suffixes, or correct the docs to raw-byte syntax.
+    Net: the concrete, shippable answer to the RQ10 anti-scaling question — improves the default plan directly.
     → RQ10; NOTES 2026-06-25; supersedes the need for pole-B.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
