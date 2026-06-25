@@ -1,6 +1,37 @@
 # Multi-domain GC scalability of `mmtk-ocaml` — findings
 
-**TL;DR.** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
+> ## ⚠️ UPDATE (2026-06-25) — the anti-scaling headline below is SUBSTANTIALLY REVISED
+>
+> A **controlled re-run** (core-pinned, **`MMTK_THREADS=domains`** so domains + GC workers ≤ cores, and
+> with the **GH#6 scheduler-assert deadlock fixed**, mmtk-core `ec2f5079f8`) shows the dramatic
+> "anti-scaling" was **largely a measurement artifact**, not a structural STW-pause property:
+>
+> - **The GC-worker count WAS a dominant factor** — contradicting the old TL;DR's "*not* the worker
+>   count". The old runs used **`nproc` workers, unpinned**, so at high domain count ~20 threads
+>   contended for 12 cores and idle workers park/wake on every collection. The old experiments compared
+>   *plans at fixed `nproc`* and never tested `workers=domains`, so they missed this confound. The same
+>   `nproc` tax also inflated the *single-domain* sequential numbers (`LU_decomposition` is **2.26× at
+>   `nproc` → 1.05× at `MMTK_THREADS=1`**; it triggers ~2467 tiny collections from boxed intermediates).
+> - **Controlled scaling (turing, 28-core, pinned, `workers=domains`):** `par_matmul` scales **as well as
+>   vanilla** (GenImmix `S(8)=4.71`, ConcurrentImmix `5.78` ≈ vanilla `5.72`); `par_binarytrees` GenImmix
+>   is **`S(8)=1.36`** (mildly sublinear) — *not* the `0.64` cliff below; on `par_spectralnorm` even
+>   vanilla regresses past d4 (memory-bandwidth bound) and StickyImmix scales *better* than vanilla.
+> - **The old "GenImmix cliffs / times out past 16 domains" was the GH#6 deadlock** — the STW-only
+>   `scheduler.rs` assert firing plan-independently at ≥8 domains (a 2nd domain's alloc poll, or a domain
+>   being *created* refilling its TLAB, requests a GC mid-GC → worker panic → poisoned WorkerMonitor →
+>   all domains deadlock). rr-confirmed; the assert is **removed for all plans** (`ec2f5079f8`). It was
+>   **not** a structural pause blow-up.
+> - **Real residual:** a *mild* sublinear gap on the heaviest-alloc bench (`par_binarytrees`), plus a
+>   **rarer intermittent multidomain-rendezvous hang** that survives the assert fix (the bug#3c-class
+>   residual — the experiments below partly describe it; needs more rr).
+>
+> **Net:** the flagship "anti-scaling" deflates to a *mild* residual once `nproc` oversubscription and the
+> GH#6 deadlock are removed. The detailed experiments below are retained as historical record, but their
+> headline conclusions — especially "**not** the worker count" and `S(8)=0.64` — are **superseded** by
+> this update. The real open levers are a **domain-aware GC-worker pool** and the per-minor-collection
+> cost (RQ10).
+
+**TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The
 cause is **not** the GC worker-thread count, and **not** the forced full GC we do on every
