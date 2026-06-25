@@ -161,8 +161,15 @@ void caml_mmtk_init(void)
          (black) objects, so the header-written / fields-unwritten window is never
          traced. Hence no-zero is safe here too.
      Set before any allocation (this runs at init, before any domain/mutator is
-     bound). Pass 0: zeroing off for ALL plans. */
-  mmtk_ocaml_set_alloc_zeroed(0);
+     bound).
+     EXCEPTION: MarkCompact must keep zeroing ON. It is a Lisp-2 sliding-compaction
+     plan whose mark / compute-forwarding passes reconstruct per-object metadata
+     (the per-object VO bit + reserved forwarding header word) by reading object
+     fields across the whole heap; the unzeroed-minor-heap discipline above does
+     not cover those reads, so with no-zero MarkCompact reads garbage and SIGSEGVs
+     on alloc-heavy programs (CLBG binarytrees/mandelbrot/knucleotide). It was never
+     validated under no-zero (only the Immix family + ConcurrentImmix were). */
+  mmtk_ocaml_set_alloc_zeroed(strcmp(plan, "MarkCompact") == 0);
 
   {
     /* On by default; MMTK_WEAK_REFS=0 opts out to the conservative scheme. */
