@@ -28,10 +28,17 @@ contaminated by it. Lesson banked: verify a bench host's branch + clean rebuild 
 The real residual is **mild and similar across plans** (S(8)≈1.2–1.6), not the contaminated 1.13-vs-2.86 cliff.
 Two findings:
 
-**Finding 1 — nursery SIZE is a real lever (confirmed clean).** GenImmix at a **256 MiB** cap is ~20% faster at
-*every* domain count (d1 7.78 vs 9.32; d8 4.88 vs 7.60), drops d1 GCs 114→28, and lifts S(8) 1.23→1.59. The
-bounded nursery is **commit-on-demand**, so a higher *cap* is ~free for small programs (RSS only grows if they
-allocate that fast). This is the cheap, shippable win → ROADMAP #21.
+**Finding 1 — nursery SIZE is a lever, but FIXED-HEAP-ONLY (moot under the default dynamic heap).** With a
+**pinned large heap** (the table above, `MMTK_HEAP_SIZE_MB=4096`) GenImmix at a 256 MiB cap is ~20% faster at
+every domain count (d1 7.78 vs 9.32; d8 4.88 vs 7.60), drops d1 GCs 114→28, lifts S(8) 1.23→1.59. **BUT under
+the DEFAULT dynamic (space-overhead) heap the cap is moot** — confirmed local: binarytrees-19 gives **281 GCs
+@256 MiB vs 285 @64 MiB** (≈same), and at a fixed 4 GiB the *same* bench gives 6 vs 25. The reason: under a
+dynamic heap (live×2.2) the **space-overhead trigger**, not the nursery cap, gates collection frequency, and a
+low-live workload gets a tiny heap → tiny nursery regardless of cap. So raising the cap does **not** help the
+plan as users actually run it (dynamic heap). → ROADMAP #21(a) DEFERRED (fixed-heap-only); needs the full
+memory-parity panel before landing. The genuinely-default-relevant lever is the **dynamic-heap floor**:
+spectralnorm-5500 at the default heap does ~19,600 minor GCs (tiny live set → tiny heap → constant collection) —
+the heap-trigger/nursery coupling, #21(c), an open follow-up.
 
 **Finding 2 — but the nursery does NOT fix the slope; the residual is per-collection STW cost.** Even
 GenImmix-256 MiB — only 28–86 GCs across d1→d8 — still **regresses d4→d8** (4.71→4.88). So the nursery shifts the

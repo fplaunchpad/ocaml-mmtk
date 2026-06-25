@@ -341,29 +341,33 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     that flag (a domain that released its lock is absent → not awaited; `mmtk_ocaml_try_mark_running` is the
     return-edge re-check). Deleting the backup thread = **Phase 3** of the #18 verified plan.
 
-12. **#21 — raise the default nursery cap + fix the `MMTK_NURSERY` parser (cheap, clean spin-off of the RQ10
-    pole-B experiment).** Clean mainline measurement (turing, pinned, par_binarytrees d21; NOTES 2026-06-25).
-    In priority order:
-    - **(a) Raise the default bounded cap from 64 MiB to ~256 MiB (the cheap win; CONFIRMED clean).** GenImmix
-      with a 256 MiB cap is **~20% faster at every domain count** (d1 9.32→7.78 s, d8 7.60→4.88 s) and lifts
-      S(8) 1.23→1.59, dropping d1 GCs 114→28. The bounded nursery is **commit-on-demand**, so a higher *cap* is
-      ~free for small programs (RSS only grows if they allocate that fast) — this weakens the original footprint
-      argument for 64 MiB (which targeted a *proportional* nursery). Edit the default in `api.rs:116-119`
-      (`Bounded:2097152,268435456`). Validate: GenImmix sequential panel doesn't regress + the d2/4/8 win + RSS at
-      memory parity. (Bigger still — 1024 MiB — plateaus at S(8)≈1.6, so 256 MiB is the sweet spot.)
-    - **(b) BUG B — `MMTK_NURSERY` suffix syntax is broken (mainline-confirmed).** `Bounded:2m,64m` (documented in
-      CLAUDE.md/README) silently parse-fails (*"Can't parse value. Default value will be used"*) → falls back to
-      mmtk-core's default; only raw bytes (`Bounded:2097152,67108864`) parse. Reproduced on clean local mainline.
-      Fix the parser to accept `k/m/g` suffixes, or correct the docs to raw-byte syntax.
-    - **NOT a mainline bug (was mis-filed): the "degenerate default install / 913 GCs"** was a **church
-      `fix/bug3c-cross-stw` build artifact** — clean mainline on local + turing gives 114 GCs (the correct
-      64 MiB). Worth checking before merging `fix/bug3c-cross-stw` (it would be a real regression if it carries
-      this), but it does not affect mainline.
-    - **Note the limit:** the nursery is a *level* lever, not a *slope* fix — even GenImmix-256 MiB (few GCs) still
-      regresses d4→d8, so the residual multi-domain sublinearity is the per-collection STW cost, addressed by
-      off-STW marking (ConcurrentImmix), not by the nursery. → RQ10; NOTES 2026-06-25.
-    Net: the concrete, shippable answer to the RQ10 anti-scaling question — improves the default plan directly.
-    → RQ10; NOTES 2026-06-25; supersedes the need for pole-B.
+12. **#21 — nursery findings (spin-off of the RQ10 pole-B experiment); ONE clean fix (BUG B), the rest needs
+    care.** Investigated 2026-06-25 (turing + local mainline). Findings, with the important caveat that the
+    nursery-cap win is **fixed-heap-only**:
+    - **(a) Raise the default cap 64→256 MiB — DEFERRED; helps only with a fixed large heap, MOOT under the
+      default dynamic heap.** With `MMTK_HEAP_SIZE_MB` pinned large (turing, 4 GiB), 256 MiB beats 64 MiB on
+      par_binarytrees d21 (~20% faster, S(8) 1.23→1.59, GCs 114→28). **But under the DEFAULT (dynamic
+      space-overhead) heap the cap is moot** — confirmed local: binarytrees-19 gives 281 GCs @256 MiB vs 285
+      @64 MiB (≈same), because the *space-overhead trigger* (live×2.2), not the nursery cap, limits collection
+      frequency. So raising the cap does not help the plan as users actually run it. Implemented + reverted on a
+      throwaway branch; do NOT land without the full quick-panel memory-parity validation (moderate-live
+      workloads at dynamic heap could see the nursery approach the cap and raise RSS — untested).
+    - **(b) BUG B — `MMTK_NURSERY` suffix syntax is broken (mainline-confirmed); the one CLEAN fix.**
+      `Bounded:2m,64m` (documented in CLAUDE.md/README) silently parse-fails (*"Can't parse value. Default value
+      will be used"*) → falls back to mmtk-core's default; only raw bytes (`Bounded:2097152,67108864`) parse.
+      Reproduced on clean local mainline. Fix the parser to accept `k/m/g` suffixes, **or** correct the docs to
+      raw-byte syntax (cheap, do this).
+    - **(c) The REAL default-condition lever (open): the dynamic-heap floor under-provisions low-live/high-alloc
+      workloads.** spectralnorm-5500 at the default dynamic heap does ~19,600 minor GCs (the space-overhead heap
+      is tiny because the live set is tiny → tiny nursery → constant collection). This — the heap-trigger/nursery
+      coupling for low-live workloads — not the cap, is what would actually help the default; needs its own
+      investigation (and a vanilla comparison to confirm it's GC-bound, not compute-bound).
+    - **NOT a mainline bug: "degenerate default install / 913 GCs"** was a **church `fix/bug3c-cross-stw` build
+      artifact** — clean mainline (local + turing) gives 114 GCs (correct 64 MiB). Check before merging that
+      branch; not a mainline issue.
+    - **Note the limit:** the nursery is a *level* lever, not a *slope* fix — even at a large fixed heap,
+      GenImmix-256 MiB still regresses d4→d8, so the residual multi-domain sublinearity is the per-collection STW
+      cost, addressed by off-STW marking (ConcurrentImmix), not the nursery. → RQ10; NOTES 2026-06-25.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

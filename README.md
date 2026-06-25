@@ -119,7 +119,7 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 |----------|---------|---------|
 | `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
 | `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand, like stock OCaml. |
-| `MMTK_NURSERY` | `Bounded:2m,64m` | Generational-plan nursery (GenImmix/GenCopy/StickyImmix), bounded/absolute and commit-on-demand (adapts down to fit small heaps). The 64 MiB max keeps GenImmix competitive single-domain on allocation-heavy workloads; e.g. `Fixed:33554432`, `Bounded:2m,128m`. |
+| `MMTK_NURSERY` | `Bounded:2097152,67108864` (2–64 MiB) | Generational-plan nursery (GenImmix/GenCopy/StickyImmix), bounded/absolute and commit-on-demand (adapts down to fit small heaps). The 64 MiB max keeps GenImmix competitive single-domain on allocation-heavy workloads. **Value must be raw BYTES** — e.g. `Fixed:33554432`, `Bounded:2097152,134217728`; the `2m,128m` suffix form does **not** parse (silently falls back to the default). |
 | `MMTK_THREADS` | _nproc_ | GC worker threads. **Set `MMTK_THREADS=1` for single-/few-domain runs** — the `nproc` default oversubscribes and slows high-collection workloads (a domain-aware pool is the open fix). |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
