@@ -211,6 +211,12 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `caml_empty_minor_heap_promote`/minor barriers/`caml_minor_cycles_started`) is inert *as
    collection* but is the live `Domain.spawn`/terminate STW rendezvous — retiring it needs MMTk's
    STW to become the sole rendezvous, **the same rework as #3c (item 1)**. → NOTES 2026-06-24.
+   **Not a local cleanup — it is an architecture decision** (which generation the framework owns) that must
+   be **reconciled structurally with how other runtimes do minor collection** (OCaml ParMinor, GHC local
+   heaps, Erlang per-process heaps, the Julia/CRuby MMTk bindings), and weighed against the **inverse**
+   option — keep stock's *scalable* minor and use MMTk **major-only**. Both directions, and the empirical
+   motivation (the fork's multi-domain anti-scaling), are written up as **RESEARCH_QUESTIONS RQ10** /
+   `SCALABILITY.md`.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

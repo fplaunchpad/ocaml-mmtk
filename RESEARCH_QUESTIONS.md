@@ -576,6 +576,72 @@ MPLR/ISMM.
 
 ---
 
+### RQ10 — What is the right minor-collection architecture for OCaml-on-MMTk? Keep stock's scalable minor, or make MMTk's STW the sole rendezvous? *(architecture; motivated by the multi-domain anti-scaling finding)*
+
+**Hook (the empirical trigger).** The 2026-06 scalability study (`SCALABILITY.md`) found the fork's default
+(GenImmix) *anti-scales* across domains on allocation-heavy parallel work: vanilla OCaml 5.5 speeds up
+~3.9× at 8 domains where the fork gets *slower* (S(8) ≈ 0.64), and on a 56-core box the generational plans
+**cliff** (GenImmix times out past 16 domains). The mechanism is **not** GC-worker count and **not** the
+per-terminate forced GC; it is that **every MMTk collection is an all-domains stop-the-world whose
+per-collection cost grows with domain count**, and enlarging the nursery (8→64 MiB, landed) lowers the
+whole curve but does not change its upward slope (S(8) stays 0.71 with 8× fewer collections). Decisively,
+**vanilla's minor GC is *also* all-domains STW yet scales** — its per-collection pause is cheap enough that
+parallel mutator work dominates. So the deficit is the per-minor-collection *cost* of MMTk's nursery, not
+the existence of a barrier — which makes the minor-collection **architecture** the open lever.
+
+**Two poles of the design space — and the question.**
+
+- **(A) MMTk owns the minor (status quo + RQ7 Bactrian).** The copying nursery is an MMTk space; the #18
+  "big deletion" then retires OCaml's own minor-STW rendezvous (`caml_empty_minor_heaps_once` /
+  `caml_try_empty_minor_heap_on_all_domains` / the neutered `caml_empty_minor_heap_promote` / the minor
+  barriers / `caml_minor_cycles_started`) so MMTk's STW becomes the **sole** rendezvous. **That deletion
+  must be reconciled structurally with how other language runtimes structure minor collection — not done as
+  a local code cleanup.** Reference points: OCaml's own *ParMinor* (per-domain bump minor → copy-promote
+  into a shared major, STW rendezvous via interrupt+barrier, read-barrier-free *by design*, ICFP'20); GHC's
+  block-structured local heaps + parallel generational copying (Marlow et al., ISMM'08/'11); Erlang's
+  per-process heaps (Sagonas & Wilhelmsson'06); and how the Julia/CRuby MMTk bindings handle the
+  nursery/STW handshake. The structural question: *can MMTk's STW minor be made domain-scalable to vanilla's
+  level* — per-domain/independent nurseries, decoupled triggers, a cheaper rendezvous + root scan
+  (#53/#G1) — or is a single global STW minor inherently the wrong fit for OCaml's domain-local heap?
+
+- **(B) Stock owns the minor; MMTk is the major-only collector.** Reuse OCaml's *actual* per-domain
+  bump-pointer minor heap and its STW ParMinor — which already scales, is read-barrier-free, and is
+  battle-tested — and use MMTk **only for the major heap**: promote nursery survivors into MMTk-managed
+  mature space and let MMTk run Immix / ConcurrentImmix / (future) LXR as the major. This is the *inverse*
+  of RQ7's Bactrian (which *reimplements* OCaml's minor inside MMTk); here we keep the bespoke minor and
+  make MMTk pluggable only underneath it.
+
+**Why (B) is a real research question, not a fallback.** It attacks the anti-scaling at its root (keep the
+minor collector that demonstrably scales), and it sharpens the MMTk-vs-vanilla comparison: with the *same*
+minor, the major collector is the only variable, isolating MMTk's major-heap design choices (complementary
+to RQ7's same-*everything* comparison). It also revives an architecture the bring-up actually passed
+through: the **vanilla-minor + MMTk-major intermediate was an implementation stage that was *superseded*
+(not merely deferred) by the all-MMTk M9 excision** (ROADMAP "Known caveats"). RQ10 revisits it for a
+*different* reason than the original bring-up convenience — **scalability** — and asks whether the all-MMTk
+decision should be partially reversed.
+
+**The hard parts (what makes it research, and the cost).** (1) M9 *deleted* the stock minor-heap arena and
+the minor/major collectors; (B) requires re-introducing the minor heap as a nursery in front of MMTk's
+major — a partial reversal of M9. (2) The **promotion interface**: stock minor promotes by copying into the
+major, so under (B) promotion must allocate-and-initialize *MMTk* objects from the minor-evacuation path.
+(3) The **inter-generational barrier / remembered set**: old→young pointers must be tracked for the stock
+minor while MMTk's major wants its own (SATB / region) barrier — reconciling two barrier disciplines on one
+`caml_modify`. (4) **Root-scan / safepoint split** between the stock minor and the MMTk major (RQ4/RQ5b
+coordination impedance). (5) Whether MMTk's API even *admits* an externally-owned nursery (it assumes it
+owns allocation).
+
+**Relation to the rest.** Contrasts with **RQ7 (Bactrian)** — Bactrian = OCaml's collector *reimplemented
+in MMTk* (maximally faithful, MMTk owns everything); RQ10(B) = OCaml's minor *kept as-is*, MMTk major-only
+(maximally scalable minor, minimal MMTk surface). Couples to **RQ2** (the characterization that surfaced
+the anti-scaling) and **RQ6** (the C-API/read-barrier constraint applies to whichever major sits
+underneath). The #53/#G1 narrow-root-scan lever is the concrete first step of pole (A). **Venue:**
+ISMM / PLDI. **Risk:** high (partial M9 reversal or deep STW-minor rework; an MMTk-API question for (B)).
+**Novelty: strong** — "*which generation should the framework own?*", decided with multi-domain scaling
+data, is a framework-vs-host-runtime architecture question the practitioner reports gestured at but none
+resolved.
+
+---
+
 ## What each question needs from the platform
 
 - **Common prerequisite (DONE):** M9 is complete; **#15 wired 10 plans (bytecode)**; **native runs 7**;
@@ -590,6 +656,12 @@ MPLR/ISMM.
 - **RQ7 (Bactrian hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
   a copying-nursery + concurrently-marked + STW-evacuated Immix-mature plan with a SATB barrier — mmtk-core
   fork work (a (near-)non-moving, incremental mature). Both halves are landed natively.
+- **RQ10 (minor-collection architecture):** pole (A) — making MMTk's STW minor domain-scalable — needs the
+  #53/#G1 narrow-root-scan lever + the #18 minor-STW-rendezvous retirement (same rework as bug #3c), framed
+  against other runtimes' minor designs. Pole (B) — stock minor + MMTk major-only — needs a *partial reversal
+  of M9* (re-introduce the minor-heap arena as a nursery), a promotion path that allocates MMTk mature
+  objects from minor evacuation, a reconciled old→young remembered set vs MMTk's major barrier, and an
+  MMTk-API path for an externally-owned nursery. Empirical motivation already in hand: `SCALABILITY.md`.
 - **RQ8 (no-zero allocation):** CONFIRMED + **LANDED on mainline** (~15–22% on alloc-bound code) via a runtime
   plan-gate; no-zero is **universal** — ON for all plans **including ConcurrentImmix** (verified allocate-black,
   RQ9). The `gc/mmtk-core` fork (`0.32-ocaml`) is now the mainline mmtk dep. *Remaining:* nothing for safety;
