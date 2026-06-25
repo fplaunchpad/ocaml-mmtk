@@ -5,6 +5,49 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Cross-runtime STW-rendezvous study: ONE GC-owned rendezvous is universal; OCaml-MMTk's dual-STW is the outlier (2026-06-25)
+
+Motivated by the dual-STW deadlock class (#5/#6/bug#3c) and the plan to retire OCaml's own rendezvous
+(`caml_try_run_on_all_domains` / `caml_empty_minor_heaps_once`). Comparative research (agent, sourced):
+
+**Every comparable production runtime has exactly ONE GC-owned safepoint rendezvous** — and all three
+sibling MMTk bindings **reuse the VM's existing safepoint** rather than running a second stop:
+
+| Runtime | stop mechanism | rendezvous | native/blocking thread during STW |
+|---|---|---|---|
+| HotSpot / **mmtk-openjdk** | global safepoint via `VM_Operation` (poll page / handshakes) | **ONE** — GC is a `VM_Operation`; mmtk reuses it (`VM_MMTkSTWOperation`) | `_thread_in_native`/`_blocked` already safe, **not woken**; trapped on return (`_thread_in_native_trans`) |
+| **mmtk-julia** | Julia's `mprotect` safepoint page (reused) | **ONE** (`stop_all_mutators` waits on Julia's `WORLD_HAS_STOPPED`) | `JL_GC_STATE_SAFE` not awaited; **must pin FFI objects** (moving-GC risk) |
+| **mmtk-ruby** | CRuby GIL / Ractor-pause (reused) | **ONE** | released-GVL threads aren't running Ruby; native roots = conservative scan + pinning |
+| GHC | `requestSync`/`pending_sync` + heap-check yield | **ONE** (GC = a sync *type*) | safe FFI **releases its capability**; GC doesn't wait; re-acquire on return |
+| Go | `stopTheWorld` + `preemptall` (prologue + SIGURG) | **ONE** mechanism (shared w/ scheduler) | `_Gsyscall` not awaited; `exitsyscall` checks `gcwaiting`, parks if stopped |
+| CoreCLR | `SuspendEE` + hijack/redirect | **ONE** (`g_TrapReturningThreads`) | preemptive-mode not awaited; blocks at `DisablePreemptiveGC` on return |
+| BEAM | per-process GC | **NONE** (contrast — private heaps; n/a to OCaml's shared cross-domain minor refs) |
+| **OCaml-MMTk (now)** | OCaml `caml_try_run_on_all_domains` + **backup thread** AND MMTk `stop_all_mutators` + RUNNING set | **TWO** (the deadlock source) | **backup thread per domain** spins to reach OCaml's barrier — the outlier to delete |
+
+**Lessons (evidence-backed, converge with RQ10 pole-A / #18 / #20):**
+1. **Make MMTk's `stop_all_mutators` the SOLE rendezvous.** The MMTk `Collection` trait delegates thread
+   synchronization to the VM; the binding should drive OCaml's `young_limit`-interrupt safepoint directly
+   and enumerate domains as `Mutator`s — one rendezvous, the MMTk one.
+2. **Replace the backup thread with a thread-state FLAG.** Universal pattern: a blocked/native thread is
+   marked "already safe" (HotSpot `_thread_in_native`, Julia `JL_GC_STATE_SAFE`, Go `_Gsyscall`, GHC
+   released-capability, CoreCLR preemptive), the GC scans/skips it WITHOUT waiting, and it re-checks a flag
+   on the way back. **The binding's `RUNNING` set is exactly this flag** (a blocked domain is absent →
+   not awaited; `mmtk_ocaml_try_mark_running` is the return-edge re-check). Delete the backup thread (#20).
+3. **Must-haves at the FFI boundary** (the loudest shared lesson of the Julia + CRuby ISMM'25 reports):
+   **pin objects reachable across FFI because MMTk is moving** (GenImmix) — the plan must be pinning-capable
+   (Immix/StickyImmix/GenImmix yes); conservative C-stack scanning or precisely-pinned roots for a
+   domain blocked in C; the re-entry fence (already `mmtk_ocaml_try_mark_running` + the terminate
+   `mmtk_ocaml_wait_collection_done`). Julia's conservative fallback: postpone a *moving* collection while
+   any thread is in a GC-safe region.
+
+The GHC "release-the-capability + GC-initiator acquires all capabilities on the way in" model is the direct
+analogue of RQ10 pole-A's "the GC initiator acquires the released domain's `domain_lock`." Sources:
+mmtk-openjdk (`mmtkUpcalls.cpp`, `mmtkVMCompanionThread.cpp`); ISMM'25 Julia (10.1145/3735950.3735957) +
+CRuby (10.1145/3735950.3735960); Marlow GHC ISMM'08; Go `runtime/proc.go`; CoreCLR BOTR; ICFP'20 §4.1.
+→ ROADMAP #18/#20, RQ10 pole-A. (Full agent report in this session's transcript.)
+
+---
+
 ## #5 ConcurrentImmix deadlock ROOT-CAUSED (lost-wakeup at the pause boundary); LXR P2 plan; testsuite census (2026-06-25)
 
 **Core-dump debugging is the method for the rr-resistant timing deadlocks.** `rr` *masks* both #5 and the
