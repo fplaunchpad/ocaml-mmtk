@@ -5,84 +5,62 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## RQ10 pole-B GO/NO-GO experiment RUN — pole-B NO-GO; nursery provisioning is the lever; + uncovered TWO nursery bugs (degenerate default install + broken MMTK_NURSERY parse) (2026-06-25)
+## RQ10 pole-B GO/NO-GO — pole-B NO-GO; the multi-domain residual is MILD (S(8)≈1.2–1.6), nursery size is one lever, off-STW marking the other; + a real MMTK_NURSERY parser bug. (Earlier church run was a CONTAMINATED build — corrected here) (2026-06-25)
 
-Ran the discriminator + a dose-response (church, 56-core, assert-fixed, pinned, `MMTK_THREADS=domains`, fixed
-4 GiB heap, `par_binarytrees d21`, 3 reps, **min** wall-time). Pole-B is **NO-GO** and the investigation
-surfaced two concrete bugs. **(Methodology note: my first two passes were confounded — the documented
-`MMTK_NURSERY="Bounded:2m,64m"` suffix syntax SILENTLY parse-fails and falls back to mmtk-core's own default;
-re-run with raw bytes. The numbers below are the corrected, raw-byte runs.)**
+**⚠️ Correction — read first.** The first pass of this experiment ran on **church**, which was on branch
+`fix/bug3c-cross-stw` with a build that **silently ran an ~8 MiB default nursery** (913 GCs on par_binarytrees
+d21/d1) instead of the intended 64 MiB. I wrote that up as "BUG A: degenerate default install degrades the
+default GenImmix everyone runs" with a dramatic S(8)=1.13 vs StickyImmix 2.86 discriminator. **A clean rebuild on
+TWO mainline hosts refutes it:** local macOS and **turing** (clean `5.5+mmtk`, even sharing church's mmtk-core
+`0fe660bb9c`) both give **114 GCs** at the default (= the correct 64 MiB; = church's *explicit*-64 MiB). **BUG A
+is a church branch/build artifact, NOT mainline, NOT mmtk-core.** The dramatic church scaling numbers were
+contaminated by it. Lesson banked: verify a bench host's branch + clean rebuild before trusting its numbers.
 
-**Finding 1 — plan discriminator (all at the binding DEFAULT nursery; valid same-path comparison).** In-place
-nurseries scale; the copy nursery does not:
+**The clean mainline picture (turing, 28-core, pinned, `MMTK_THREADS=domains`, fixed 4 GiB, par_binarytrees d21,
+3 reps, min wall-time, verbose GC counts):**
 
-| plan | nursery | d1 | d2 | d4 | d8 | **S(8)** | RSS |
-|---|---|---|---|---|---|---|---|
-| **GenImmix** | shared **copy**-nursery | 11.62 | 9.63 | 9.29 | 10.19 | **1.13** (regresses) | ~1.2–1.8 GB |
-| **StickyImmix** | generational, **in-place** (sticky lines) | 23.86 | 13.72 | 9.36 | 8.35 | **2.86** | ~1.3 GB |
-| **Immix** | non-gen, in-place | 7.94 | 4.91 | 3.20 | 2.61 | **3.04** | 4 GB (heap-filled) |
+| config | d1 | d2 | d4 | d8 | **S(8)** | GCs d1→d8 |
+|---|---|---|---|---|---|---|
+| **GenImmix-default** (64 MiB, *correct*) | 9.32 | 7.44 | 6.45 | 7.60 | **1.23** (peaks 1.45@d4, regresses) | 114→165 |
+| **GenImmix-256 MiB** | 7.78 | 5.85 | 4.71 | 4.88 | **1.59** | 28→86 |
+| **StickyImmix-default** | 10.41 | 8.03 | 6.72 | 7.65 | **1.36** | 109→163 |
 
-StickyImmix runs GenImmix's *exact* all-domains minor STW + full per-domain root-scan, yet scales 2.86× vs
-1.13× ⇒ **the STW rendezvous is NOT the bottleneck; the copy-nursery's behaviour at the default is.**
+The real residual is **mild and similar across plans** (S(8)≈1.2–1.6), not the contaminated 1.13-vs-2.86 cliff.
+Two findings:
 
-**Finding 2 — real dose-response (GenImmix, EXPLICIT raw-byte nursery cap, `Bounded:2097152,<bytes>`, all
-parse-OK).** Bigger nursery → better scaling AND faster single-domain, plateauing ~256 MiB:
+**Finding 1 — nursery SIZE is a real lever (confirmed clean).** GenImmix at a **256 MiB** cap is ~20% faster at
+*every* domain count (d1 7.78 vs 9.32; d8 4.88 vs 7.60), drops d1 GCs 114→28, and lifts S(8) 1.23→1.59. The
+bounded nursery is **commit-on-demand**, so a higher *cap* is ~free for small programs (RSS only grows if they
+allocate that fast). This is the cheap, shippable win → ROADMAP #21.
 
-| GenImmix nursery cap | d1 | d8 | **S(8)** | RSS (d1/d8) |
-|---|---|---|---|---|
-| 64 MiB (explicit) | 6.72 | 4.21 | **1.60** | 356 MB / 784 MB |
-| **256 MiB (explicit)** | **5.64** | **2.19** | **2.58** | **~360 MB** (commit-on-demand!) |
-| 1024 MiB (explicit) | 5.81 | 2.23 | 2.60 | 1.1 GB |
+**Finding 2 — but the nursery does NOT fix the slope; the residual is per-collection STW cost.** Even
+GenImmix-256 MiB — only 28–86 GCs across d1→d8 — still **regresses d4→d8** (4.71→4.88). So the nursery shifts the
+*level* (fewer/cheaper collections) but not the upward *slope*: the per-collection all-domains STW + root-scan
+cost grows with domains regardless of frequency. This **vindicates SCALABILITY §10.2 / UPDATE-1** (my church
+"nursery fixes scaling" overclaim is corrected) and is exactly what off-STW marking (ConcurrentImmix / pole-A
+direction), **not** pole-B, addresses.
 
-256 MiB is the sweet spot: S(8)=2.58 at only ~360 MB RSS — the bounded nursery is **commit-on-demand**, so a
-higher *cap* costs RSS only if the program actually allocates that fast (a small program never reaches it).
-This weakens the original footprint argument for the 64 MiB cap (which targeted a *proportional* nursery, not a
-larger *bounded* one).
+**BUG B (real on mainline) — `MMTK_NURSERY` suffix syntax is broken.** `Bounded:2m,64m` (documented in
+CLAUDE.md/README) → *"unable to set MMTK_NURSERY… Can't parse value. Default value will be used"* → silent
+fallback to mmtk-core's default. Reproduced on **clean local mainline** (not just church). Only **raw bytes**
+(`Bounded:2097152,67108864`) parse. A real usability bug: anyone tuning the nursery via the documented syntax
+silently gets the wrong nursery. Fix the parser to accept `k/m/g` suffixes, or correct the docs.
 
-**Finding 3 — BUG A (CONFIRMED back-to-back): the default-nursery install is degenerate (~8 MiB, not 64 MiB).**
-The binding installs its default as `Bounded:2097152,67108864` (= 64 MiB; `api.rs:116-119`) only when
-`MMTK_NURSERY` is unset. Same-session, back-to-back, deterministic (2 reps each, MMTK_VERBOSE):
+**BUG A — church-only build artifact (NOT a mainline bug).** On `fix/bug3c-cross-stw`/church the default-nursery
+install ran ~8 MiB (913 GCs). The intervening mmtk-core commits (`0fe660bb9c`→`ec2f5079f8`) are all
+scheduler/FinalMark — none touch nursery code — and turing at `0fe660bb9c` is clean, so it is the **church branch
+api.rs or a stale church build**, not mmtk-core. **Worth checking before merging `fix/bug3c-cross-stw`** (it
+would be a real perf regression if it carries this), but it does NOT affect mainline.
 
-| path | minor GCs | GC time | objects copied | d1 |
-|---|---|---|---|---|
-| unset (binding `process()` sets the string) | **913** | 7456 ms | 48.2 M | 11.62 s |
-| explicit identical 64 MiB via env | **113** | 2113 ms | 11.1 M | 6.75 s |
+**Pole-B verdict: firmly NO-GO.** The multicore residual is mild (S(8)≈1.2–1.6) and has two in-framework levers:
+nursery size (Finding 1, cheap) and off-STW marking (Finding 2 → ConcurrentImmix). Pole-B (a VM-ParMinor rebuild)
+keeps the all-domains minor STW, so it would not fix the Finding-2 slope, and the Finding-1 level is already a
+config knob. No VM-ParMinor rebuild / moving-GC promotion crux / second collector is justified. **→ Do NOT build
+pole-B.**
 
-**8× the GCs from the same nursery string** ⇒ the unset path runs an **~8 MiB-equivalent** nursery, not the
-64 MiB it requests. Matches SCALABILITY §10.2's independent counts almost exactly (923 GCs @2–8 MiB, 114 @64 MiB).
-The two paths *should* be identical — both route `set_from_string_inner("nursery","Bounded:2097152,67108864")`
-(`set_option`→`set_from_string`→`set_from_string_inner`; `read_env_var_settings`→same; `build()` clones options,
-no env re-read) — so the bug is a **subtle ordering/timing effect, not a parse difference**: the binding calls
-`process("nursery", …)` (`api.rs:118`) *after* `process("gc_trigger", "FixedHeapSize:…")` and `MMTKBuilder::new`,
-whereas the env path applies the nursery *inside* `new` before the trigger. **Likely minimal fix:** set the env
-var (`std::env::set_var("MMTK_NURSERY", …)` if unset) *before* `MMTKBuilder::new()` instead of `process()` after
-— routing the default through the demonstrably-working env path. (Mechanism root-cause for #21; symptom confirmed.)
-This degrades the **DEFAULT GenImmix everyone runs** — the single cause of its single-domain alloc-heavy
-slowness *and* its multi-domain anti-scaling.
-
-**Finding 4 — BUG B: `MMTK_NURSERY` suffix syntax is broken.** `Bounded:2m,64m` (the form documented in
-CLAUDE.md / README) → *"unable to set MMTK_NURSERY… Can't parse value. Default value will be used"* → silent
-fallback to mmtk-core's default. Only **raw bytes** (`Bounded:2097152,67108864`) parse. Anyone tuning the
-nursery via the documented syntax silently gets the wrong nursery. Fix the parser to accept `k/m/g` suffixes,
-or fix the docs to raw bytes.
-
-**Pole-B verdict: firmly NO-GO.** The multicore anti-scaling is fixed *within MMTk* — by fixing/raising the
-nursery (Findings 2–3) and/or by an in-place plan (StickyImmix, Finding 1) — with zero VM-ParMinor rebuild,
-zero moving-GC promotion crux, zero second collector. A VM-faithful ParMinor would have to beat both, with a
-256 MiB nursery already at S(8)=2.58 / ~360 MB RSS. **→ Do NOT build pole-B.**
-
-**Actionable fixes (ROADMAP #21), in priority order:** (a) **root-cause + fix BUG A** — the default-nursery
-install — highest impact (it degrades the default GenImmix everyone uses; explicit-64M alone lifts S(8)
-1.13→1.60 and halves d1); (b) **raise the default bounded cap to ~256 MiB** (commit-on-demand → ~free for
-small programs; lifts S(8) to 2.58 and improves single-domain); (c) **fix BUG B** (the `MMTK_NURSERY` suffix
-parser) or correct the docs to raw-byte syntax.
-
-**Publishable finding:** the fork's multi-domain "anti-scaling" is a **nursery-provisioning** effect (collection
-frequency, not pause structure): an in-place nursery (StickyImmix) or a larger/correctly-applied copy-nursery
-recovers S(8)≈2.6–3.0, while the default copy-nursery stays at S(8)≈1.1. Not the STW rendezvous, not a
-generational-ownership problem. (Caveats: one alloc-heavy bench at one depth on the bug3c branch; relative
-comparisons robust, absolutes heap-/branch-specific; BUG A root-cause + a mainline + second-workload
-confirmation still owed.)
+**Caveats:** one alloc-heavy bench (par_binarytrees) at one depth, turing 28-core with ~1.1 background load; a
+second workload + a `MMTK_THREADS` sweep would harden it. The 256 MiB win and the BUG B parser bug are clean and
+reproduced; the residual-slope (Finding 2) is consistent across all three plans and with §10.2.
 
 ---
 
