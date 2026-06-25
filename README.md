@@ -83,20 +83,11 @@ Parity-or-better on the compute-bound sequential benches (and **faster** on matr
 two boxed-float kernels (spectralnorm, LU_decomposition) are the known structural outliers (Immix
 mature-space sweep/metadata cost).
 
-In **parallel**, vanilla scales ~3.7–5.6× at 8 domains while the MMTk plans plateau or **anti-scale** —
-GenImmix goes *slower* with more domains on the alloc-/effect-heavy par_binarytrees and chameneos. The
-**dominant, genuine** cause is structural: MMTk uses a single shared nursery collected by an
-**all-domains stop-the-world** minor GC, so adding domains raises minor-GC *frequency* (N domains pour
-into one bounded nursery) *and* the per-pause stop cost — whereas vanilla OCaml gives each domain its
-**own** minor heap, so per-domain minor cost is independent of domain count and it scales. This is the
-empirical motivation for **RQ10** (reuse a per-domain minor GC, MMTk as major-only) — see
-`SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
-> ⚠️ **Parallel panel is preliminary, not publishable as-is.** It ran nproc (12) GC workers + up to 8
-> mutator domains **unpinned on a 12-core Mac**, so at high domain counts the MMTk runs oversubscribe
-> the cores (≈20 runnable threads on 12) while the vanilla baseline (no separate GC-worker pool) does
-> not — inflating the gap. The anti-scaling is real and independently confirmed on pinned Linux
-> (`SCALABILITY.md`), but the **magnitude here is overstated**; a controlled re-run (GC threads + domains
-> ≤ cores, core-pinned, on a many-core Linux box) is pending before these numbers are quoted.
+**Setup.** stdlib-only `Domain.spawn` ports (no Domainslib); a fixed total work split across N domains
+(strong scaling, ideal `S(N)=N`); native; dynamic heap (RSS ≈ vanilla — memory parity); median of 3.
+*Preliminary: this panel ran GC-workers = nproc, unpinned, which over-states the gap on the alloc-heavy
+benches; a core-pinned `workers=domains` re-run is refining the magnitude.* Mechanism + the RQ10
+architecture question (per-domain minor vs MMTk-major-only): `SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
 
 **`ConcurrentImmix` currently deadlocks** on the float/effect benches: it panics in the GC scheduler
 (`scheduler.rs` — a stop-the-world-era assertion that forbids a GC request while a GC is in progress,
