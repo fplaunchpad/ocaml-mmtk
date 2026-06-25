@@ -27,6 +27,7 @@
 #include "caml/domain.h"
 #include "caml/fiber.h"
 #include "caml/fail.h"
+#include "caml/finalise.h"
 #include "caml/misc.h"
 #include "caml/roots.h"
 #include "caml/signals.h"
@@ -549,16 +550,60 @@ void caml_mmtk_register_finalizable(value v)
     mmtk_ocaml_add_finalizer((const void *) v);
 }
 
+/* True iff [v] is currently the subject of a user Gc.finalise on this domain — it
+   sits in the first/last finalisable tables or has already been queued into the
+   run queue (todo_head) by caml_mmtk_final_update_first this cycle. Used to defer
+   the custom-block finalize a cycle when a user finaliser also targets the block
+   (see caml_mmtk_run_custom_finalizers). */
+static int caml_mmtk_value_has_user_finaliser(value v)
+{
+  struct caml_final_info *fi = Caml_state->final_info;
+  if (fi == NULL) return 0;
+  struct finalisable *sets[2] = { &fi->first, &fi->last };
+  for (int s = 0; s < 2; s++) {
+    struct finalisable *final = sets[s];
+    for (uintnat i = 0; i < final->young; i++)
+      if (final->table[i].val == v) return 1;
+  }
+  for (struct final_todo *todo = fi->todo_head; todo != NULL; todo = todo->next)
+    for (int i = 0; i < todo->size; i++)
+      if (todo->item[i].val == v) return 1;
+  return 0;
+}
+
 /* Drain MMTk's ready-to-finalize queue and run each block's finalize op. Called at
    a safepoint from caml_final_do_calls (post-GC, via the action-pending flag set in
    caml_mmtk_uninterrupt). The objects are resurrected/valid for the call; after it
-   they are dropped and reclaimed on a later GC. */
+   they are dropped and reclaimed on a later GC.
+
+   GH#11: a custom block that ALSO has a user Gc.finalise (e.g. an in_channel with
+   `Gc.finalise close_in`) must NOT have its custom finalize run in the SAME cycle
+   the user finaliser runs — stock OCaml spreads them over two sweep cycles. Under
+   MMTk both become ready in one cycle: mmtk-core's Finalization (FinalRefClosure)
+   queues the dead block BEFORE process_weak_refs (VMRefClosure) resurrects it for
+   the user finaliser. Running both here (custom queue first, in caml_final_do_calls)
+   makes caml_finalize_channel destroy the channel mutex + free the struct, then the
+   user close_in try_locks the freed mutex -> EINVAL -> "try_lock: Invalid argument"
+   abort. So if the popped block is also pending in a user finaliser, DEFER it: put
+   it back on MMTk's finalizer queue (it was resurrected this cycle, so it is live
+   and valid to re-register) and skip running its custom finalize now. The user
+   finaliser runs this cycle on the still-valid block (close_in only sets fd=-1; it
+   does not free the struct/mutex). A later GC, once the user finaliser has dropped
+   the reference, re-queues the now-unreachable block and runs its custom finalize
+   cleanly — mirroring stock's two-cycle separation. */
 void caml_mmtk_run_custom_finalizers(void)
 {
   if (!caml_mmtk_weak_refs) return;
   uintptr_t p;
   while ((p = mmtk_ocaml_poll_finalizable()) != 0) {
     value v = (value) p;
+    if (caml_mmtk_value_has_user_finaliser(v)) {
+      /* Defer to a later cycle: re-register (push to candidates, not the ready
+         queue, so it is not re-popped this drain) and let the user finaliser run
+         first. */
+      mmtk_ocaml_add_finalizer((const void *) v);
+      continue;
+    }
     void (*final_fun)(value) = Custom_ops_val(v)->finalize;
     if (final_fun != NULL) final_fun(v);
   }
