@@ -5,6 +5,38 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## `make world.opt` deadlocks at ocamldoc man-gen — a DETERMINISTIC single-domain MMTk deadlock (pre-existing on clean mainline; NOT the STW excision) (2026-06-25)
+
+A clean `make -j world.opt` on macOS (M4 Pro) **hangs** at the ocamldoc man-page generation step. The build
+target chain: `world.opt → opt.opt → (if build_libraries_manpages=true) make manpages → make -C api_docgen man`
+(Makefile:818-819 / 858-859 / 2158-2160). The hung process is `ocamldoc.opt -man -d build/man …` loading ~150
+`.odoc`, single-domain, **parked at 0% CPU**. `sample`d stack:
+- **mutator (main thread):** `caml_call_gc → caml_alloc_small_dispatch → caml_mmtk_refill_tlab →
+  Space::acquire → caml_mmtk_park → mmtk_ocaml_stw_park → _pthread_cond_wait` — i.e. an alloc-slow path
+  triggered a GC and the mutator parked waiting for it to finish.
+- **GC worker:** `WorkerMonitor::park_and_wait → _pthread_cond_wait` — **idle, no work scheduled.**
+
+Mutator parked waiting for a collection that never runs, GC worker idle = **the #5/#6/bug#3c single-domain
+GC-scheduling deadlock class** (a collection is requested but the work never reaches the worker pool).
+
+**PRE-EXISTING — not the Phase-0 STW excision.** Confirmed three ways, gold standard last: (1) the Phase-0
+(excise-ocaml-stw) world.opt hung here; (2) an A/B that reverted `domain.c`/`domain.h` to mainline, rebuilt
+`libasmrun.a`, relinked `ocamldoc.opt` → **still hung**; (3) a **clean full mainline build** (`5.5+mmtk`,
+`make clean` + `./configure` + `world.opt`, **2205 compile steps, domain.c = 0 edits**) → **still hung at the
+same step.** So the excision is exonerated.
+
+**Significance.** This is a **DETERMINISTIC** repro of the single-domain MMTk deadlock class — far more useful
+than the intermittent `par_binarytrees`/chameneos ones for debugging #5/#6. ocamldoc man-gen is a long-lived,
+heavy single-domain allocator that reliably wedges the alloc-slow→GC-schedule path. **Worth its own rr/core-dump
+investigation** (it deterministically reproduces what the deadlock-class fix must address).
+
+**Workaround for builds/testing:** `make world.opt` reaches it only when `build_libraries_manpages=true`. The
+testsuite does not need man pages, so configure/build with manpages disabled (or build the compiler core
+without `manpages`) to get a working world for `make -C testsuite parallel`. (macOS-observed; check whether
+Linux/CI hits it too — if CI builds docs, it would. Filed as the build blocker behind Phase-0's testsuite gate.)
+
+---
+
 ## RQ10 pole-B GO/NO-GO — pole-B NO-GO; the multi-domain residual is MILD (S(8)≈1.2–1.6), nursery size is one lever, off-STW marking the other; + a real MMTK_NURSERY parser bug. (Earlier church run was a CONTAMINATED build — corrected here) (2026-06-25)
 
 **⚠️ Correction — read first.** The first pass of this experiment ran on **church**, which was on branch
