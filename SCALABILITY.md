@@ -493,12 +493,15 @@ three-way tie (GC negligible: 0–12 collections).
 The §7 ranking holds for *parallel* workloads; the nursery finding refines it for the common
 single-/few-domain case:
 
-1. **Enlarge the default nursery (8 MB → 32–64 MB). NEW — highest impact-per-effort for the
-   common case.** It makes GenImmix 1.3–3× faster on alloc-heavy single-domain workloads
-   *and lowers RSS*, and at memory parity makes the generational plan competitive-to-best
-   single-domain. The 8 MB default — chosen for bounded RSS (#44) — is simply too small once
-   allocation rate is high. No plan change, low risk. (It does **not** fix multi-domain
-   anti-scaling.)
+1. **Enlarge the default nursery (8 MB → 64 MB). ✅ IMPLEMENTED** (mainline `5.5+mmtk`
+   @ `7b65a2b016`, 2026-06-25: `api.rs` default `Bounded:2m,8m` → `Bounded:2m,64m`). Highest
+   impact-per-effort for the common case: it makes GenImmix 1.3–3× faster on alloc-heavy
+   single-domain workloads *and lowers RSS*, and at memory parity makes the generational plan
+   competitive-to-best single-domain. The 8 MB default — chosen for bounded RSS (#44) — was
+   simply too small once allocation rate is high. Kept `Bounded` (not `Fixed`) so it stays
+   commit-on-demand and adapts down to fit small heaps (16/24/32 MB pinned all validated rc=0).
+   No plan change, low risk. (It does **not** fix multi-domain anti-scaling — confirmed:
+   S(8) stays 0.71 with 8× fewer collections.)
 2. **For parallel/multi-domain workloads, plan choice is the lever, not the nursery.**
    GenImmix and StickyImmix structurally anti-scale and cliff past ~16–28 domains;
    ConcurrentImmix (research, #30) is the only plan both fastest single-domain *and* scaling;
