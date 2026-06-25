@@ -5,6 +5,68 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## External GitHub issue triage + #11/#12 root-cause diagnoses (handoff, 2026-06-25)
+
+Triage of the open external issues on `fplaunchpad/ocaml-mmtk`, with root causes for the two
+crashes that were diagnosed this session. **None of #4/#5/#11/#12 are fixed yet** — this entry is
+the diagnosis + correct-fix-direction so the next agent doesn't re-derive them.
+
+| # | title | status / where |
+|---|---|---|
+| #2 | multi-domain burn-pattern hang (bug #3c) | **FIXED** (`7d66a6172f`, 52.5%→~1%) — verify + **close**. Residual ~1% + #57 dominate at threads=8 (need `rr`). |
+| #6 | GenImmix copies 13–19M dead-on-arrival cells at fixed heap | **likely improved** by the 64 MiB nursery default (fewer minor GCs ⇒ fewer blind evacuations) — **re-measure** (turing `~/rq8-nozero-results.md` baseline) before closing; ties to RQ2 extreme-alloc probe. |
+| #8 | benchmarks `run.sh`: native GenImmix excluded from `NATIVE_PLANS` + stale "native GenImmix is fatal" comment | **mechanical** — add GenImmix (and the other native-capable plans) to `NATIVE_PLANS`, delete the stale comment. The suite lives on the `benchmarks` orphan branch / `ocaml-mmtk-benchmarks` repo (`run.sh`). Native GenImmix has worked since #25. |
+| #10 | bare `-lmmtk_ocaml` breaks third-party dune-configurator | c_libraries part **FIXED** (#43); the **rustc-1.92 self-contained-staticlib** part is the open tail (#56). |
+| #5 | generational weak/ephemeron cleared too early (weaklifetime.ml, finaliser_handover.ml) | research-grade (generational weak-clear timing tied to stock pacing) = tasks #39/#55; needs care, not macOS-quick. |
+| #4 | ConcurrentImmix sanity-build deadlock at small heaps | = #30 GH#4; needs `rr` (Linux). |
+| #11 | channel finalizer `try_lock: Invalid argument` abort | **DIAGNOSED, not fixed** — see below. |
+| #12 | SIGSEGV scanning large-object infix pointer under moving plans | **root cause known** — see below. |
+
+### #11 — channel finalizer `try_lock: Invalid argument` (diagnosed; reorder fix INSUFFICIENT)
+
+**Mechanism.** A dead `in_channel` custom block has **two** finalizers: (1) the custom-block finalizer
+`caml_finalize_channel` (`io.c:548`) which on refcount→0 **destroys the mutex** (`caml_plat_mutex_free`
+→ `pthread_mutex_destroy`) **and frees the struct** (`io.c:586,589`); (2) the user `Gc.finalise close_in`
+→ `caml_ml_close_channel` (`io.c:725`) which `caml_channel_lock`s the mutex. Under MMTk **both run in the
+same GC**, custom-block queue first → `close_in` then `try_lock`s the **destroyed/freed** mutex → `EINVAL`
+→ `caml_plat_fatal_error` → abort. `io.c` is **byte-identical to stock 5.5.0**; the bug is MMTk's
+finalization *ordering/liveness*: stock spreads the two across **two** cycles (user `close_in` first on the
+still-live channel; the struct is reclaimed at a **later** sweep). Deeper cause: in weak-refs mode the root
+scan sets `do_final_val=0` (`scanning.rs:224`) so MMTk's custom-finalizer processor sees the channel **dead
+this cycle**, while `caml_mmtk_final_update_first` **resurrects** it for the user finaliser in the **same**
+cycle → both drain together. Confirmed: `MMTK_WEAK_REFS=0` ⇒ no crash; deterministic abort on
+GenImmix@8MiB nursery 1 MiB (repro: `scratchpad/repro11b.ml` — the original issue repro under-allocates and
+won't trigger a GC on macOS).
+
+**Attempted fix that DID NOT work (reverted):** reorder `caml_mmtk_run_custom_finalizers()` to *after* the
+user-table loop in `caml_final_do_calls_res` (`finalise.c`). **Insufficient** — confirmed still aborts
+(rc=134; `finalise.n.o` *was* rebuilt). Reason: `caml_mmtk_run_custom_finalizers` is drained from
+**multiple sites** (`finalise.c`, `domain.c:2232` teardown, and a safepoint-poll path — `mmtk.c:801`), so
+the in-function reorder does not control when the channel mutex is destroyed relative to `close_in`.
+
+**Correct fix direction (next agent):** mirror stock's **two-cycle separation** — do not let a custom-block
+value enter MMTk's ready-to-finalize set in the *same* cycle a user `Gc.finalise` resurrects it. I.e. in the
+binding's weak-ref/finalizer processing (`scanning.rs process_weak_refs` ↔ the mmtk-core finalizer queue),
+if a dying custom block also has a pending **user** finaliser, defer the custom finalize to a later cycle
+(after the user finaliser has run on the live channel). Validate with `repro11b.ml` at a small heap + add it
+as a testsuite regression.
+
+### #12 — SIGSEGV on large-object infix pointer under moving plans (root cause known)
+
+**Mechanism (from the issue, verify in `common/`):** scanning an **infix pointer** whose parent closure
+lives in the **large-object space** segfaults — `classify` (slot.rs) sees the `Infix_tag` header and calls
+`is_forwarded`, which reads **forwarding-bit side-metadata that LOS does not map** → wild read. LOS objects
+never move, so an infix pointer into LOS is never forwarded. **Fix:** guard the `is_forwarded` read so it is
+skipped for non-moving / LOS objects (e.g. gate on the object being in a space that maps the forwarding-bits
+spec, or check `mmtk_ocaml_is_in_los`/space before reading). **Repro gotcha:** the issue's repro needs a
+closure with >2048 captured fields to land in LOS; that 2300-var mutually-recursive closure compiles
+**pathologically slowly** (`ocamlopt` burned **67 CPU-min** and did not finish on the M4 Pro — a
+superlinear closure-conversion/regalloc path). Find a cheaper LOS-infix trigger (smaller N just over the
+threshold, or a hand-built infix-into-large-array) before iterating. Best validated under MMTk `sanity` at a
+small heap on a moving plan (Immix/StickyImmix/GenImmix).
+
+---
+
 ## Default nursery raised 8 MiB → 64 MiB (bounded) — GenImmix single-domain 1.3–3× faster, lower RSS
 
 *2026-06-25*
