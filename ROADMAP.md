@@ -343,17 +343,18 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 12. **#21 — fix the nursery (two bugs + a cheap default raise; high-impact spin-off of the RQ10 pole-B
     experiment).** The pole-B probe (NOTES 2026-06-25) found the GenImmix multi-domain anti-scaling is a
     **nursery-provisioning** effect and uncovered two concrete bugs. In priority order:
-    - **(a) BUG A — the default-nursery install is degenerate (highest impact).** The binding sets the default to
-      `Bounded:2097152,67108864` (= 64 MiB) when `MMTK_NURSERY` is unset (`gc/mmtk/binding/src/api.rs:116-119`),
-      but the unset path runs **913 minor GCs / d1=11.62 s / S(8)=1.13** (verbose-confirmed), while setting the
-      *identical 64 MiB* via env (raw bytes) runs ~half the time (**6.72 s, S(8)=1.60**). Same string, two code
-      paths (binding's `memory_manager::process("nursery", …)` *after* `MMTKBuilder::new` vs the env-read *inside*
-      `new`), two behaviours — so `api.rs:118` does not take effect like the env path. **Corroborated by
-      SCALABILITY §10.2's GC counts** (923 GCs @2–8 MiB, 114 @64 MiB; this probe's unset-default = 913 ⇒ the
-      *8 MiB* behaviour, not the intended 64 MiB): the default plan is silently on an ~8 MiB nursery — the single
-      root cause of GenImmix's single-domain slowness *and* multi-domain anti-scaling. This degrades the
-      **default GenImmix everyone runs**. Root-cause (church needed: verbose GC-count of explicit-64M, expected
-      ~114; check whether a post-`new` `process()` is honoured) and fix.
+    - **(a) BUG A — the default-nursery install is degenerate (~8 MiB, not 64 MiB); HIGHEST impact. CONFIRMED.**
+      The binding sets the default to `Bounded:2097152,67108864` (= 64 MiB) when `MMTK_NURSERY` is unset
+      (`gc/mmtk/binding/src/api.rs:116-119`), but back-to-back verbose (deterministic, 2 reps): unset-default =
+      **913 minor GCs / 11.62 s**, while the *identical 64 MiB via env* = **113 GCs / 6.75 s** — 8× the GCs from
+      the same string (matches SCALABILITY §10.2's independent 923@8 MiB / 114@64 MiB). Both paths *should* be
+      identical (both route `set_from_string_inner("nursery", …)`; `build()` clones options, no env re-read), so
+      it's a **subtle ordering/timing bug, not a parse difference**: the binding calls `process("nursery", …)`
+      (`api.rs:118`) *after* `process("gc_trigger", "FixedHeapSize:…")` + `MMTKBuilder::new`, whereas the env path
+      applies the nursery *inside* `new` before the trigger. **Likely minimal fix:** `std::env::set_var(
+      "MMTK_NURSERY", "Bounded:2097152,67108864")` if unset *before* `MMTKBuilder::new()` (route the default
+      through the working env path) — confirm it reproduces 113 GCs. The default plan everyone runs is silently on
+      an ~8 MiB nursery — the single cause of GenImmix's single-domain slowness *and* multi-domain anti-scaling.
     - **(b) Raise the default bounded cap to ~256 MiB.** Dose-response (explicit raw-byte caps): 64 MiB S(8)=1.60
       → **256 MiB S(8)=2.58 at only ~360 MB RSS** (the bounded nursery is **commit-on-demand**, so a higher cap is
       ~free for small programs — it costs RSS only if the program allocates that fast) → 1024 MiB S(8)=2.60

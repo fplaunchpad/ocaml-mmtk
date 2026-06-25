@@ -39,20 +39,26 @@ higher *cap* costs RSS only if the program actually allocates that fast (a small
 This weakens the original footprint argument for the 64 MiB cap (which targeted a *proportional* nursery, not a
 larger *bounded* one).
 
-**Finding 3 — BUG A: the default-nursery install is degenerate.** The binding installs its default as
-`Bounded:2097152,67108864` (= 64 MiB; `api.rs:116-119`) only when `MMTK_NURSERY` is unset. But the **unset
-path** gives **913 minor GCs, d1=11.62 s, S(8)=1.13** (verbose-confirmed 913 GCs), whereas setting the
-**identical 64 MiB via env** (raw bytes) gives **d1=6.72 s, S(8)=1.60** — ~2× faster, far fewer GCs. Same
-nursery string, two code paths (binding's `memory_manager::process("nursery", …)` after `MMTKBuilder::new`
-vs the env-read inside `new`), two behaviours. And both differ from the parse-fail→mmtk-core-default path
-(4 GCs, d1=6.30). **Three distinct behaviours from what should be one config ⇒ the default install
-(`api.rs:118`) does not take effect the way an explicit env nursery does — a real perf bug degrading the
-DEFAULT plan everyone runs.** **Corroborated by SCALABILITY §10.2's GC counts:** that prior run measured 923 GCs
-at the *2–8 MiB* default and 114 GCs at *64 MiB*; this probe's unset-default = **913 GCs** ⇒ the *8 MiB*
-behaviour, NOT the 64 MiB the install intends. So the default plan is silently on an ~8 MiB-equivalent nursery
-— the single root cause of *both* GenImmix's single-domain alloc-heavy slowness and its multi-domain
-anti-scaling. Root-cause pending (church went unreachable mid-investigation; needs a verbose GC-count of
-explicit-64M — expected ~114 by the §10.2 cross-check — plus reading whether `process()` post-`new` is honoured).
+**Finding 3 — BUG A (CONFIRMED back-to-back): the default-nursery install is degenerate (~8 MiB, not 64 MiB).**
+The binding installs its default as `Bounded:2097152,67108864` (= 64 MiB; `api.rs:116-119`) only when
+`MMTK_NURSERY` is unset. Same-session, back-to-back, deterministic (2 reps each, MMTK_VERBOSE):
+
+| path | minor GCs | GC time | objects copied | d1 |
+|---|---|---|---|---|
+| unset (binding `process()` sets the string) | **913** | 7456 ms | 48.2 M | 11.62 s |
+| explicit identical 64 MiB via env | **113** | 2113 ms | 11.1 M | 6.75 s |
+
+**8× the GCs from the same nursery string** ⇒ the unset path runs an **~8 MiB-equivalent** nursery, not the
+64 MiB it requests. Matches SCALABILITY §10.2's independent counts almost exactly (923 GCs @2–8 MiB, 114 @64 MiB).
+The two paths *should* be identical — both route `set_from_string_inner("nursery","Bounded:2097152,67108864")`
+(`set_option`→`set_from_string`→`set_from_string_inner`; `read_env_var_settings`→same; `build()` clones options,
+no env re-read) — so the bug is a **subtle ordering/timing effect, not a parse difference**: the binding calls
+`process("nursery", …)` (`api.rs:118`) *after* `process("gc_trigger", "FixedHeapSize:…")` and `MMTKBuilder::new`,
+whereas the env path applies the nursery *inside* `new` before the trigger. **Likely minimal fix:** set the env
+var (`std::env::set_var("MMTK_NURSERY", …)` if unset) *before* `MMTKBuilder::new()` instead of `process()` after
+— routing the default through the demonstrably-working env path. (Mechanism root-cause for #21; symptom confirmed.)
+This degrades the **DEFAULT GenImmix everyone runs** — the single cause of its single-domain alloc-heavy
+slowness *and* its multi-domain anti-scaling.
 
 **Finding 4 — BUG B: `MMTK_NURSERY` suffix syntax is broken.** `Bounded:2m,64m` (the form documented in
 CLAUDE.md / README) → *"unable to set MMTK_NURSERY… Can't parse value. Default value will be used"* → silent
