@@ -425,7 +425,7 @@ def plot_all(records, outdir):
                     if np.isfinite(h):
                         ax.annotate(f"{h:.2f}×", (r.get_x()+r.get_width()/2, h),
                                     textcoords="offset points", xytext=(0, 2),
-                                    ha="center", va="bottom", fontsize=7.5)
+                                    ha="left", va="bottom", fontsize=7, rotation=45)
             ax.axhline(1.0, color="#444", lw=1.2, ls="--", zorder=0)
             ax.text(len(benches)-0.5, 1.02, "vanilla 5.5.0 = 1.0", ha="right",
                     va="bottom", fontsize=9, color="#444")
