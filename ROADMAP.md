@@ -265,14 +265,30 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    frametables + runtime_events; 3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
    barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
-   continuation-scan hang. Loose end: re-analyse the process-exit `stw_terminate_domain` path before Phase 3
-   (its analyze agent dropped on a StructuredOutput cap). → NOTES 2026-06-25; RQ10 pole-A; #20.
+   continuation-scan hang. **Gap-close (2026-06-25): plan verdict unchanged, no blocker** — there is **no MMTk
+   teardown at process exit** (no `harness_end` race possible), and the driver sub-parts are deletable except
+   `all_domains_lock`+`stw_domains` (keep as a **plain spawn/terminate mutex**, not a barrier) and the
+   `young_limit`-poison (keep — MMTk's STW reuses it). **+1 NEW Phase-3 item:** the multi-domain exit caller
+   `caml_stop_all_domains`→`stw_terminate_domain` must `remove_running`+deregister each cancelled peer when
+   re-homed, else the sole rendezvous hangs on a dead thread; add an **unjoined-domains-at-exit** test (absent
+   today). → NOTES 2026-06-25; RQ10 pole-A; #20.
    **Not a local cleanup — it is an architecture decision** (which generation the framework owns) that must
    be **reconciled structurally with how other runtimes do minor collection** (OCaml ParMinor, GHC local
    heaps, Erlang per-process heaps, the Julia/CRuby MMTk bindings), and weighed against the **inverse**
    option — keep stock's *scalable* minor and use MMTk **major-only**. Both directions, and the empirical
    motivation (the fork's multi-domain anti-scaling), are written up as **RESEARCH_QUESTIONS RQ10** /
    `SCALABILITY.md`.
+   **RQ10 pole-B (the inverse) feasibility — DONE (NOTES 2026-06-25):** **FEASIBLE** against a non-generational
+   **Immix** major with **zero mmtk-core changes** (the mutator `Default` allocation maps straight to the mature
+   Immix space, so VM-driven promotion calls `mmtk_ocaml_alloc(.., Default)`); a *generational* major is closed
+   (mature reachable only from GC workers). Barrier story is clean (under Immix `caml_mmtk_generational==0` so
+   MMTk's nursery barrier is already off; stock `ref_table` is still in-tree to reuse). **NOVEL** — no MMTk
+   binding keeps a VM-owned nursery in front of an MMTk major. **BUT the motivation deflated:** the anti-scaling
+   "cliff" was retracted (controlled S(8)=1.36, not 0.64), and in-tree evidence points to STW-content/root-scan
+   — *not* the shared nursery — as the residual's cause, which pole-B would **not** fix. **GO/NO-GO before
+   building:** GenImmix (shared copy-nursery) vs Immix/StickyImmix (in-place) scaling on par_binarytrees +
+   par_spectralnorm at d1/2/4/8 pinned; if the residual persists on Immix, the nursery isn't the lever → don't
+   build. **Recommendation: do pole-A regardless; do NOT build pole-B until the experiment discriminates.**
 
 10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (ongoing).** Work
     through the remaining testsuite non-pass (M7: ~1450/1547 pass under Immix/StickyImmix; the ~97 non-pass

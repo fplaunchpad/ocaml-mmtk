@@ -5,6 +5,70 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## RQ10 pole-B (VM-owned ParMinor + MMTk major-only): feasible & novel, but motivation deflated — run the go/no-go experiment BEFORE building (2026-06-25)
+
+The inverse of pole-A: keep stock OCaml's **per-domain ParMinor** (private minor arenas) and use MMTk for the
+**major heap only**, promoting survivors into MMTk's mature space. Feasibility analysis (agent, code-verified):
+
+**FEASIBLE — but only against a non-generational (Immix/StickyImmix/ConcurrentImmix) major, with ZERO
+mmtk-core changes.** The split is decided by which major plan you pick:
+- **Immix major = open to the mutator.** `AllocationSemantics::Default` maps straight to the mature Immix
+  space (`gc/mmtk-core/src/plan/immix/mutator.rs:39,53`), so VM-driven promotion just calls
+  `mmtk_ocaml_alloc(mutator, wosize, tag, Default)` (`binding/src/api.rs:216-251`, which does `alloc`+`post_alloc`)
+  and the survivor lands in mature Immix as a first-class object. StickyImmix/ConcurrentImmix identical.
+- **Generational major = CLOSED to the mutator.** For GenImmix/GenCopy `Default` maps to the nursery
+  `CopySpace` (`plan/generational/mod.rs:76,86`); mature is reachable **only** from a GC worker via
+  `GCWorkerCopyContext::alloc_copy(.., PromoteToMature)` (`util/copy/mod.rs:75`). No `AllocationSemantics`
+  means "pre-tenured into mature" (`plan/global.rs:934-958`). A generational-major-under-stock-minor would
+  need an mmtk-core fork (the inverse of RQ7 Bactrian). **→ Pin pole-B's baseline to Immix-major.**
+
+**Barrier story is clean (the lowest-risk part).** Under an Immix major `caml_mmtk_generational == 0`
+(`runtime/mmtk.c:147-149`), so MMTk's nursery/region barrier is **already a no-op** (`mmtk.c:657-662`) — nothing
+to disable. And stock OCaml's `ref_table` remembered set is **still in the tree, only neutered**
+(`runtime/caml/minor_gc.h:53,108`; `caml_alloc_table` minor_gc.c). So pole-B **re-wires `caml_modify` to the
+stock `Ref_table_add`** and the VM owns the inter-generational barrier; MMTk's nursery barrier is dormant by
+construction. (ConcurrentImmix additionally keeps `caml_mmtk_satb_barrier` — orthogonal, tracks major deleted
+edges.) **Promotion path:** un-delete the M9-excised per-domain minor arena + real `Is_young`
+(`address_class.h:50-64` hardwires it to 0 today), restore stock `oldify_one`/`oldify_mopup` but redirect the
+promotion alloc to `mmtk_ocaml_alloc(.., Default)`. The forwarding-pointer/field-copy correctness is the
+moving-GC crux — validate with mmtk `sanity` at a tiny Immix heap. Today `caml_empty_minor_heap_promote`
+(`minor_gc.c:203-256`) is fully neutered ("MMTk owns the heap, nothing to promote").
+
+**NOVEL — no precedent.** All three sibling MMTk bindings (openjdk/julia/ruby) delegate the **whole** heap to
+MMTk and contribute only the VM *safepoint*; none keeps a VM-managed nursery in front of an MMTk major. Pole-B
+(VM-private off-heap nursery → promote across the boundary via the binding alloc API, against MMTk's
+whole-heap-ownership assumption) is unattested in the ecosystem. Publishable framing: **"which generation
+should a retrofitted tracing framework own?"** (RQ10).
+
+**BUT the motivation has largely deflated — this is the key caveat.** The "S(8)=0.64 anti-scaling cliff" was
+**substantially retracted** (SCALABILITY.md UPDATE, 2026-06-25): it was mostly `nproc`-worker oversubscription
++ the GH#6 scheduler assert (both now fixed). Controlled (pinned, workers=domains, assert-fixed): `par_matmul`
+S(8)=4.71 ≈ vanilla 5.72; `par_binarytrees` GenImmix **S(8)=1.36** — a *mild* sublinear residual, not a cliff.
+And the in-tree mechanism evidence (SCALABILITY Exp 2–3) attributes the residual to **in-pause root-scan +
+trace/copy cost that grows with stopped domains** — the cure that *worked* was moving the trace **off** the STW
+(ConcurrentImmix). Pole-B keeps an all-domains minor STW with full per-domain root-scan, so it would **not**
+obviously move that residual. **Risk: pole-B is a large, partially-reverting build justified by a hypothesis
+the existing data already leans against.**
+
+**GO/NO-GO experiment (needs ZERO pole-B code; run it FIRST).** Discriminate the two hypotheses:
+- H_nursery: the residual is MMTk's **single shared copy-nursery** (contention + survivors-copied-in-one-pause) → pole-B (per-domain arenas) fixes it.
+- H_stw: the residual is the **all-domains STW + root-scan** itself → pole-B keeps both → won't help.
+Run `par_binarytrees` (d21) + boxed-float `par_spectralnorm` at **d1/d2/d4/d8, pinned, MMTK_THREADS=domains,
+assert-fixed**, comparing **GenImmix** (shared *copy*-nursery) vs **Immix/StickyImmix** (in-place, *no* separate
+copy-nursery — survivors are just recent Immix lines). **If the multi-domain residual persists on Immix just as
+on GenImmix (and doesn't grow with domains on GenImmix relative to Immix), the shared copy-nursery is NOT the
+lever → H_stw → do NOT build pole-B.** Immix is the cheapest available proxy for "remove the shared copy-nursery"
+without writing the ParMinor reversal.
+
+**Recommendation (agent + concur):** (1) do **pole-A's deadlock elimination regardless** — subtractive,
+low-collector-risk, fixes a real reproducible deadlock class (anti-scaling-orthogonal). (2) **Do NOT build
+pole-B yet** — run the experiment above first. (3) If pursuing the "which generation" paper, pole-B is the novel
+vehicle but frame it around the *measurement* (the experiment is the paper's first figure), not a presumed
+anti-scaling fix. Pole-A and pole-B are **mutually exclusive in spirit** (pole-A deletes the minor STW; pole-B
+keeps + strengthens it) though the non-GC rendezvous re-homing (runtime_events/frametables) is shared plumbing.
+
+---
+
 ## Retire OCaml's STW rendezvous — verified caller-by-caller plan (RQ10 pole-A / #18 / #20) (2026-06-25)
 
 Companion to the cross-runtime study below. Question: *can we delete `caml_try_run_on_all_domains` +
@@ -91,10 +155,30 @@ forever (the exact sibling of bug#3c). Mitigation: retire the whole family in ON
 change *after* 0–2; keep the interrupt drain during the transition; lean on the proven MMTk deregister
 fence; gate the merge on the bug#3c repro + chameneos + full testsuite per plan.
 
-(Workflow caveat: 2 of 25 agents — `analyze:shutdown`, `analyze:driver-mechanics` — hit the StructuredOutput
-retry cap and dropped out; their callers are covered transitively by terminate/spawn + the driver mechanics
-in the synthesis, but a dedicated re-analysis of the process-exit `stw_terminate_domain` path
-(`domain.c:2308`) is a loose end to close before Phase 3.)
+**Gap closed (the 2 dropped workflow agents, re-run 2026-06-25) — verdict UNCHANGED, no blocker, +1 new item:**
+- **Process-exit shutdown.** A hypothesized `caml_shutdown`↔MMTk-`harness_end` race **cannot occur: there is no
+  MMTk teardown at exit at all** (only `mmtk_ocaml_init`; the heap/worker pool are abandoned at `exit()`; the
+  sole atexit hook is the `MMTK_VERBOSE` stats print). The last-domain-alone branch
+  (`caml_domain_terminate(true)`, `startup_aux.c:236`) is **already STW-free** (it `break`s at `domain.c:2149`
+  before touching the participant set) and is covered by the existing MMTk deregister fence
+  (`caml_mmtk_domain_terminate`, `mmtk.c:901-923`).
+- **+1 NEW Phase-3 item the synthesis missed:** the **multi-domain** exit path
+  `caml_stop_all_domains`→`stw_terminate_domain` (`domain.c:2275-2309`) is a **distinct** `caml_try_run_on_all_domains`
+  caller (kill-stragglers) whose cancelled peers **never deregister from MMTk** — harmless *today* only because
+  OCaml's STW stops them and the process exits with no further collection. When Phase 3 makes `stop_all_mutators`
+  the sole rendezvous, the re-homed "MMTk-stop-then-cancel" **MUST `remove_running` + deregister each cancelled
+  peer**, or the next `stop_all_mutators`/`mmtk_ocaml_wait_collection_done` waits forever on a thread that no
+  longer exists (`collection.rs:256` `while !running.is_empty()`). New gating test (absent from the suite today):
+  an **unjoined-domains-at-exit** repro — spawn N busy-alloc domains, `exit` from domain 0 without joining, under
+  each STW plan, assert the process exits (TIMEOUT-bounded).
+- **Driver mechanics, per sub-part:** `stw_leader`/`stw_request`/`stw_requests_suspended` + **both** barriers
+  (`domains_still_running` entry barrier, `Caml_global_barrier`) + `decrement_stw_domains_still_processing` →
+  **delete** (coordinated Phase 3). `all_domains_lock` + `stw_domains` membership → **keep as a plain
+  spawn/terminate mutex** (it guards the participant-registry transition, NOT an all-domains barrier; MMTk
+  enumerates domains itself via `active_plan::domain_addrs`). The **`young_limit`-poison** (`caml_mmtk_interrupt`,
+  `mmtk.c:789`) + `caml_reset_young_limit` → **KEEP** — MMTk's `stop_all_mutators` reuses exactly it to trap
+  domains to a safepoint (`collection.rs:244,258`). Backup-thread **STW-answering** role → delete (#20); the
+  backup thread survives only to answer OCaml's own rendezvous.
 
 ---
 
