@@ -5,6 +5,58 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR fork study — API divergence + integration plan (RQ1, 2026-06-25)
+
+Study of **LXR** (Zhao/Blackburn/McKinley PLDI'22; RC on hierarchical Immix + concurrent SATB backup trace,
+no read barrier, coalescing field-logging write barrier) in **`wenyuzhao/mmtk-core` branch `lxr`**, for RQ1.
+ROADMAP carries the phased plan; this is the grounding detail.
+
+**Same base.** The LXR fork is **mmtk-core 0.32.0** — same as our `0.32-ocaml`. Our fork already shares the
+*concurrent-marking half* of LXR (`concurrent/` plan, `Pause`, `SATBBarrier`, `ConcurrentPlan`, the non-RC
+parts of `barriers.rs`/`plan_constraints.rs` are byte-identical — strong shared-lineage evidence). We lack the
+**RC half**: `src/args.rs` (runtime args: `LAZY_DECREMENTS`, `CYCLE_TRIGGER_THRESHOLD`, `RC_MATURE_EVACUATION`),
+`src/util/rc.rs` (`RefCountHelper`; `RC_TABLE` global side-metadata, 2-bit sticky counts at min-object
+granularity; `RC_STRADDLE_LINES` for >1-line objects), the `FieldBarrier` (`plan/lxr/barrier.rs`: per-slot
+`GLOBAL_FIELD_UNLOG_BIT` CAS-flip → push old target to `decs`, slot to `incs`; deferred `ProcessIncs`/`ProcessDecs`
+packets; coalescing = a slot is logged ≤once/cycle), RC `WorkBucketStage`s (`RCProcessIncs`, `RCEvacuateMature`,
+`STWRCDecsAndSweep`, `FinishConcurrentWork`), the LXR plan (`plan/lxr/{global,mutator,barrier,mature_evac}.rs` +
+`gc_work/{rc,tracing,mature_sweeping}.rs`; constraints `barrier: FieldBarrier, needs_log_bit, needs_field_log_bit,
+rc_enabled`, `Pause::RefCount`), and **RC hooks inside `policy/immix/immixspace.rs` (~17 sites:
+`trace_object_rc`, `set_as_in_place_promoted`, straddle) + LOS** — the deepest, least-modular part.
+
+**VMBinding incompatibilities vs upstream/our 0.32 (the "API changes" the user flagged), enumerated:**
+- `ObjectModel`: NEW required `GLOBAL_FIELD_UNLOG_BIT_SPEC: VMGlobalFieldUnlogBitSpec` (per-slot, `LOG_BYTES_IN_ADDRESS`
+  granularity — distinct from the per-object log bit), NEW required `dump_object_s`, `get_class_pointer`;
+  `COMPRESSED_PTR_ENABLED` const.
+- `Scanning`: **two-arg `visit_slot(slot, out_of_heap)`** (signature-break), NEW required `scan_object_with_klass`,
+  `ObjectKind{ValArray,ObjArray(u32),Scalar}` + `get_obj_kind`/`is_obj_array`/`obj_array_data` hooks (RC inc
+  special-cases obj-arrays); `RootsWorkFactory::create_process_roots_work(slots, **RootKind**)` (signature-break).
+- `Collection`: `stop_all_mutators(tls, **current_gc_should_unload_classes**)` (signature-break) + defaulted
+  class-unload hooks.
+- `Slot`: NEW `to_address`/`raw_address`/`from_address` (the field barrier needs `slot.to_address()` for the
+  unlog-bit CAS).
+- `plan/barriers.rs`: `BarrierSelector::FieldBarrier` + `FieldBarrier<S>` + `LOGGED/UNLOGGED_VALUE`.
+Most are OpenJDK-shaped (class unloading, klass pointers) and OCaml can **stub** them
+(`get_class_pointer → Address::ZERO`, ignore `klass`, pass `false` for out-of-heap, no class unloading).
+
+**What the OCaml binding adds** (barrier plumbing already exists — `runtime/memory.c` calls `caml_mmtk_region_barrier`
++ `caml_mmtk_satb_barrier` pre-store, slot-granular): a `GLOBAL_FIELD_UNLOG_BIT_SPEC` in `object_model.rs`; the
+stubbed new `ObjectModel`/`Scanning` methods + `Slot::to_address` on `FieldSlot`; a third C entry
+`mmtk_ocaml_field_barrier(mutator, slot)` → `object_reference_write_pre` wired into `caml_modify` (mirror the SATB
+path). **RQ1's bet holds strongly:** OCaml is immutable-by-default — `caml_modify` only fires for genuinely-mutable
+fields (`ref`/mutable record/array/`Bytes`); the bulk of stores are `caml_initialize` (barrier-free), so most of the
+heap is barrier-free — LXR's coalescing barrier's best case. Hard binding risk: **ephemerons/finalisers under RC**
+(`load_weak_reference` greys + cycle collection vs OCaml's keep-alive ephe scheme) and **`caml_initialize` zero-init
+relaxation vs RC's "newly-allocated RC=0"**.
+
+**Strategy:** MERGE the RC half into `0.32-ocaml`, gated behind `MMTK_PLAN=LXR` (all existing plans byte-identical).
+NOT a rebase onto `wenyuzhao/lxr` (would force OpenJDK-shaped trait churn + conflict with our trigger/no-zero/
+FinalMark deltas), NOT a cherry-pick (RC not modular). Conflict map + phased plan (P1 scaffolding → P2 immix RC
+hooks [highest risk] → P3 LXR plan → P4 OCaml binding+barrier → P5 bring-up; ~5–7 wk; RQ1 measurement reachable
+after P4): see ROADMAP "LXR integration".
+
+---
+
 ## Fence audit — MMTk preserves OCaml's memory-model fences exactly; its GC barrier is fence-lighter (RQ11, 2026-06-25)
 
 Grounding measurement for RESEARCH_QUESTIONS **RQ11** (memory-model × GC-framework co-design).

@@ -263,6 +263,49 @@ The active research/measurement threads behind the M8 milestone — the index; d
   OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
   (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
   incremental mature is the open mmtk-core-fork work. → RESEARCH_QUESTIONS RQ7.
+- **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
+  Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
+  SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write
+  barrier** — exactly the design RQ1 predicts OCaml's immutable-by-default heap makes unusually cheap (most
+  stores are initialising writes through `caml_initialize`, which take no barrier; only genuinely-mutable
+  fields hit `caml_modify`). It lives in a separate fork, **`wenyuzhao/mmtk-core` branch `lxr`**.
+  - **Headline (de-risks it): same base, `mmtk-core 0.32.0`** as our `0.32-ocaml` fork, and our fork is
+    *already on the LXR lineage for the concurrent-marking half* (the `concurrent/` plan, `Pause`,
+    `SATBBarrier`, `ConcurrentPlan` are shared). What we lack is the **reference-counting half**: `src/args.rs`,
+    `src/util/rc.rs` (the `RC_TABLE` side-metadata + `RefCountHelper`), the `FieldBarrier`
+    (`src/plan/lxr/barrier.rs` — coalescing per-slot unlog bit, deferred `ProcessIncs`/`ProcessDecs`), the RC
+    `WorkBucketStage`s, the LXR plan (`src/plan/lxr/`), and **RC hooks woven through `policy/immix/immixspace.rs`
+    (~17 sites) + LOS** — the deepest, least-modular part.
+  - **The "incompatible API changes" (enumerated, vs upstream/our 0.32):** LXR adds, to the **VMBinding traits**,
+    new *required* `ObjectModel` methods (`dump_object_s`, `get_class_pointer`) + a per-slot
+    `GLOBAL_FIELD_UNLOG_BIT_SPEC`; a **two-arg `SlotVisitor::visit_slot`** + `scan_object_with_klass` +
+    `ObjectKind`/obj-array hooks (`Scanning`); a `RootKind` arg on `create_process_roots_work`; an extra
+    `current_gc_should_unload_classes` arg on `stop_all_mutators`; and `Slot::to_address`. Several are
+    **signature-breaking** for an existing 0.32 binding — but most are OpenJDK-shaped (class-unloading, klass
+    pointers) and our OCaml binding can stub them (`get_class_pointer` → `Address::ZERO`, ignore `klass`, pass
+    `false` for out-of-heap, no class unloading).
+  - **Strategy: MERGE LXR's RC half into `0.32-ocaml`, gated behind `MMTK_PLAN=LXR`** (every existing plan stays
+    byte-identical). *Not* a rebase onto `wenyuzhao/lxr` — that would force LXR's OpenJDK-shaped trait churn
+    across the whole core and conflict with our `SpaceOverheadTrigger`/`no_zero_alloc`/FinalMark-trigger deltas;
+    *not* a minimal cherry-pick — RC is not modular (the `immixspace.rs` hooks). Conflict map: HIGH on
+    `gc_trigger.rs` (our SpaceOverheadTrigger vs LXR's survival-predictor triggers) and `immixspace.rs`/LOS (the
+    RC trace variants — the bulk of the work + the main correctness risk under our moving Immix); MEDIUM on
+    `spec_defs.rs` (the global side-metadata budget — `RC_TABLE` 2-bit + field-unlog 1-bit/word compete with our
+    `GLOBAL_LOG_BIT`), `work_bucket.rs`, the VM traits; LOW on `barriers.rs`/`concurrent/` (purely additive).
+  - **Phased plan (each phase builds; GenImmix stays the untouched default throughout):** **P1** mmtk-core
+    scaffolding — vendor `args.rs`, `rc.rs`, RC `spec_defs`/`WorkBucketStage`s, `FieldBarrier`,
+    `BarrierSelector::FieldBarrier`, `Pause::RefCount` (~3–5 d, low risk). **P2** Immix-policy RC hooks +
+    LOS RC (~1–2 wk, **highest risk** — moving-GC correctness; lean on the `sanity` feature at small heaps).
+    **P3** port `plan/lxr/`; wire `MMTK_PLAN=LXR` in `api.rs` (~1 wk). **P4** OCaml binding + runtime barrier —
+    `GLOBAL_FIELD_UNLOG_BIT_SPEC`, the new `ObjectModel`/`Scanning`/`Slot` methods, `mmtk_ocaml_field_barrier`
+    wired into `caml_modify` (mirror the existing SATB path, also pre-store/slot-granular) (~1 wk happy path;
+    **+1–2 wk** for ephemerons/finalisers-under-RC and the `caml_initialize`/RC-0 interaction). **P5** bring-up:
+    `sanity` at small heap, CLBG correctness gate, testsuite under `MMTK_PLAN=LXR`. **~5–7 weeks** to a correct
+    single-domain LXR. **The RQ1 measurement** (does OCaml's immutable-store profile make LXR's barrier nearly
+    free; does RC beat GenImmix on tail latency at memory parity) **is reachable after P1–P4** — it does not
+    need the full correctness tail, consistent with prioritising the research question over the
+    completionist grind. → RESEARCH_QUESTIONS **RQ1** (flagship); the LXR-fork study + the enumerated API diff +
+    the touch-set are in `gc/mmtk/NOTES.md` (2026-06-25).
 - **Scalability gap (open M8 work).** No multicore speedup-vs-cores data: the parallel/multidomain
   macro-benches are disabled, so there is no throughput-vs-domains curve. Re-enable them (or stand up the
   quick-panel/Sandmark-style scaling harness — task #36). Micro-benches already show ~2× on parallel
