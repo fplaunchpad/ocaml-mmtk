@@ -5,6 +5,35 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise OCaml STW — PHASE 0 DONE: retired the two clean `caml_try_run_on_all_domains` callers (2026-06-25)
+
+First cut of the pole-A excision (the verified plan below). The two callers the adversarial verify had cleared
+at refuters-0/2 are gone. Design + re-verification by a Workflow (10 agents: map → per-caller design → 3
+adversarial verifiers each → synthesis); integrated + built + validated in the main loop. Branch
+`excise-ocaml-stw` (off `5.5+mmtk`). 5 edits, all in `runtime/domain.c` (+1 in `runtime/caml/domain.h`), net −24 lines.
+
+- **minor-heap-resize:** `caml_update_minor_heap_max` (domain.c) now does a **plain store** of
+  `caml_minor_heap_max_wsz` instead of an all-domains STW; `stw_resize_minor_heaps_reservation` **deleted**.
+  Under MMTk the cap sizes no arena (TLAB owns the nursery), so the STW's only observable effect was the scalar
+  store — now done directly. Strengthens the `gc_ctrl.c:262` `CAMLassert(newminwsz <= cap)`.
+- **global-major-slice:** `caml_poll_gc_work` now **clears `requested_global_major_slice` locally** instead of
+  broadcasting via `caml_try_run_on_all_domains_async`; `stw_global_major_slice` **deleted**. The broadcast ran
+  the inert `caml_major_collection_slice` on every peer under MMTk; the requesting domain's slice already fired
+  in the block just above.
+- **Newly-dead but RETAINED** (non-static / no header prototype ⇒ no `-Wunused`, no build break; reused by
+  Phases 1/3): `caml_try_run_on_all_domains_async`, `caml_empty_minor_heap_no_major_slice_from_stw`. *(The
+  adversarial verify caught the design's false claim that the async runner "retains six callers" — it becomes
+  the SOLE, now-dead async caller. Good catch.)*
+
+**Validated (bytecode, this branch):** `make runtime` clean (C compiles); `Gc.set` raising minor_heap_size works
+(plain-store path); `par_binarytrees` d1/d4/d8 under GenImmix/StickyImmix/Immix all return checksum 682198264
+with no hang; moving-GC stress (GenImmix + StickyImmix at 64/128 MiB fixed heaps) clean. Native `world.opt` +
+a native d8 run [in flight]. **Remaining `caml_try_run_on_all_domains` callers (the *sync* runner) → Phases 1–3:**
+terminate (domain.c:2308), frametables (frame_descriptors.c:306/318), runtime_events (228/438). NB stale mentions
+of `stw_resize_minor_heaps_reservation` elsewhere in this file predate the deletion.
+
+---
+
 ## RQ10 pole-B GO/NO-GO — pole-B NO-GO; the multi-domain residual is MILD (S(8)≈1.2–1.6), nursery size is one lever, off-STW marking the other; + a real MMTK_NURSERY parser bug. (Earlier church run was a CONTAMINATED build — corrected here) (2026-06-25)
 
 **⚠️ Correction — read first.** The first pass of this experiment ran on **church**, which was on branch

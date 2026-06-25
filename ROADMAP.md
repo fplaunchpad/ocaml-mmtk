@@ -260,7 +260,11 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    the whole family):** the minor-empty/spawn/terminate trio. **Need a replacement primitive, NOT MMTk
    GC-STW:** runtime_events ring + frametables install are *legitimate non-GC* users — `stop_all_mutators`'
    callback is hard-wired to GC marking, so they need a new "stop RUNNING + run a VM closure" hook or a
-   per-subsystem rwlock/epoch (exclusion = `RUNNING`). **Phases:** 0 (low) delete the two clean callers;
+   per-subsystem rwlock/epoch (exclusion = `RUNNING`). **Phases:** 0 (low) delete the two clean callers
+   **— DONE 2026-06-25** (branch `excise-ocaml-stw`: `caml_update_minor_heap_max` → plain store +
+   `stw_resize_minor_heaps_reservation` deleted; `caml_poll_gc_work` clears `requested_global_major_slice`
+   locally + `stw_global_major_slice` deleted; bytecode-validated, par_binarytrees d1/d4/d8 checksum-stable;
+   `caml_try_run_on_all_domains_async` now dead-but-retained for Phases 1/3 — NOTES 2026-06-25);
    1 (med) re-home the domain-LOCAL minor-STW bookkeeping onto the safepoint/resume path; 2 (med) re-home
    frametables + runtime_events; 3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second

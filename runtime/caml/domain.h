@@ -186,8 +186,8 @@ int caml_try_run_on_all_domains(
       Examples:
       - [caml_stw_empty_minor_heap] is a STW callback that empties the
         minor heap
-      - [stw_resize_minor_heap_reservation] is a STW callback that
-        resizes the memory reservation for the minor heap
+      - [stw_create_runtime_events] is a STW callback that sets up
+        runtime_events tracing across all domains
 
    2. [*_from_stw] suffix for auxiliary functions that may only be
       called within a STW critical section.

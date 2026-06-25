@@ -469,9 +469,9 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   of the reservation) has been retired.
 
   [caml_minor_heap_max_wsz] survives as a plain scalar cap on the per-domain
-  minor-heap word size requestable via [Gc.set] (it sizes the minor tables and
-  is asserted against in gc_ctrl.c). [caml_update_minor_heap_max] raises it; no
-  memory is reserved.
+  minor-heap word size requestable via [Gc.set] (it sizes no arena/table; it is
+  only compared against and asserted in gc_ctrl.c). [caml_update_minor_heap_max]
+  raises it with a plain store; no memory is reserved and no STW is taken.
 */
 
 /* Size of the (nominal) minor heap, per domain — a scalar cap; see above. */
@@ -506,36 +506,20 @@ Caml_inline void check_minor_heap(void) {
    reserve/unreserve/resize_minor_heaps_reservation machinery are removed.
    Is_young is now a folded constant false (address_class.h). */
 
-/* Minor heap max-size cap: resize (no memory is reserved). */
-
-static void
-stw_resize_minor_heaps_reservation(caml_domain_state* domain,
-                                  void* minor_wsz_data,
-                                  int participating_count,
-                                  caml_domain_state** participating) {
-  caml_gc_log("stw_resize_minor_heaps_reservation: empty minor heap");
-  caml_empty_minor_heap_no_major_slice_from_stw(
-    domain, NULL, participating_count, participating);
-
-  /* Under always-on MMTk there is no stock minor-heap arena and no address-space
-     reservation to re-map: raising the per-domain minor-heap word cap is just a
-     scalar store, done by the final domain under the global barrier so all
-     domains observe the new cap on exit. new_minor_wsz is page-aligned
-     (caml_norm_minor_heap_size normalized it earlier). */
-  Caml_global_barrier_if_final(participating_count) {
-    caml_minor_heap_max_wsz = (uintnat) minor_wsz_data;
-    caml_gc_log("stw_resize_minor_heaps_reservation: new max %" CAML_PRIuNAT
-                " words", caml_minor_heap_max_wsz);
-  }
-}
+/* Minor heap max-size cap: raise it (no memory is reserved, no STW). */
 
 void caml_update_minor_heap_max(uintnat requested_wsz) {
   caml_gc_log("Changing heap_max_wsz from %" CAML_PRIuNAT
               " to %" CAML_PRIuNAT ".",
               caml_minor_heap_max_wsz, requested_wsz);
-  while (requested_wsz > caml_minor_heap_max_wsz) {
-    caml_try_run_on_all_domains(
-      &stw_resize_minor_heaps_reservation, (void*)requested_wsz, 0);
+  /* Under always-on MMTk [caml_minor_heap_max_wsz] is a plain scalar cap on the
+     Gc.set path: it sizes no arena and no address-space reservation. The stock
+     all-domains STW (stw_resize_minor_heaps_reservation) only emptied the minor
+     heaps (GC-dead: MMTk's TLAB owns the nursery) and stored the cap under the
+     final-domain barrier, so the lone observable effect is this store. No STW
+     needed; the former while-loop only retried on losing the STW leader race. */
+  if (requested_wsz > caml_minor_heap_max_wsz) {
+    caml_minor_heap_max_wsz = requested_wsz;
   }
   check_minor_heap();
 }
@@ -1910,17 +1894,6 @@ Caml_inline void advance_global_major_slice_epoch (caml_domain_state* d)
   }
 }
 
-static void stw_global_major_slice(
-  caml_domain_state *domain,
-  void *unused,
-  int participating_count,
-  caml_domain_state **participating)
-{
-  domain->requested_major_slice = 1;
-  /* Nothing else to do, as [stw_hander] will call [caml_poll_gc_work]
-     right after the callback. */
-}
-
 void caml_poll_gc_work(void)
 {
   CAMLalloc_point_here;
@@ -1984,12 +1957,15 @@ void caml_poll_gc_work(void)
   }
 
   if (d->requested_global_major_slice) {
-    if (caml_try_run_on_all_domains_async(
-          &stw_global_major_slice, NULL, NULL)){
-      d->requested_global_major_slice = 0;
-    }
-    /* If caml_try_run_on_all_domains_async fails, we'll try again next time
-       caml_poll_gc_work is called. */
+    /* Stock OCaml broadcast the major-slice request to all domains via an
+       async all-domains STW (stw_global_major_slice, which just set each peer's
+       local requested_major_slice). Under always-on MMTk caml_major_collection_slice
+       is inert (it only records this domain's major-slice epoch; MMTk owns
+       collection), so the broadcast ran a no-op on every peer. The requesting
+       domain's own slice already fired at the block above (line ~1950 tests
+       requested_global_major_slice). So just satisfy and clear the request
+       locally, with no STW. */
+    d->requested_global_major_slice = 0;
   }
 
   caml_reset_young_limit(d);
