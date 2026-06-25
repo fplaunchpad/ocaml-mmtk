@@ -36,9 +36,10 @@ the DEFAULT dynamic (space-overhead) heap the cap is moot** — confirmed local:
 dynamic heap (live×2.2) the **space-overhead trigger**, not the nursery cap, gates collection frequency, and a
 low-live workload gets a tiny heap → tiny nursery regardless of cap. So raising the cap does **not** help the
 plan as users actually run it (dynamic heap). → ROADMAP #21(a) DEFERRED (fixed-heap-only); needs the full
-memory-parity panel before landing. The genuinely-default-relevant lever is the **dynamic-heap floor**:
-spectralnorm-5500 at the default heap does ~19,600 minor GCs (tiny live set → tiny heap → constant collection) —
-the heap-trigger/nursery coupling, #21(c), an open follow-up.
+memory-parity panel before landing. The genuinely-default-relevant lever is the **dynamic-heap floor** (#21c,
+now quantified): spectralnorm-3500 at the default heap = **7926 GCs / 3378 ms GC / 25.83 s** vs fixed-4 GiB =
+**152 GCs / 81 ms / 22.62 s** — the dynamic heap (live×2.2, tiny for a low-live workload) does **52× more GCs**,
+~13% GC overhead / ~12% wall. The fix is a nursery floor / min-heap decoupled from the live set, NOT the cap.
 
 **Finding 2 — but the nursery does NOT fix the slope; the residual is per-collection STW cost.** Even
 GenImmix-256 MiB — only 28–86 GCs across d1→d8 — still **regresses d4→d8** (4.71→4.88). So the nursery shifts the

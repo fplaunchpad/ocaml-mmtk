@@ -357,11 +357,15 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       will be used"*) → falls back to mmtk-core's default; only raw bytes (`Bounded:2097152,67108864`) parse.
       Reproduced on clean local mainline. Fix the parser to accept `k/m/g` suffixes, **or** correct the docs to
       raw-byte syntax (cheap, do this).
-    - **(c) The REAL default-condition lever (open): the dynamic-heap floor under-provisions low-live/high-alloc
-      workloads.** spectralnorm-5500 at the default dynamic heap does ~19,600 minor GCs (the space-overhead heap
-      is tiny because the live set is tiny → tiny nursery → constant collection). This — the heap-trigger/nursery
-      coupling for low-live workloads — not the cap, is what would actually help the default; needs its own
-      investigation (and a vanilla comparison to confirm it's GC-bound, not compute-bound).
+    - **(c) The REAL default-condition lever (open, now QUANTIFIED): the dynamic-heap floor under-provisions
+      low-live/high-alloc workloads.** The space-overhead heap (live×2.2) is sized to the *live set*, so a
+      low-live workload gets a tiny heap → tiny nursery → constant collection. Measured (spectralnorm-3500,
+      GenImmix, local): **default dynamic heap = 7926 minor GCs / 3378 ms GC time / 25.83 s wall** vs **fixed
+      4 GiB = 152 GCs / 81 ms / 22.62 s** — i.e. the dynamic heap does **52× more GCs** and adds **~13% GC
+      overhead / ~12% wall** (no vanilla needed — the fixed-heap A/B isolates it; spectralnorm is otherwise
+      compute-bound). The fix is a **nursery floor / minimum dynamic-heap size decoupled from the (tiny) live
+      set** for high-alloc-rate workloads — NOT the nursery cap (which is heap-limited here). Real but modest;
+      the clean default-relevant nursery work.
     - **NOT a mainline bug: "degenerate default install / 913 GCs"** was a **church `fix/bug3c-cross-stw` build
       artifact** — clean mainline (local + turing) gives 114 GCs (correct 64 MiB). Check before merging that
       branch; not a mainline issue.
