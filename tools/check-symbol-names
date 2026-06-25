@@ -27,6 +27,13 @@ $2 ~ /^(\.refptr\.)?(_?re_)/ { next }
 $2 ~ /^(\.refptr\.)?(environ)/ { next }
 # ignore symbols pulled in by SHGetKnownFolderPath
 $2 ~ /^\.refptr\.FOLDERID_[a-zA-Z]+/ { next }
+# mmtk-ocaml: the always-on MMTk staticlib (libmmtk_ocaml.a) is bundled object-by
+# -object into the runtime archives (Makefile.mmtk), so they carry thousands of
+# unprefixed Rust/std/compiler-builtins symbols. Skip those members: Rust codegen
+# -unit objects end in .rcgu.o, and the bare compiler-builtins asm objects are
+# named <hash>-<name>.o. $1 is the nm -A "archive.a[member.o]:" field.
+$1 ~ /\.rcgu\.o\]:$/ { next }
+$1 ~ /\[[0-9a-f]+-[A-Za-z0-9_]+\.o\]:$/ { next }
 # ignore local and undefined symbols
 $3 ~ /^[a-zU]$/ { next }
 # ignore "main", which should be externally linked

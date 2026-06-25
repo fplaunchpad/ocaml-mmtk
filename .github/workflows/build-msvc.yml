@@ -4,13 +4,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# Disabled in the mmtk-ocaml fork: MMTk is the always-on GC and mmtk-core is
+# POSIX-only (gc/mmtk-core/src/util/memory.rs uses libc mmap/mprotect/
+# posix_memalign/malloc_usable_size unconditionally), so the MMTk staticlib
+# cannot build on the Windows/MSVC target. Windows is not a supported platform
+# for this fork (dev hosts are macOS Apple Silicon + Linux x86_64). Left here for
+# upstream parity; only runnable manually.
 on:
-  push:
-    branches:
-      - '4.**'
-      - '5.**'
-      - 'trunk'
-  pull_request:
+  workflow_dispatch:
 
 # env:
   # Fully print commands executed by Make
