@@ -61,9 +61,16 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    Fix: bracket `caml_empty_minor_heaps_once` with `caml_mmtk_enter_blocking` /
    `caml_mmtk_become_running` — the domain is STOPPED in MMTk's view while it leads/joins
    the minor STW (still a registered mutator, roots still scanned). church gate (Immix/512/
-   threads=8): hang **52.5% → ~1%**, `sanity` clean. **Residual:** ~1% rarer interleaving
-   (concurrent multi-domain terminate; needs `rr`) + the separate **bug #57**
-   (`active_plan.rs:59` "cannot trace object") now dominate at threads=8. → NOTES (2026-06-24).
+   threads=8): hang **52.5% → ~1%**, `sanity` clean. **The ~1% residual is FIXED (2026-06-25,
+   rr-confirmed) — and it was NOT a bug#3c rendezvous residual at all:** it is the GH#14
+   `scheduler.rs` STW-only assert firing **plan-independently** at high domain count (≥8 domains:
+   a second domain's alloc poll or a domain being *created* refilling its TLAB requests a GC while
+   one is in progress → GC worker panics → poisoned `WorkerMonitor` → all workers die → every domain
+   deadlocks in `park_until_resumed`). rr on a 28-core box made `par_binarytrees` d8/GenImmix a 100%
+   repro and the backtrace showed the panic. Fix: **remove the assert for all plans** (mmtk-core
+   `ec2f5079f8`; the earlier `d2e7f3493b` only gated it off for *concurrent* plans, so STW plans still
+   tripped it). Validated: d8 pinned 100% HANG → 5/5 OK, checksums golden. The separate **bug #57**
+   (`active_plan.rs:59` "cannot trace object") may still appear at threads=8. → NOTES (2026-06-25).
 
 2. **#11 — weak-ref resurrection ordering + retire `MMTK_WEAK_REFS`.** Fix
    `process_weak_refs` resurrection ordering (`pr5233` — a value resurrected only for
@@ -269,6 +276,26 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     candidates** now that finalisers work under `MMTK_WEAK_REFS=1`). The **bulk** of the non-pass is still
     untriaged — that is the work: run `make -C testsuite parallel` under a plan (per `CLAUDE.md`), classify
     each failure (real MMTk gap vs known-unsupported vs flaky), fix or mark. → M7; item #4 (#12c).
+
+11. **#20 — retire the per-domain backup-thread machinery (replace STW participation with lock
+    acquisition). May be tricky.** Vanilla OCaml gives every domain a **backup thread**
+    (`runtime/domain.c` `backup_thread_func`, `interruptor`) whose *sole* job is: when a mutator
+    **releases its domain lock** (blocking C section, park, idle), someone must still be able to answer an
+    all-domains STW request on that domain's behalf. Under always-on MMTk this is largely **redundant
+    already** — the binding's RUNNING set (`collection.rs`) makes a domain that released its lock STOPPED,
+    so MMTk's `stop_all_mutators` does not await it (it is the GC *worker pool*, not a domain rendezvous,
+    that drives the pause). The backup thread survives only because OCaml's *own* STW rendezvous
+    (spawn/terminate; the neutered minor STW) is still live (ties to #18's "big deletion" + RQ10 pole-A).
+    **The idea (KC):** now that we have GC threads, a cleaner mechanism than "interrupt the domain → its
+    backup thread answers" is: **a domain that wants to GC simply ACQUIRES the released domain lock (and
+    any other such locks) before handing over to MMTk** — a domain that has released its lock is by
+    construction not mutating, so the collector just needs to *hold* that lock (so it can't re-enter) and
+    proceed. This would let us **delete the whole backup-thread + interruptor machinery** (which was also
+    the surface the bug#3c / GH#6 deadlocks lived on — see the rr trace's 4 idle `backup_thread_func`
+    threads). **Tricky parts:** the domain-lock + STW handshake is subtle (lock-ordering vs MMTk's STW and
+    OCaml's spawn/terminate rendezvous; who holds which lock across a collection; re-entry of a domain that
+    re-acquires its lock mid-GC — the same STOPPED↔RUNNING edge as GH#6); and it is gated on MMTk's STW
+    becoming the sole rendezvous (RQ10 pole-A / #18). → relates to #18, RQ10, GH#6; RESEARCH_QUESTIONS RQ10.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

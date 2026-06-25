@@ -93,10 +93,13 @@ mature-space sweep/metadata cost).
 benches; a core-pinned `workers=domains` re-run is refining the magnitude.* Mechanism + the RQ10
 architecture question (per-domain minor vs MMTk-major-only): `SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
 
-**`ConcurrentImmix`: the GH#14 scheduler-assert deadlock is FIXED** (mmtk-core `d2e7f3493b`): the
-stop-the-world-era assert in `scheduler.rs` that forbade a GC request while a GC is in progress is now
-gated to non-concurrent plans, so a GC legitimately re-requested mid-concurrent-mark is coalesced, not
-asserted. spectralnorm / LU / par_spectralnorm now run clean (15/15, checksums match golden). **One
+**Scheduler-assert deadlock FIXED for ALL plans** (mmtk-core `ec2f5079f8`): the stop-the-world-era
+`scheduler.rs` assert that forbade a GC request while a GC is in progress is **removed** — its premise
+is false for OCaml's multi-domain model. It bit two ways: **ConcurrentImmix** (GH#14, a domain
+re-requesting mid-concurrent-mark; spectralnorm / LU / par_spectralnorm now run clean, checksums match
+golden) **and** any **STW plan (e.g. GenImmix) at ≥8 domains** (GH#6 — a 2nd domain's alloc poll, or a
+domain being *created* refilling its TLAB; rr-confirmed, par_binarytrees d8 was a 100% hang → 5/5 OK
+after the fix). **One
 remnant: `chameneos_redux` still hangs** under ConcurrentImmix via a *separate* deadlock (no assert — an
 effects/continuation-under-concurrent-mark issue), still open. The table's ConcurrentImmix cells predate
 the fix. *This is a quick eyeball panel, not the system of record — the macro-benchmark campaign (M8,

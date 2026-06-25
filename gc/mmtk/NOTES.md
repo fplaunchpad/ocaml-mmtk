@@ -5,6 +5,42 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#6 multidomain d8 deadlock — rr-CONFIRMED: it was the GH#14 scheduler assert all along (FIXED, all plans) (2026-06-25)
+
+**This supersedes finding (1) of the entry below, which was WRONG.** The static-analysis agent's "bug#3c
+residual on the RUNNING re-entry edge" / "4-way `stop_all_mutators` cycle" hypothesis was *falsified by
+instrumentation, then rr*. Two checks:
+
+1. **Instrument refuted the agent.** A debug print added to `stop_all_mutators`'s `while !running.is_empty()`
+   loop (eprintln after 3000 spins) fired **0 times** across 4 deterministic hangs — so the deadlock is
+   **not** that barrier. (All ~20 threads were in `futex_wait`, so it was a real deadlock, just not there.)
+2. **rr nailed it.** `ptrace_scope=1` blocks `gdb -p`, but `rr` ptraces its own child, so it works — and
+   despite rr's thread serialization the deadlock still reproduced (it is structural, not a narrow race).
+   The replay backtrace had two panics at the top:
+   `scheduler.rs:444 "GC request sent to WorkerMonitor while GC is still in progress."` (the GH#14 assert)
+   and `worker_monitor.rs:221` (the poisoned-mutex cascade). The GC workers PANICKED; the domains
+   (Thread 15 = a domain being *created* in `domain_create`→`caml_mmtk_domain_init`→`refill_tlab`→
+   `Space::acquire`; Threads 13/11/9 = running domains at the alloc poll) are all downstream victims parked
+   in `park_until_resumed` waiting for a `gc_active` that never clears (no worker left alive to run
+   `resume_mutators`).
+
+**Root cause:** the assert's premise ("in STW GC, mutators cannot request a GC while a GC is in progress")
+is **false for OCaml's multi-domain model regardless of plan.** At ≥8 domains, a *second* domain's
+allocation poll — or a domain being **created** refilling its initial TLAB — requests the next GC while one
+is in progress. The request is harmless (coalesced in `goals.requests[Gc]`, an idempotent bit, serviced by
+the next `respond_to_requests` after the current GC). **Fix: remove the assert for ALL plans** (mmtk-core
+`ec2f5079f8`). The earlier GH#14 commit `d2e7f3493b` only gated it off for *concurrent* plans, so STW
+plans (GenImmix/Immix/StickyImmix) still tripped it at d8 — which is exactly why the "controlled RQ10 d8
+sweep" hung across *every* plan. **Validated (turing):** `par_binarytrees` d8 pinned, `MMTK_THREADS=8`:
+100% HANG → **5/5 OK**, checksums byte-identical to golden.
+
+**Methodology lesson (again):** the read-only static agent produced a detailed, internally-consistent, and
+WRONG root cause + 3 fix options that all targeted the wrong cycle. Instrument-then-rr falsified it in two
+cheap steps. *Run before believing* — and instrument the spot the theory names before implementing its fix.
+The "RUNNING re-entry edge" fix would have been wasted effort.
+
+---
+
 ## Three findings: bug#3c residual root-caused (deterministic d8 repro), chameneos ConcImmix deadlock root-caused, KB workload favours Immix (2026-06-25)
 
 ### (1) bug#3c residual — DETERMINISTIC repro + root cause: the RUNNING re-entry edge
