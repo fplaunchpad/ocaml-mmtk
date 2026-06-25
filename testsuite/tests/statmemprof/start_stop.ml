@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Tests various valid and invalid orderings of start/stop/discard/is_sampling
 statmemprof calls. Doesn't test any callbacks or count any allocations,

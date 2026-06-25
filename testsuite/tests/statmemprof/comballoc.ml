@@ -1,13 +1,4 @@
-(* TEST
- flags = "-g";
- {
-   reference = "${test_source_directory}/comballoc.byte.reference";
-   bytecode;
- }{
-   reference = "${test_source_directory}/comballoc.opt.reference";
-   native;
- }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Tests that combined allocations are counted correctly by statmemprof *)
 

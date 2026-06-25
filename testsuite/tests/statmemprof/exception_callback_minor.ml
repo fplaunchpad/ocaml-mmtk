@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Tests that an exception in the alloc_minor callback propagates
    correctly to the top level. *)

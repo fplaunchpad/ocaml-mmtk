@@ -1,13 +1,4 @@
-(* TEST
- modules = "bigarray_stubs.c";
- include unix;
- hasunix;
- {
-   bytecode;
- }{
-   native;
- }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 module MP = Gc.Memprof
 
 type bigstring = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t

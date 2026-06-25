@@ -1,12 +1,4 @@
-(* TEST
- include systhreads;
- hassysthreads;
- {
-   bytecode;
- }{
-   native;
- }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Tests statmemprof behaviour when a callback terminates its thread.
    The expected behaviour is that the thread exits, but sampling

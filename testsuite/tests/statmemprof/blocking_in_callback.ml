@@ -1,12 +1,4 @@
-(* TEST
-   include systhreads;
-   hassysthreads;
-   {
-     bytecode;
-   }{
-     native;
-   }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 let cnt = ref 0
 let alloc_thread = 50000

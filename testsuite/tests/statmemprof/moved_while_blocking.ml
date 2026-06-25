@@ -1,12 +1,4 @@
-(* TEST
- include systhreads;
- hassysthreads;
- {
-   bytecode;
- }{
-   native;
- }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* A few triggers, to control timing of events between threads.
    `await a` will wait until after `set a` has been called. *)

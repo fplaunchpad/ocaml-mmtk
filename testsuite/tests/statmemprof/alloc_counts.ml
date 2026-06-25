@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Checks that the allocated words counted by statmemprof
    (with sampling rate of 1) match the numbers reported by

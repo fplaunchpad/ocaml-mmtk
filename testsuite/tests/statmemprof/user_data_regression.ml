@@ -1,10 +1,4 @@
-(* TEST
- modules = "user_data_regression_stub.c";
- flags = "-g";
- ocamlrunparam += ",s=100";
- { bytecode; }
- { native; }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 external request_minor_gcs : unit -> unit = "request_minor_gcs"
 

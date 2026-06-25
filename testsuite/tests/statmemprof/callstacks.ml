@@ -1,13 +1,4 @@
-(* TEST
- flags = "-g";
- {
-   reference = "${test_source_directory}/callstacks.flat-float-array.reference";
-   flat-float-array;
- }{
-   reference = "${test_source_directory}/callstacks.no-flat-float-array.reference";
-   no-flat-float-array;
- }
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 module MP = Gc.Memprof
 

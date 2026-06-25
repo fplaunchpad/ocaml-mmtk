@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 module MP = Gc.Memprof
 

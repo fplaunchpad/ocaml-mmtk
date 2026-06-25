@@ -1,7 +1,4 @@
-(* TEST
- flags = "-g";
- reason = "port stat-mem-prof : https://github.com/ocaml/ocaml/pull/8634";
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 module MP = Gc.Memprof
 

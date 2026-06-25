@@ -1,6 +1,4 @@
-(* TEST
- modules = "minor_no_postpone_stub.c";
-*)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 module MP = Gc.Memprof
 

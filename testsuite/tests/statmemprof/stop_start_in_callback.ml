@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 (* Tests the effects of stopping and starting profiles in allocation
    callbacks, particularly in combined allocations.

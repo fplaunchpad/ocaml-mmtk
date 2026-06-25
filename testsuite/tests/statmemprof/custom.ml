@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: Gc.Memprof statistical-sampling profiler unsupported under MMTk. *)
 
 module MP = Gc.Memprof
 let () = Gc.set { (Gc.get ()) with minor_heap_size = 262144 }
