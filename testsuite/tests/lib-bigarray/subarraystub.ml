@@ -1,4 +1,4 @@
-(* Disabled under MMTk (stock-GC dependent-memory pacing).
+(* MMTk DISABLED: stock-GC dependent-memory pacing.
 
    This test never forces a collection in its measurement loop: the inner [loop]
    only allocates bigarray sub-arrays (custom blocks with C-side "dependent

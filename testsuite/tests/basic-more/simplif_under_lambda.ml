@@ -1,4 +1,4 @@
-(* Disabled under MMTk: finalisers (Gc.finalise_last) not yet supported (tabled — see ROADMAP workstream E). *)
+(* MMTk DISABLED: finalisers (Gc.finalise_last) not yet supported (tabled — see ROADMAP workstream E). *)
 let f () =
   let junk = ref 42 in
   Gc.finalise_last (fun () -> print_endline "collected") junk;

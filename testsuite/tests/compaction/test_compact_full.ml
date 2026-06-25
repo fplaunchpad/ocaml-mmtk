@@ -1,4 +1,4 @@
-(* Disabled under MMTk (stock compaction semantics).
+(* MMTk DISABLED: stock compaction semantics.
 
    This test encodes the stock compactor's exact pacing: it asserts that one
    Gc.compact () performs *three* additional major collections

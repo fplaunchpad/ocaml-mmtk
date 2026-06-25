@@ -246,6 +246,25 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    motivation (the fork's multi-domain anti-scaling), are written up as **RESEARCH_QUESTIONS RQ10** /
    `SCALABILITY.md`.
 
+10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (ongoing).** Work
+    through the remaining testsuite non-pass (M7: ~1450/1547 pass under Immix/StickyImmix; the ~97 non-pass
+    are not yet individually triaged). For **each** failing test: either **fix** it, or **disable** it with a
+    single canonical marker as the file's first line, replacing the `(* TEST *)` block (so ocamltest skips
+    the file) —
+    ```
+    (* MMTk DISABLED: <reason> *)
+    ```
+    so that **`grep -rn 'MMTk DISABLED' testsuite/tests`** enumerates every intentionally-disabled test and
+    why. **Convention is live: 9 files normalized to the marker** (was ad-hoc `Disabled under MMTk …`).
+    Current disabled set by category: **stock-GC pacing / `Gc.stat` counters** (`lib-systhreads/boundscheck`,
+    `lib-bigarray/subarraystub`, `parallel/major_gc_wait_backup`); **no-stock-minor-heap finaliser/lazy
+    timing** (`weak-ephe-final/finaliser2`, `lazy/minor_major_force`); **stock compaction semantics**
+    (`compaction/test_compact_full`); **unsupported finalisers/alarms** (`callback/test_finaliser_gc`,
+    `callback/test_gc_alarm`, `basic-more/simplif_under_lambda` — the latter three are #12c **re-enable
+    candidates** now that finalisers work under `MMTK_WEAK_REFS=1`). The **bulk** of the non-pass is still
+    untriaged — that is the work: run `make -C testsuite parallel` under a plan (per `CLAUDE.md`), classify
+    each failure (real MMTk gap vs known-unsupported vs flaky), fix or mark. → M7; item #4 (#12c).
+
 ### Research & measurement workstreams (M8 / RQ-driven)
 
 The active research/measurement threads behind the M8 milestone — the index; depth in `gc/mmtk/NOTES.md`,

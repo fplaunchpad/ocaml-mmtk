@@ -43,6 +43,10 @@ on a common substrate. The research agenda lives in
   rare-crash investigations tracked as GitHub issues.
 - **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
   read, and `runtime_events` emission under MMTk (broken — see ROADMAP / FAQ).
+- **Testsuite triage** is ongoing: each failing test is either fixed or disabled with a single
+  greppable marker as its first line, `(* MMTk DISABLED: <reason> *)`, replacing the `(* TEST *)`
+  block. `grep -rn 'MMTk DISABLED' testsuite/tests` lists every intentionally-disabled test and why
+  (see ROADMAP item #19).
 
 The milestone-by-milestone plan and current status are in
 [`ROADMAP.md`](ROADMAP.md).

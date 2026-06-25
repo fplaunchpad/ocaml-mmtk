@@ -1,4 +1,4 @@
-(* Disabled under MMTk (no stock minor heap).
+(* MMTk DISABLED: no stock minor heap.
 
    This file bundles three sub-tests; it aborts at [test1], which asserts that a
    [Gc.finalise_last] callback on a minor-dying value fires synchronously at the

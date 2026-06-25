@@ -1,4 +1,4 @@
-(* Disabled under MMTk (no stock minor heap).
+(* MMTk DISABLED: no stock minor heap.
 
    This test forces a lazy value across a minor collection and asserts on its
    minor-vs-major residency (the remembered-set / [caml_obj_is_shared] path).

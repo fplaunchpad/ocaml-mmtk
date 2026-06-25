@@ -1,4 +1,4 @@
-(* Disabled under MMTk (stock-GC pacing + GC backup thread).
+(* MMTk DISABLED: stock-GC pacing + GC backup thread.
 
    This test asserts a stock-collector pacing invariant that does not hold under
    MMTk: it allocates a fixed-depth tree (make 22 / make 24) and then asserts

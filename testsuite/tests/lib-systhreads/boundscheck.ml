@@ -1,4 +1,4 @@
-(* Disabled under MMTk (loops on the stock minor_collections counter).
+(* MMTk DISABLED: loops on the stock minor_collections counter.
 
    The driver loop is [while (Gc.quick_stat ()).minor_collections < 1000 do ...],
    relying on a background thread's [Gc.minor ()] calls to bump the stock
