@@ -102,11 +102,6 @@ static atomic_uintnat num_domains_orphaning_finalisers = 0;
 
 gc_phase_t caml_gc_phase;
 
-/* Mark-status colour state. Relocated from the deleted shared_heap.c; still
-   read by weak/ephemeron/finaliser processing. caml_compactions_count never
-   advances under MMTk (no stock compaction). */
-CAMLexport atomic_uintnat caml_compactions_count;
-
 /* Initial MARKED, UNMARKED, and GARBAGE values; any permutation would work */
 struct global_heap_state caml_global_heap_state = {
   0 << HEADER_COLOR_SHIFT,
@@ -696,11 +691,6 @@ void caml_mmtk_scan_orphaned_finalisers(scanning_action act,
 static atomic_uintnat alloc_counter;
 static atomic_uintnat work_counter;
 
-/* Value of work_counter at the latest color rotation (start of sweep)
-   and number of allocations done during the latest sweep phase.
-   Not atomic because these are only accessed in stw. */
-static uintnat latest_sweep_allocs;
-
 /* Small-memory mode: at the end of sweeping, we will not switch to
    Phase_mark_and_sweep_main (and thus will stay in idle mode) until
    work_counter has reached this value. */
@@ -744,42 +734,6 @@ void caml_init_major_pacing (void)
   work_counter = 0;
   caml_gc_log ("work_counter: initialize to 0");
   work_counter_min_before_mark = caml_small_heap_limit;
-}
-
-/* Reset the work and alloc counters to be equal to each other, by
- * setting them both equal to the "larger" (in the wrapping-around
- * sense we are using here for work_counter and alloc_counter).
- *
- * For use at times when we have disturbed the major GC from its usual
- * pacing and tempo, for example, after any synchronous major
- * collection.
- *
- * add_overhead is true if the latest collection was synchronous
- * (with caml_gc_full_major) and thus the sweep phase counted only the
- * live data (with no floating garbage).
- */
-
-void caml_reset_major_pacing(bool add_overhead)
-{
-  bool res;
-  uintnat target;
-  do {
-    uintnat alloc = atomic_load(&alloc_counter);
-    uintnat work = atomic_load(&work_counter);
-    target = alloc;
-    if (diffmod(work, alloc) > 0) {
-      target = work;
-    }
-    res = (atomic_compare_exchange_strong(&alloc_counter, &alloc, target) &&
-           atomic_compare_exchange_strong(&work_counter, &work, target));
-  } while (!res);
-  caml_gc_log ("work_counter: reset to %" CAML_PRIuNAT, target);
-  uintnat virtual_sweep_work = latest_sweep_allocs;
-  if (add_overhead){
-    virtual_sweep_work = virtual_sweep_work / 100 * (100 + caml_percent_free);
-  }
-  work_counter_min_before_mark =
-    target + max2 (virtual_sweep_work, caml_small_heap_limit);
 }
 
 /* The [log_events] parameter is used to disable writing to the ring for two

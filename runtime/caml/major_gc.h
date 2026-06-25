@@ -49,15 +49,9 @@ int caml_init_major_gc(caml_domain_state*);
 void caml_teardown_major_gc(void);
 void caml_darken(void*, value, volatile value* ignored);
 void caml_darken_cont(value);
-void caml_mark_root(value, value*);
 void caml_mark_roots_stw(int, caml_domain_state **);
 void caml_finish_major_cycle(int force_compaction);
 void caml_init_major_pacing (void);
-/* Reset any internal accounting the GC uses to set collection pacing.
- * For use at times when we have disturbed the usual pacing, for
- * example, after any synchronous major collection.
- */
-void caml_reset_major_pacing(bool add_overhead);
 #ifdef DEBUG
 int caml_mark_stack_is_empty(void);
 #endif
@@ -84,10 +78,7 @@ Caml_inline void caml_update_major_allocated_words(
    These header-colour helpers and the global colour-cycle state used to live
    in shared_heap.h (deleted under always-on MMTk). They remain live because
    weak/ephemeron/finaliser processing still reads mark bits, so they have
-   been relocated here. [caml_compactions_count] never advances under MMTk
-   (no stock compaction), so Gc.stat reports 0 compactions. */
-
-CAMLextern atomic_uintnat caml_compactions_count;
+   been relocated here. */
 
 /* always readable by all threads
    written only by a single thread during STW periods */

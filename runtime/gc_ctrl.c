@@ -58,7 +58,7 @@ CAMLprim value caml_gc_quick_stat(value v)
   CAMLlocal1 (res);
 
   /* get a copy of these before allocating anything... */
-  intnat mincoll, compactions;
+  intnat mincoll;
   struct gc_stats s;
   caml_compute_gc_stats(&s);
 
@@ -68,13 +68,12 @@ CAMLprim value caml_gc_quick_stat(value v)
          there (correct: there is no minor GC). Under bytecode a Gc.minor()/minor
          collection still bumps it, so the count remains meaningful for code that
          polls it (e.g. lib-systhreads/boundscheck).
-       - compactions: the stock caml_compactions_count. MMTk has no distinct
-         compaction pass — Gc.compact() runs an ordinary MMTk collection (counted
-         under major_collections; Immix may defrag) and does not touch this counter,
-         so it stays 0.
+       - compactions: always 0. MMTk has no distinct compaction pass —
+         Gc.compact() runs an ordinary MMTk collection (counted under
+         major_collections; Immix may defrag) and never bumped a compaction
+         counter, so Gc.stat's compactions field is the literal 0 stored below.
        - major_collections (set below): MMTk's GC count. */
   mincoll = atomic_load(&caml_minor_collections_count);
-  compactions = atomic_load(&caml_compactions_count);
 
   /* Under MMTk the stock shared-heap counters (s.heap_stats.*) are ~0 — MMTk owns
      the heap. Pull the heap-size fields and the collection count from MMTk so
@@ -103,7 +102,7 @@ CAMLprim value caml_gc_quick_stat(value v)
   Store_field (res, 10, Val_long (0));
   Store_field (res, 11, Val_long (0));
   Store_field (res, 12, Val_long (s.heap_stats.pool_frag_words));
-  Store_field (res, 13, Val_long (compactions));
+  Store_field (res, 13, Val_long (0));
   Store_field (res, 14, Val_long (mmtk_heap_words));
   Store_field (res, 15, Val_long (caml_current_stack_size()));
   Store_field (res, 16, Val_long (s.alloc_stats.forced_major_collections));

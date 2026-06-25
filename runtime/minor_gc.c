@@ -347,12 +347,11 @@ int caml_do_opportunistic_major_slice
 {
   int work_available = caml_opportunistic_major_work_available(domain_state);
   if (work_available) {
-    /* NB: need to put guard around the ev logs to prevent spam when we poll */
-    uintnat log_events =
-        atomic_load_relaxed(&caml_verb_gc) & CAML_GC_MSG_SLICESIZE;
-    if (log_events) CAML_EV_BEGIN(EV_MAJOR_MARK_OPPORTUNISTIC);
+    /* No EV_MAJOR_MARK_OPPORTUNISTIC span here: under always-on MMTk
+       caml_opportunistic_major_collection_slice is a no-op (MMTk owns marking),
+       so the span reported a fictional opportunistic-mark pause. The slice call
+       is kept inert; the log_events guard is gone with the span it gated. */
     caml_opportunistic_major_collection_slice(Major_slice_work_min);
-    if (log_events) CAML_EV_END(EV_MAJOR_MARK_OPPORTUNISTIC);
   }
   return work_available;
 }

@@ -1975,10 +1975,12 @@ void caml_poll_gc_work(void)
   }
 
   if (d->requested_major_slice || d->requested_global_major_slice) {
-    CAML_EV_BEGIN(EV_MAJOR);
+    /* No EV_MAJOR span here: under always-on MMTk caml_major_collection_slice is
+       inert (it only records this domain's major-slice epoch; MMTk owns
+       collection), so the span reported a fictional major-GC pause around a
+       no-op to olly/runtime_events. */
     d->requested_major_slice = 0;
     caml_major_collection_slice(AUTO_TRIGGERED_MAJOR_SLICE);
-    CAML_EV_END(EV_MAJOR);
   }
 
   if (d->requested_global_major_slice) {
