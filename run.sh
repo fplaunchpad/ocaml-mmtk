@@ -38,11 +38,15 @@ IMMIX_FAMILY="Immix StickyImmix GenImmix"     # Immix-based plans
 BYTECODE_ONLY_PLANS="NoGC MarkSweep SemiSpace GenCopy MarkCompact"
 ALL_PLANS="$BYTECODE_ONLY_PLANS $IMMIX_FAMILY"
 
-# Native uses TLAB nursery-aliasing, which needs an *Immix* Default allocator.
-# Only Immix and StickyImmix have one; GenImmix's nursery is a copying BumpPointer,
-# so native GenImmix is a fatal error at startup (despite the runtime's error
-# string and README listing the whole family). So native is exercised on these two.
-NATIVE_PLANS="Immix StickyImmix"
+# Native uses TLAB nursery-aliasing over a bump/Immix-Default allocator. SEVEN plans
+# qualify — Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/NoGC/ConcurrentImmix — including
+# GenImmix, whose copy-nursery BumpPointer TLAB has worked natively since the native-
+# GenImmix work; it is the DEFAULT plan, so the perf matrix must cover it. The matrix
+# runs the practical fast subset: the Immix family plus the GenImmix default. (GenCopy and
+# SemiSpace are native-capable but copy-dominated — GenCopy times out on binarytrees and
+# SemiSpace is several× slower — so they are left out of the timed matrix; NoGC never
+# reclaims; ConcurrentImmix is the research plan, run separately.)
+NATIVE_PLANS="Immix StickyImmix GenImmix"
 
 # CI (correctness) sizes — small, fast, deterministic, GC-exercising.
 declare -A CI_N=( [fasta]=1000 [nbody]=10000 [spectralnorm]=100 \
