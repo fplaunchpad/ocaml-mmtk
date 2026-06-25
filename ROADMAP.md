@@ -23,7 +23,7 @@ plan whose Default allocator is a bump/Immix region (the seven:
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
 clamped 16 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
-3.5× → 1.27× slower than stock), `MMTK_NURSERY` (default bounded 2–8 MiB), `MMTK_VERBOSE`;
+3.5× → 1.27× slower than stock), `MMTK_NURSERY` (default bounded 2–64 MiB), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
@@ -143,7 +143,9 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    - **Heap/nursery defaults + the MMTk minor-GC cost (2026-06-24, LANDED).** The fixed-1 GB
      heap (→ ~15× stock RSS) became dynamic (`8777a22082`), then a **space-overhead heap**
      (`70a709e179`): after each full GC `heap = live × 2.2` (stock's `Gc.space_overhead`), with a
-     bounded 2–8 MiB nursery. This *replaced* MemBalancer, whose sqrt rule under-provisioned
+     bounded nursery (2–8 MiB; **raised to 2–64 MiB on 2026-06-25** — the 8 MiB max forced 100s–1000s
+     of near-empty minor GCs on high-alloc workloads, making GenImmix 1.3–3× slower single-domain; see
+     NOTES + SCALABILITY.md). This *replaced* MemBalancer, whose sqrt rule under-provisioned
      big-live-set programs — **binarytrees 3.5× → 1.27× slower than stock** (major-GC thrash
      gone; the residual 1.27× is the per-collection copy cost, not the heap). RSS ≈ 4× live is
      Immix *fragmentation* (a separate defrag lever). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**

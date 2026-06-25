@@ -101,15 +101,21 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         );
     }
 
-    // Nursery: a small *bounded* (absolute) nursery. The major heap is sized separately
-    // by the space-overhead trigger above, so the nursery must NOT be a proportion of it
-    // (a proportional nursery grows with the heap → footprint blows up and it stops being
-    // generational). A bounded 2–8 MiB nursery keeps GenImmix generational at low
-    // footprint; with 1 GC worker its frequent minor collections are cheap. Overridable
-    // via MMTK_NURSERY (read by MMTKBuilder::new): only install our default when unset.
+    // Nursery: a *bounded* (absolute) nursery. The major heap is sized separately by the
+    // space-overhead trigger above, so the nursery must NOT be a proportion of it (a
+    // proportional nursery grows with the heap → footprint blows up and it stops being
+    // generational). Bounded keeps it absolute and commit-on-demand, so small programs do
+    // not pay the full max. The max is 64 MiB: the prior 2–8 MiB default was too small for
+    // high-allocation-rate workloads — it forced hundreds-to-thousands of near-empty minor
+    // collections (e.g. spectralnorm 723 GCs → 89; binarytrees 110 → 20), making GenImmix
+    // 1.3–3× slower single-domain *and* using more RSS than a larger nursery. 64 MiB makes
+    // GenImmix competitive-to-best single-domain at memory parity (see SCALABILITY.md §10).
+    // (It does NOT fix the multi-domain STW-pause anti-scaling — that is structural; use
+    // MMTK_PLAN=Immix/ConcurrentImmix for parallel-heavy workloads.) Overridable via
+    // MMTK_NURSERY (read by MMTKBuilder::new): only install our default when unset.
     if std::env::var_os("MMTK_NURSERY").is_none() {
         assert!(
-            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,8388608"),
+            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,67108864"),
             "failed to set default nursery"
         );
     }

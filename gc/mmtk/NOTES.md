@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Default nursery raised 8 MiB → 64 MiB (bounded) — GenImmix single-domain 1.3–3× faster, lower RSS
+
+*2026-06-25*
+
+**Change (`api.rs`):** default nursery `Bounded:2m,8m` → `Bounded:2m,64m` (kept *bounded/absolute*
+and commit-on-demand; the max is what changed). Implements SCALABILITY.md §10.4 #1.
+
+**Why.** The 8 MiB default (chosen for bounded RSS, #44) is too small for high-allocation-rate
+workloads: it forces hundreds-to-thousands of near-empty minor collections, so GenImmix paid pure
+copy-nursery overhead without the benefit. Single-domain, @512 MiB heap, native:
+
+| bench | 8 MiB (old) | 64 MiB (new) |
+|---|---|---|
+| spectralnorm 3000 | 0.879 s, **723** GCs, 75 MB | 0.692 s, **89** GCs, 131 MB |
+| binarytrees 18 | 0.423 s, **110** GCs, 262 MB | 0.142 s, **20** GCs, 185 MB |
+
+At memory parity GenImmix(64 MiB) is competitive-to-best single-domain (fastest *and* leanest on
+spectralnorm; binarytrees within 1.5× of Immix at 3× less RSS than Immix's 554 MB). It does **NOT**
+fix the multi-domain STW-pause anti-scaling (S(8) stays 0.71 with 8× fewer GCs — the per-collection
+STW cost grows with domains regardless of frequency; that is structural, use `MMTK_PLAN=Immix`/
+`ConcurrentImmix` for parallel-heavy work). See SCALABILITY.md (branch `night/scalability-findings`)
+for the full investigation.
+
+**Validated (M4 Pro, macOS arm64).** Default now 64 MiB (binarytrees 110→20, spectralnorm 723→89);
+`MMTK_NURSERY` override still honored (forced 8m → 111 GCs); **tight heaps safe** — `Bounded` adapts
+the nursery down to fit, 16/24/32 MiB pinned heaps all rc=0 (nursery never exceeds the heap, which is
+why `Bounded` not `Fixed`); CLBG binarytrees byte-matches golden; bytecode path clean; dynamic default
+heap clean.
+
+---
+
 ## bug #3c FIXED (cross-STW bracket); #52 worker-scaling ABANDONED; the real finding — MMTk-GenImmix SERIALIZES multi-domain execution
 
 *2026-06-24*
@@ -151,6 +182,8 @@ live × (1 + overhead/100)`, clamped `[min,max]`. Headroom is **linear** in live
 `Gc.space_overhead`), so it's always proportional to what's alive. Binding default (when `MMTK_HEAP_SIZE_MB`
 unset): `SpaceOverheadSize:16MiB,RAM,120` + a **bounded 2–8 MiB nursery** (the major heap is now sized
 separately, so the nursery must NOT be heap-proportional — a proportional nursery blew RSS to 362 MB–1.1 GB).
+(The nursery max was later raised 8 MiB → **64 MiB** — too small for high-alloc workloads; see the
+2026-06-25 entry at the top.)
 
 **Two implementation traps, both fixed:** (1) recompute must be **gated on full-heap GC**
 (`gen.last_collection_full_heap()`) — a nursery GC's `get_reserved_pages()` is transiently inflated
