@@ -5,6 +5,50 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## #5 ConcurrentImmix deadlock ROOT-CAUSED (lost-wakeup at the pause boundary); LXR P2 plan; testsuite census (2026-06-25)
+
+**Core-dump debugging is the method for the rr-resistant timing deadlocks.** `rr` *masks* both #5 and the
+#6 residual (its serialization avoids the race; `--chaos` aborts the bench). Instead: run on real cores,
+`kill -ABRT` the hung pid → `gdb <exe> <core>` (fully offline, **no rr, no ptrace** — works under
+`ptrace_scope=1`). This captured a 37-thread chameneos deadlock cleanly. Use it for #5 and #6.
+
+**#5 chameneos ConcurrentImmix deadlock — ROOT CAUSE (supersedes the earlier cont_lock + "active-mutator
+livelock" hypotheses, both REFUTED by the core).** It is a **lost-wakeup at the Concurrent→FinalMark
+work-bucket boundary**, NOT cont_lock (no thread is in cont_lock). Evidence: 27 GC workers parked in
+`worker_monitor::park_and_wait` (no work), mutator domains parked in `park_until_resumed` waiting
+`gc_active==false`, no thread in `stop_all_mutators` → a collection set `gc_active=true` but
+`resume_mutators` never ran. Mechanism (agent, cited): `gc_active` is **per-pause** (set in the binding's
+`stop_all_mutators`, cleared in `resume_mutators` called from `on_gc_finished`, `scheduler.rs:666`). The
+SATB barrier lets mutators `add()` `ProcessModBufSATB` into `work_buckets[Concurrent]` **lock-free**, but
+`notify_one_worker` (`work_bucket.rs:137`) **suppresses the wakeup when the bucket is momentarily
+`!enabled`/`!open`** during the Concurrent→FinalMark transition. An orphaned packet then sits in the
+Concurrent `Injector` with no worker notified; `concurrent_marking_drained` returns **true via the
+`!is_enabled()` short-circuit** (`work_bucket.rs:172`) while the queue is *physically non-empty* — so the
+GH#4 FinalMark self-trigger doesn't re-fire, all workers park, `gc_active` stuck. **Fix direction:** make
+the Concurrent→FinalMark handoff atomic w.r.t. SATB feeds — clear `concurrent_work_in_progress` *before*
+the final barrier flush in `notify_mutators_paused` (`concurrent/immix/global.rs:281-284` flushes while the
+flag is still true → targets the about-to-be-disabled bucket), or keep the Concurrent bucket enabled until
+FinalMark `Release` has drained it; plus defense-in-depth (broaden the self-trigger to a non-empty
+Concurrent bucket; bound `park_until_resumed`'s wait). **Confirm from the core:** `WorkerGoals.current ==
+None`, `requests[Gc] == false`, `ConcurrentImmix.concurrent_marking_active == false` with `previous_pause
+== FinalMark` yet `gc_active == true`, and the Concurrent bucket `enabled==false` with a non-empty Injector.
+
+**LXR P2 implementation plan (agent, file-cited).** 17 concrete `policy/immix/immixspace.rs` sites + LOS
+RC (`largeobjectspace.rs`), gated on `rc_enabled` so existing plans stay byte-identical. The high-risk
+core is **P2.3 — RC-travels-with-copy** at `trace_object_with_opportunistic_copy` (immixspace.rs:652-748):
+on evacuation, `rc.set(new, rc.count(old))` + straddle re-mark **before** clearing old, else dangling/leak.
+Sweep = reclaim a block/line when all `RC_TABLE` entries are 0 (`Block::rc_dead()`). **Side-metadata budget
+has room** — `RC_TABLE` (core-global) is disjoint from `GLOBAL_LOG_BIT` (VM-global region); P1 declared the
+specs but P2 must register them in each space's `side_metadata_specs()`. Phased P2.0–P2.5 (each
+`sanity`-checkable; real-workload validation needs P3's barrier to issue Incs/Decs). Full plan saved.
+
+**Testsuite census (2026-06-25, church/godel, with `ocamltest` built + GNU parallel):** GenImmix bytecode
+= **1401 passed / 92 failed / 54 skipped / 1547 considered** (matches the ~97 ROADMAP estimate — the #19
+triage worklist). Native variants need `make ocamltest.opt` (the `codegen` tool) or ~50 spuriously fail
+(godel saw `catch-try.cmm` exit 127). aligned_alloc/alloc_async are the known #12c gaps.
+
+---
+
 ## Three results: LXR P1 OCaml-build-validated; RQ10 pole-B design; #20 backup-thread design (2026-06-25)
 
 **LXR P1 — OCaml-build-validated.** The binding workspace builds **green** against
