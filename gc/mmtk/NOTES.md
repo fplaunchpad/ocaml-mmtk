@@ -5,6 +5,59 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## RQ10 pole-B GO/NO-GO experiment RUN — multi-domain anti-scaling is mostly a TOO-SMALL DEFAULT NURSERY (64 MiB); enlarging it recovers it (cheap) → pole-B firmly NO-GO + an actionable fix (2026-06-25)
+
+**Headline:** the controlled multi-domain anti-scaling is **largely a nursery-SIZE artifact**, not a deep
+architecture problem. GenImmix's shared copy-nursery (default cap **64 MiB**) is split across N domains, so it
+fills ~N× faster → ~N× more all-domains minor STWs → anti-scaling. **Raising the cap to 512 MiB recovers it**:
+
+| GenImmix nursery | d1 | d2 | d4 | d8 | **S(8)** | RSS |
+|---|---|---|---|---|---|---|
+| **default (Bounded 2–64 MiB)** | 11.62 | 9.64 | 9.35 | 10.32 | **1.13** (regresses) | ~1.8 GB |
+| **large (Bounded 2–512 MiB)** | **6.30** | 4.04 | 2.78 | **2.40** | **2.63** | ~2.1 GB |
+
+Enlarging the shared nursery makes GenImmix **~2× faster single-domain** (11.62→6.30; fewer minor GCs) **AND
+4.3× faster at d8** (10.32→2.40), lifting S(8) 1.13→2.63, for ~300 MB more RSS. GenImmix+512 MiB is then the
+**fastest plan at every domain count** below — beating StickyImmix and matching Immix at ¼ its RSS.
+**Actionable fix (shippable, cheap): the default nursery cap is too small for multicore — scale it with domain
+count (≈`base × num_domains`, so each domain keeps a constant effective slice) or raise the default cap
+substantially.** (CLAUDE.md notes the cap was raised 8→64 MiB on 2026-06-25 for the single-domain
+over-collection problem; 64 MiB is still too small once *shared* across domains.)
+
+The plan-discriminator that motivated this (same conditions; `par_binarytrees d21`, 3 reps, min wall-time):
+
+| plan | nursery | d1 | d2 | d4 | d8 | **S(8)** | RSS |
+|---|---|---|---|---|---|---|---|
+| **GenImmix** | shared **copy**-nursery | 11.66 | 9.63 | 9.29 | 10.19 | **1.14** (regresses!) | ~1.2–1.8 GB |
+| **StickyImmix** | generational, **in-place** (sticky lines) | 23.86 | 13.72 | 9.36 | 8.35 | **2.86** | ~1.3 GB |
+| **Immix** | non-gen, in-place | 7.94 | 4.91 | 3.20 | 2.61 | **3.04** | 4 GB (heap-filled) |
+
+This isolates the *design* axis (copy vs in-place nursery) at default settings; both in-place plans scale,
+GenImmix-default does not. But the nursery-size table above shows the copy nursery is **not fundamentally
+broken** — it's just under-provisioned at the default cap: a larger shared GenImmix nursery (2.63) nearly
+matches StickyImmix (2.86) AND is far faster in absolute terms (d8 2.40 vs 8.35). StickyImmix shares
+GenImmix's *exact* all-domains STW + full per-domain root-scan, confirming the STW rendezvous is **not** the
+bottleneck. (Immix's 4 GB is heap-inflated/non-generational — in-place upper bound only.)
+
+**Pole-B is firmly NO-GO**, on TWO independent grounds: (1) **the cheapest fix is a config knob** — enlarge /
+domain-scale the shared nursery (above): GenImmix+512 MiB already gives S(8)=2.63 and the best absolute time at
+every domain count, no code-architecture change at all; (2) even the *design* lever pole-B targets
+(per-domain, non-copying nursery) is **already delivered by MMTk's StickyImmix** in-framework, with zero
+VM-ParMinor rebuild / zero moving-GC promotion crux / zero second collector. Pole-B would be justified only if
+a VM-faithful ParMinor beat *both* of these on throughput *and* scaling — implausible given a 512 MiB nursery
+already wins. **→ Do NOT build pole-B.** Pursue, in order: **(a) domain-scaled nursery default** (cheap, ships
+now, helps the default plan everyone uses); (b) StickyImmix-as-multicore-default as a fallback.
+
+**Publishable finding (sharper than the deflated anti-scaling story):** the fork's multi-domain "anti-scaling"
+is dominated by an **under-provisioned shared copying nursery** — a per-collection-frequency artifact
+(nursery_per_domain = cap/N), not the STW rendezvous and not a generational-ownership problem. Two independent
+remedies recover S(8)≈2.6–2.9: **size the shared nursery with domain count**, or use a **per-mutator in-place
+nursery** (StickyImmix). The copying-vs-in-place axis is secondary to *provisioning*. (Caveats: one alloc-heavy
+bench at one depth on the bug3c branch; relative comparison robust, absolutes heap-/branch-specific; one
+default-d1 rep aborted at startup (mmap flake) and was excluded. Confirm on mainline + a second workload.)
+
+---
+
 ## RQ10 pole-B (VM-owned ParMinor + MMTk major-only): feasible & novel, but motivation deflated — run the go/no-go experiment BEFORE building (2026-06-25)
 
 The inverse of pole-A: keep stock OCaml's **per-domain ParMinor** (private minor arenas) and use MMTk for the

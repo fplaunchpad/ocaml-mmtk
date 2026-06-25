@@ -278,17 +278,20 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    option — keep stock's *scalable* minor and use MMTk **major-only**. Both directions, and the empirical
    motivation (the fork's multi-domain anti-scaling), are written up as **RESEARCH_QUESTIONS RQ10** /
    `SCALABILITY.md`.
-   **RQ10 pole-B (the inverse) feasibility — DONE (NOTES 2026-06-25):** **FEASIBLE** against a non-generational
-   **Immix** major with **zero mmtk-core changes** (the mutator `Default` allocation maps straight to the mature
-   Immix space, so VM-driven promotion calls `mmtk_ocaml_alloc(.., Default)`); a *generational* major is closed
-   (mature reachable only from GC workers). Barrier story is clean (under Immix `caml_mmtk_generational==0` so
-   MMTk's nursery barrier is already off; stock `ref_table` is still in-tree to reuse). **NOVEL** — no MMTk
-   binding keeps a VM-owned nursery in front of an MMTk major. **BUT the motivation deflated:** the anti-scaling
-   "cliff" was retracted (controlled S(8)=1.36, not 0.64), and in-tree evidence points to STW-content/root-scan
-   — *not* the shared nursery — as the residual's cause, which pole-B would **not** fix. **GO/NO-GO before
-   building:** GenImmix (shared copy-nursery) vs Immix/StickyImmix (in-place) scaling on par_binarytrees +
-   par_spectralnorm at d1/2/4/8 pinned; if the residual persists on Immix, the nursery isn't the lever → don't
-   build. **Recommendation: do pole-A regardless; do NOT build pole-B until the experiment discriminates.**
+   **RQ10 pole-B (the inverse): feasibility DONE + go/no-go experiment RUN → NO-GO (NOTES 2026-06-25).**
+   Feasibility: FEASIBLE against a non-generational **Immix** major with **zero mmtk-core changes** (mutator
+   `Default` maps to mature Immix; promotion = `mmtk_ocaml_alloc(.., Default)`; barrier clean — under Immix
+   `caml_mmtk_generational==0` so MMTk's nursery barrier is off and stock `ref_table` is reusable), and **NOVEL**
+   (no MMTk binding keeps a VM nursery in front of an MMTk major). **But the experiment kills the motivation:**
+   the controlled multi-domain anti-scaling is **mostly a too-small DEFAULT NURSERY** — GenImmix's shared
+   copy-nursery (cap 64 MiB) split across N domains fills N× faster → N× more minor STWs. Measured (church,
+   pinned, `MMTK_THREADS=domains`, par_binarytrees d21): GenImmix default S(8)=**1.13**; **raise the cap to
+   512 MiB → S(8)=2.63 and ~2× faster single-domain, 4.3× faster at d8** (best absolute time of all plans, +0.3 GB
+   RSS). StickyImmix (in-place nursery, same STW) S(8)=**2.86** — confirming the STW rendezvous is **not** the
+   bottleneck, the under-provisioned shared nursery is. **→ Pole-B NO-GO** (a config knob and/or existing
+   StickyImmix already beat it; a VM-ParMinor rebuild is unjustified). **Actionable spin-off (NEW, cheap, ships
+   now): scale the default nursery cap with domain count** (`≈ base × num_domains`) or raise it substantially —
+   helps the default plan directly. → see item below.
 
 10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (ongoing).** Work
     through the remaining testsuite non-pass (M7: ~1450/1547 pass under Immix/StickyImmix; the ~97 non-pass
@@ -335,6 +338,19 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     backup thread. OCaml-MMTk's backup thread is the outlier; the binding's `RUNNING` set is already exactly
     that flag (a domain that released its lock is absent → not awaited; `mmtk_ocaml_try_mark_running` is the
     return-edge re-check). Deleting the backup thread = **Phase 3** of the #18 verified plan.
+
+12. **#21 — scale the default nursery cap with domain count (cheap, high-impact; spin-off of RQ10 pole-B
+    experiment).** The shared copy-nursery default (`Bounded 2–64 MiB`) is **too small for multicore**: split
+    across N domains it fills ~N× faster → ~N× more all-domains minor STWs → the GenImmix multi-domain
+    anti-scaling (measured: par_binarytrees d21, S(8)=1.13 at 64 MiB → **2.63 at 512 MiB**, with **~2× faster
+    single-domain and 4.3× faster at d8**, +0.3 GB RSS; NOTES 2026-06-25). Fix: make the default nursery cap
+    **scale with `num_domains`** (≈`base × num_domains`, so each domain keeps a constant effective slice) instead
+    of a fixed 64 MiB, clamped to a fraction of the heap. Touch points: the nursery default in `runtime/mmtk.c`
+    init + the `MMTK_NURSERY` parse (`api.rs`); `num_domains` is known/queryable. **Validate** the default-plan
+    (GenImmix) sequential panel doesn't regress (a too-big nursery over-provisions tiny single-domain heaps —
+    that's why it was capped 64 MiB; the domain-scaling keeps d1 at ~64 MiB) + the d2/4/8 scaling win. This is the
+    concrete, shippable answer to the RQ10 anti-scaling question — it improves the plan everyone uses by default.
+    → RQ10; NOTES 2026-06-25; supersedes the need for pole-B.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
