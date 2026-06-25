@@ -313,7 +313,11 @@ The active research/measurement threads behind the M8 milestone — the index; d
     `GLOBAL_LOG_BIT`), `work_bucket.rs`, the VM traits; LOW on `barriers.rs`/`concurrent/` (purely additive).
   - **Phased plan (each phase builds; GenImmix stays the untouched default throughout):** **P1** mmtk-core
     scaffolding — vendor `args.rs`, `rc.rs`, RC `spec_defs`/`WorkBucketStage`s, `FieldBarrier`,
-    `BarrierSelector::FieldBarrier`, `Pause::RefCount` (~3–5 d, low risk). **P2** Immix-policy RC hooks +
+    `BarrierSelector::FieldBarrier`, `Pause::RefCount` (~3–5 d, low risk) — **DONE 2026-06-25**: branch
+    **`origin/0.32-ocaml-lxr` @ `f0319fb5e6`** on `fplaunchpad/mmtk-core` (563 insertions, purely additive,
+    cargo-green + 470/470 mmtk-core tests; API-adaptation bridges noted in NOTES). **NOT yet OCaml-build-
+    validated** — next: build the fork against this branch (cargo binding + `make runtime` + GenImmix/Immix
+    smoke) before deciding whether to fold it into `0.32-ocaml` or hold for P2. **P2** Immix-policy RC hooks +
     LOS RC (~1–2 wk, **highest risk** — moving-GC correctness; lean on the `sanity` feature at small heaps).
     **P3** port `plan/lxr/`; wire `MMTK_PLAN=LXR` in `api.rs` (~1 wk). **P4** OCaml binding + runtime barrier —
     `GLOBAL_FIELD_UNLOG_BIT_SPEC`, the new `ObjectModel`/`Scanning`/`Slot` methods, `mmtk_ocaml_field_barrier`
