@@ -10,6 +10,7 @@
 //! hand the batch to MMTk via `create_process_roots_work`.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use mmtk::memory_manager;
@@ -136,13 +137,47 @@ fn managed_obj(v: usize) -> Option<ObjectReference> {
     }
 }
 
+/// Set for the duration of a generational NURSERY (minor) GC's weak/ephemeron
+/// processing. While set, `ephe_is_reachable` treats any referent NOT resident in
+/// the nursery as live: a minor GC only traces [0,young), so a mature object
+/// reachable only through the mature heap is never visited and its liveness bit is
+/// stale (set at the last FULL GC). Reading that stale bit as "dead" would let the
+/// clean pass clear a still-reachable weak/ephemeron key or data. Mirrors stock
+/// OCaml, where a minor collection clears only dead *young* referents. Clear (false)
+/// for full GCs and for non-generational plans → behaviour is byte-identical there.
+static NURSERY_GC: AtomicBool = AtomicBool::new(false);
+
+/// True iff `o` resides in the generational nursery (young) space. False for
+/// mature objects and for non-generational plans (no nursery). Consults the active
+/// plan via its `GenerationalPlan` view (callable through the vtable; the trait is
+/// crate-sealed in mmtk-core but its methods resolve on the trait object — same as
+/// `.concurrent()` in api.rs).
+fn in_nursery(o: ObjectReference) -> bool {
+    crate::mmtk()
+        .get_plan()
+        .generational()
+        .map_or(false, |g| g.is_object_in_nursery(o))
+}
+
 /// Weak-processing callbacks handed to the C ephemeron walk (runtime/mmtk.c).
 /// `is_reachable`/`forward` are context-free; `retain` carries the GC worker's
 /// tracer through `ctx` (a `*mut &mut dyn FnMut(usize) -> usize`).
 extern "C" fn ephe_is_reachable(v: usize) -> i32 {
     // Foreign / immediate values are never collected → always "reachable" (1), so
     // the walk never clears a key/data that points at one.
-    managed_obj(v).map_or(1, |o| o.is_reachable() as i32)
+    let o = match managed_obj(v) {
+        Some(o) => o,
+        None => return 1,
+    };
+    // During a generational nursery (minor) GC, only [0,young) was traced. A mature
+    // referent was not visited this GC, so its mark/liveness bit is stale; do NOT
+    // read it as dead and clear a still-reachable key/data. Treat any non-nursery
+    // referent as live here, clearing only genuinely-dead nursery referents. Off
+    // (NURSERY_GC=false) for full GCs / non-generational plans → unchanged there.
+    if NURSERY_GC.load(Ordering::Relaxed) && !in_nursery(o) {
+        return 1;
+    }
+    o.is_reachable() as i32
 }
 
 extern "C" fn ephe_forward(v: usize) -> usize {
@@ -336,6 +371,19 @@ impl Scanning<OCamlVM> for VMScanning {
         if !weak_refs_enabled() {
             return false;
         }
+        // Mark whether THIS GC is a generational nursery (minor) collection, so
+        // ephe_is_reachable conservatively treats mature (non-nursery) referents as
+        // live: a minor GC traces only [0,young), so a mature object's liveness bit
+        // is stale and must not drive weak/ephemeron clearing (mirrors stock's
+        // minor rule). false for full GCs and non-generational plans. process_weak_refs
+        // runs on a single GC worker during STW, so a plain relaxed store is enough.
+        NURSERY_GC.store(
+            crate::mmtk()
+                .get_plan()
+                .generational()
+                .map_or(false, |g| g.is_current_gc_nursery()),
+            Ordering::Relaxed,
+        );
         let domains = domain_addrs();
 
         // One retention round, with access to the tracer for resurrecting objects.
