@@ -198,6 +198,18 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    *intermittent* end-to-end deadlock could not be reproduced on demand (never captured in an rr trace),
    so the "deadlock gone" confirmation awaits a live sanity-build/rr capture. → RESEARCH_QUESTIONS RQ1;
    NOTES (2026-06-25).
+   - **SEPARATE, still-OPEN ConcurrentImmix hang — GH#14 (root-caused 2026-06-25, fix not yet landed).**
+     Distinct from the `#4` deadlock above: a **marker-vs-mutator livelock** at *normal/dynamic heap,
+     single-domain* on `spectralnorm`/`LU_decomposition` (hot boxed-float kernels). The SATB barrier
+     refills the `Concurrent` work bucket from the mutator faster than the single default GC worker
+     drains it, so `work_buckets[Concurrent].is_drained()` is never true while workers are parked →
+     **FinalMark is never requested** → marking never finishes → the mutator blocks forever. `#4`'s
+     guard is structurally unsatisfiable here (active mutator). **Fix (ready to implement, ~10 lines):**
+     a heap-pressure forced FinalMark in `ConcurrentImmix::collection_required` — when
+     `concurrent_marking_in_progress()` and `gc_trigger.is_heap_full()`, return `true` *regardless of*
+     `is_drained()` (the FIXME at `global.rs:85`). Land **after** the quick-panel run is captured (it
+     changes ConcurrentImmix numbers). Full evidence + rr recipe in GH#14 + NOTES (2026-06-25). This is
+     why ConcurrentImmix is omitted from the README quick-panel table.
 
 9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
