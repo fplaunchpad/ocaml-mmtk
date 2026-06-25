@@ -31,6 +31,32 @@
 > this update. The real open levers are a **domain-aware GC-worker pool** and the per-minor-collection
 > cost (RQ10).
 
+> ## ⚠️ UPDATE 2 (2026-06-25) — the residual is nursery PROVISIONING (not the STW); pole-B NO-GO; + two nursery bugs
+>
+> The "mild residual" from UPDATE 1 now has a mechanism. A discriminator + dose-response experiment (church,
+> 56-core, pinned, **`MMTK_THREADS=domains`**, fixed 4 GiB heap, `par_binarytrees d21`, 3 reps, min wall-time)
+> pins it on **nursery provisioning** — collection *frequency*, not the STW pause — and turned up two bugs.
+> (Methodology: the documented `MMTK_NURSERY="Bounded:2m,64m"` suffix syntax silently parse-fails; the numbers
+> below are the corrected raw-byte runs. Full data + tables in §11.)
+>
+> - **It is the nursery, NOT the STW rendezvous.** **StickyImmix** — same all-domains minor STW + full
+>   per-domain root scan as GenImmix, but a per-mutator **in-place** nursery (no shared `CopySpace`, no survivor
+>   copy) — scales **`S(8)=2.86`** vs GenImmix-default **`S(8)=1.13`**. Same STW, opposite scaling.
+> - **A larger/correctly-applied GenImmix nursery recovers it.** Explicit raw-byte cap: 64 MiB `S(8)=1.60` →
+>   **256 MiB `S(8)=2.58` at only ~360 MB RSS** (bounded = commit-on-demand) → 1024 MiB `2.60` (plateau).
+> - **BUG A — degenerate default install.** The *unset*-`MMTK_NURSERY` default path (which `api.rs:118` sets to
+>   `Bounded:…,67108864` = 64 MiB) does **913 minor GCs / d1=11.62 s / S(8)=1.13**, whereas the *identical
+>   64 MiB via env* does **6.72 s / S(8)=1.60** — ~2× faster. Same string, two code paths, two behaviours ⇒ the
+>   default install doesn't take effect like the env path. Degrades the default GenImmix everyone runs.
+> - **BUG B — broken override parser.** `Bounded:2m,64m` (documented) silently parse-fails → mmtk-core default;
+>   only raw bytes parse.
+> - **RQ10 pole-B** (VM-owned ParMinor + MMTk major-only): **NO-GO** — fixed in-framework (fix/raise the nursery,
+>   or use StickyImmix); a VM-ParMinor rebuild is unjustified. Fixes tracked as **ROADMAP #21**.
+>
+> **Net (refined):** the multicore "anti-scaling" is a **nursery-provisioning** effect (collection frequency,
+> worse for a copying nursery), on top of the (now-fixed) `nproc` oversubscription + GH#6 deadlock. Not a
+> structural STW-pause property, not a generational-ownership problem.
+
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The
@@ -552,3 +578,72 @@ single-/few-domain case:
 > *counts* in §6 are unaffected. A clean re-run of the full §2 matrix with `MMTK_THREADS`
 > pinned (to remove the worker-oversubscription confound flagged in §10.1) is the remaining
 > follow-up.
+
+## 11. Nursery provisioning is the residual lever — pole-B NO-GO + two nursery bugs (2026-06-25)
+
+Controlled probe behind **UPDATE 2**. Church (56-core Xeon), assert-fixed mmtk-core, core-pinned,
+`MMTK_THREADS=domains`, fixed 4 GiB heap, `par_binarytrees d21`, 3 reps, **min** wall-time (s), RSS via
+`/usr/bin/time`. **This supersedes §10.2's "nursery sizing does NOT fix multi-domain" — see the reconciliation
+at the end (§10.2's override almost certainly never took effect, BUG B).**
+
+### 11.1 Plan discriminator (all at the binding DEFAULT nursery)
+In-place nurseries scale; the copying nursery does not — at the *same* all-domains STW.
+
+| plan | nursery kind | d1 | d2 | d4 | d8 | **S(8)** | RSS |
+|---|---|---|---|---|---|---|---|
+| GenImmix | shared **copy** | 11.62 | 9.63 | 9.29 | 10.19 | **1.13** | ~1.2–1.8 GB |
+| StickyImmix | generational **in-place** | 23.86 | 13.72 | 9.36 | 8.35 | **2.86** | ~1.3 GB |
+| Immix | non-gen in-place | 7.94 | 4.91 | 3.20 | 2.61 | **3.04** | 4 GB (heap-filled) |
+
+StickyImmix runs GenImmix's exact STW + per-domain root scan yet scales 2.86× ⇒ the STW rendezvous is **not**
+the bottleneck.
+
+### 11.2 Dose-response — GenImmix, EXPLICIT raw-byte nursery cap (`Bounded:2097152,<bytes>`)
+Bigger nursery → better scaling + faster single-domain; plateau ~256 MiB; commit-on-demand keeps RSS low.
+
+| cap | d1 | d8 | **S(8)** | RSS (d1 / d8) |
+|---|---|---|---|---|
+| 64 MiB | 6.72 | 4.21 | **1.60** | 356 MB / 784 MB |
+| **256 MiB** | **5.64** | **2.19** | **2.58** | **~360 MB** |
+| 1024 MiB | 5.81 | 2.23 | 2.60 | 1.1 GB |
+
+### 11.3 BUG A — degenerate default-nursery install
+The binding installs the default nursery as `Bounded:2097152,67108864` (= 64 MiB) when `MMTK_NURSERY` is unset
+(`gc/mmtk/binding/src/api.rs:116-119`). But:
+- **unset (default install):** 913 minor GCs, d1 = **11.62 s**, S(8) = 1.13 (verbose-confirmed 913 GCs).
+- **explicit identical 64 MiB via env (raw bytes):** d1 = **6.72 s**, S(8) = 1.60 — ~2× faster, far fewer GCs.
+- **garbage MMTK_NURSERY → mmtk-core default (parse-fail path):** 4 GCs, d1 = 6.30 s.
+
+Three behaviours from what should be one config ⇒ `api.rs:118`'s post-`MMTKBuilder::new` `process("nursery",…)`
+does **not** take effect like the env-read inside `new`. **Corroborated by §10.2's GC counts:** §10.2 measured
+**923 GCs at the 2–8 MiB default** and **114 GCs at 64 MiB**; this probe's unset-default gives **913 GCs** — i.e.
+the *8 MiB* behaviour, **not** the 64 MiB the install intends. So the default plan everyone runs is silently on
+an ~8 MiB-equivalent nursery, which is the single root cause of *both* GenImmix's single-domain alloc-heavy
+slowness *and* its multi-domain anti-scaling. Root-cause owed (a verbose GC-count of explicit-64M — expected
+~114 by the §10.2 cross-check — plus reading the option-set ordering; church went unreachable mid-probe).
+
+### 11.4 BUG B — `MMTK_NURSERY` suffix syntax silently parse-fails
+`MMTK_NURSERY="Bounded:2m,64m"` (the form in CLAUDE.md/README) → *"unable to set MMTK_NURSERY… Can't parse
+value. Default value will be used."* → silent fallback to mmtk-core's default. Only raw bytes
+(`Bounded:2097152,67108864`) parse. Fix the parser to accept `k/m/g` suffixes, or correct the docs.
+
+### 11.5 Reconciliation with §10.2 (which concluded nursery sizing does NOT help multi-domain)
+§10.2 **did** get its nursery change to take effect (923→114 GCs at 64 MiB), so it did *not* hit BUG B — the
+discrepancy is the **measurement conditions**, not a no-op override. §10.2 ran under the **pre-fix confounds
+UPDATE 1 flags** (`nproc` workers, unpinned; pre-assert-fix) and at a different heap/workload (d21 *ONCE* @1 GB,
+S(8)=0.71 at 64 MiB), whereas §11 is **pinned, `MMTK_THREADS=domains`, assert-fixed @4 GiB** and shows nursery
+sizing *does* lift net scaling (S(8) 1.60→2.58 from 64→256 MiB). The most likely cause of the flip: removing the
+worker-oversubscription tax (pinning + `workers=domains`) eliminates much of the "GC time climbs with domains"
+that §10.2 measured (822→2667 ms). **Caveat — not fully closed:** §11 captured wall-clock only, so it does **not**
+directly refute §10.2's narrower claim that *per-collection STW cost* still grows with domains; a clean
+apples-to-apples re-run of §10.2's exact config (with per-domain GC-time, pinned + assert-fixed) is owed to
+settle whether any residual STW-cost-growth remains under a large nursery. §10.2's *single-domain* nursery
+effect stands unchanged.
+
+### 11.6 Pole-B verdict
+RQ10 pole-B (VM-owned ParMinor + MMTk major-only): **NO-GO.** The anti-scaling is fixed in-framework — fix/raise
+the nursery (§11.2–11.3) and/or use an in-place plan (§11.1) — with no VM-ParMinor rebuild. Fixes → ROADMAP #21.
+
+**Caveats:** one alloc-heavy bench at one depth on the `fix/bug3c-cross-stw` branch; relative comparisons are
+robust, absolutes are heap-/branch-specific; BUG A root-cause + a mainline + second-workload confirmation are
+still owed.
