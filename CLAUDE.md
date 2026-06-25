@@ -141,8 +141,11 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   major heap. Raised 8→64 MiB on 2026-06-25: the old 8 MiB forced 100s–1000s of near-empty minor GCs
   on high-alloc workloads → GenImmix 1.3–3× slower single-domain; `Bounded` adapts down to fit small
   heaps. Does **not** fix multi-domain anti-scaling — that's structural; see `gc/mmtk/NOTES.md`), `MMTK_THREADS`
-  (GC worker count; **default 1** — was nproc, which made single-domain minor GC ~1.37× slower via futex
-  park/wake contention; raise for parallel/multi-domain), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
+  (GC worker count; **default = nproc**, MMTk-core's own default. We tried *forcing 1* — it cut the
+  single-domain minor-GC futex park/wake cost ~1.37× — but reverted it as a band-aid: worker count does
+  **not** fix multi-domain throughput scaling (STW-bound, not thread-pool-bound), so pinning 1 only bought
+  a single-domain win at the price of deviating from MMTk's default. Set `MMTK_THREADS=1` yourself for the
+  lowest-overhead single-domain runs; see `api.rs` init + README knobs table), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
   MMTk is the only collector — no opt-out; benchmark against stock via a separate vanilla
   OCaml 5.5 opam switch (compare at **memory parity** — report RSS alongside wall time).
 
