@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CORRECTION: ConcurrentImmix "hang" is a scheduler PANIC, not a livelock — empirical run beats static analysis (2026-06-25)
+
+**Supersedes the static "marker-vs-mutator livelock" hypothesis below.** When the rebuilt quick panel
+actually *ran* ConcurrentImmix (vs the earlier static read of the code), the failure is a **panic, not a
+livelock**: on `spectralnorm`, `LU_decomposition`, `par_spectralnorm`, and `chameneos_redux` it aborts with
+
+```
+GC request sent to WorkerMonitor while GC is still in progress.   (scheduler.rs:444, in on_last_parked)
+```
+
+then the poisoned `WorkerMonitor` mutex kills every GC worker → deadlock. The assert is **stop-the-world-era**
+and its own comment says so: *"In stop-the-world GC, mutators cannot request for GC while GC is in progress.
+When we support concurrent GC, we should remove this assertion."* Under a **concurrent** plan a GC is
+legitimately (re-)requested while one is in progress, so the assertion fires. **This is the real root cause;
+the "FinalMark is never requested / add a heap-pressure forced trigger" fix I wrote earlier is WRONG** — the
+problem is the opposite (a GC request arrives *while a GC is current* and the STW-only assert rejects it), and
+a forced-FinalMark trigger would add *more* requests and make it worse.
+
+**Likely fix:** relax/remove that assertion for concurrent plans (coalesce a redundant GC request instead of
+asserting) — exactly the code's own TODO. **Open question with a correctness angle:** does our GH#4 FinalMark
+self-trigger (`scheduler.rs::respond_to_requests` self-requests `WorkerGoal::Gc`, mmtk-core `72ee627050`)
+*contribute* to reaching this assert on the float kernels? `respond_to_requests` only runs when
+`current().is_none()`, so it can't directly fire the assert, but it adds a worker-side GC request into the
+cycle; #4 fixed the small-heap quiescent deadlock but may leave (or expose) this concurrent-scheduling panic.
+Needs a live rr capture on Linux to settle whether #4 is necessary to trigger it. Either way the assert is the
+root incompatibility. **Methodology lesson:** the read-only static-analysis agent produced a plausible,
+internally-consistent, and *wrong* diagnosis; one real run falsified it. Run before believing. (GH#14 updated;
+README perf panel marks ConcurrentImmix **deadlock**, not hang.)
+
+---
+
 ## Two findings: ConcurrentImmix hangs on spectralnorm/LU (normal heap); LXR is NOT a clean merge (2026-06-25)
 
 **ConcurrentImmix hang (new, needs investigation).** The fixed quickbench harness (now reaching real

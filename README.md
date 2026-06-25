@@ -49,26 +49,60 @@ The milestone-by-milestone plan and current status are in
 
 ### Performance (quick panel)
 
-A fast eyeball panel — 10 stdlib-only CLBG/sandmark programs, native, **dynamic heap (memory
-parity** with vanilla), best-of-3 on an Apple M4 Pro. Cells are `median-ms | ratio-vs-vanilla-5.5.0`;
-lower is better. Reproduce with `benchmarks/quick/quickbench.sh` (`--chart` for ASCII bars).
+A fast eyeball panel — 11 stdlib-only CLBG/sandmark/effects programs, native, **dynamic heap (memory
+parity** with vanilla), best-of-3 on an Apple M4 Pro, MMTk GC workers = nproc. Reproduce the table +
+both graphs in **one** run: `uv run quick/quickbench.py all …` (single self-contained script; raw data
+in `quick/results.ndjson`).
 
-| bench | vanilla | GenImmix *(default)* | Immix |
+**Sequential** — ratio vs vanilla 5.5.0 (lower is better):
+
+![sequential ratio vs vanilla](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_ratio.png)
+
+| bench | GenImmix *(default)* | Immix | ConcurrentImmix |
 |---|--:|--:|--:|
-| binarytrees | 1497 ms | 1567 (1.05×) | 1328 (0.89×) |
-| nbody | 654 ms | 654 (1.00×) | 660 (1.01×) |
-| fannkuchredux | 1442 ms | 1449 (1.00×) | 1449 (1.00×) |
-| spectralnorm | 645 ms | 874 (1.35×) | 794 (1.23×) |
-| mandelbrot | 687 ms | 691 (1.01×) | 690 (1.01×) |
-| matrix_multiplication | 712 ms | 651 (0.91×) | 635 (0.89×) |
-| LU_decomposition | 787 ms | 1785 (2.27×) | 1296 (1.65×) |
+| binarytrees | 1.07× | 0.88× | 1.04× |
+| nbody | 0.97× | 0.97× | 0.97× |
+| fannkuchredux | 0.99× | 0.99× | 1.01× |
+| spectralnorm | 1.37× | 1.23× | **deadlock** |
+| mandelbrot | 1.01× | 1.00× | 1.00× |
+| matrix_multiplication | 0.92× | 0.92× | 0.90× |
+| LU_decomposition | 2.15× | 1.59× | **deadlock** |
 
-Parity-or-better on the compute-bound and mature-live-set benches (and **faster** on
-matrix_multiplication); the two boxed-float kernels (spectralnorm, LU_decomposition) are the known
-structural outliers (MMTk Immix mature-space sweep/metadata cost). `ConcurrentImmix` is omitted —
-it's the experimental low-latency plan and currently **hangs on spectralnorm + LU_decomposition**
-(a distinct, post-`#4`-fix issue; see `gc/mmtk/NOTES.md`). *This is a quick eyeball panel, not the
-system of record — the macro-benchmark campaign (M8, `PERFORMANCE.md`) is authoritative.*
+**Parallel scalability** — speedup `T(1)/T(N)` at 8 domains (ideal = #domains):
+
+![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
+
+| bench (d=8 speedup) | vanilla | GenImmix | Immix | ConcurrentImmix |
+|---|--:|--:|--:|--:|
+| par_spectralnorm | 4.96× | 1.53× | 1.93× | **deadlock** |
+| par_matmul | 5.57× | 3.79× | 3.69× | 3.69× |
+| par_binarytrees | 3.66× | 0.59× | 1.30× | 1.40× |
+| chameneos_redux *(effects)* | 4.27× | 0.54× | 2.21× | **deadlock** |
+
+Parity-or-better on the compute-bound sequential benches (and **faster** on matrix_multiplication); the
+two boxed-float kernels (spectralnorm, LU_decomposition) are the known structural outliers (Immix
+mature-space sweep/metadata cost).
+
+In **parallel**, vanilla scales ~3.7–5.6× at 8 domains while the MMTk plans plateau or **anti-scale** —
+GenImmix goes *slower* with more domains on the alloc-/effect-heavy par_binarytrees and chameneos. The
+**dominant, genuine** cause is structural: MMTk uses a single shared nursery collected by an
+**all-domains stop-the-world** minor GC, so adding domains raises minor-GC *frequency* (N domains pour
+into one bounded nursery) *and* the per-pause stop cost — whereas vanilla OCaml gives each domain its
+**own** minor heap, so per-domain minor cost is independent of domain count and it scales. This is the
+empirical motivation for **RQ10** (reuse a per-domain minor GC, MMTk as major-only) — see
+`SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
+> ⚠️ **Parallel panel is preliminary, not publishable as-is.** It ran nproc (12) GC workers + up to 8
+> mutator domains **unpinned on a 12-core Mac**, so at high domain counts the MMTk runs oversubscribe
+> the cores (≈20 runnable threads on 12) while the vanilla baseline (no separate GC-worker pool) does
+> not — inflating the gap. The anti-scaling is real and independently confirmed on pinned Linux
+> (`SCALABILITY.md`), but the **magnitude here is overstated**; a controlled re-run (GC threads + domains
+> ≤ cores, core-pinned, on a many-core Linux box) is pending before these numbers are quoted.
+
+**`ConcurrentImmix` currently deadlocks** on the float/effect benches: it panics in the GC scheduler
+(`scheduler.rs` — a stop-the-world-era assertion that forbids a GC request while a GC is in progress,
+which a concurrent plan legitimately does), poisoning the worker mutex (GitHub #14; see
+`gc/mmtk/NOTES.md`). *This is a quick eyeball panel, not the system of record — the macro-benchmark
+campaign (M8, `PERFORMANCE.md`) is authoritative.*
 
 ## Building
 
