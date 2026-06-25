@@ -187,13 +187,17 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    plus a real atomics-SATB-ordering bug found + fixed (`d0c721a8b7`); sanity-clean, macOS bytecode build
    verified. **Open (perf, not correctness):** the UNLOG-bit barrier gate is **de-prioritized** — native
    characterization showed the SATB barrier is ~free (<0.1% self), so the gate is empirically a non-issue;
-   the sanity-build-only ~10 MB deadlock (`rr`) remains — **root cause now found (2026-06-25):** the
-   concurrent→FinalMark handoff has no self-driving trigger (`gc_trigger.rs:184-200
-   trigger_internal_collection_request` is `unimplemented!()`; `FIXME` at
-   `concurrent/immix/global.rs:84-85`), so FinalMark is only re-armed at the allocation poll; when the
-   Concurrent bucket drains while all mutators are quiescent/parked it is never requested → wedge. Fix =
-   implement the GC-worker-side FinalMark trigger; confirm with a fresh rr trace. → RESEARCH_QUESTIONS RQ1;
-   NOTES (2026-06-25, 2026-06-23).
+   the sanity-build-only ~10 MB deadlock — **FIX LANDED (2026-06-25, mmtk-core `72ee627050`, submodule
+   bump `a86ce19c18`).** Root cause: the concurrent→FinalMark handoff had no self-driving trigger
+   (`trigger_internal_collection_request` was `unimplemented!()`; `FIXME` at
+   `concurrent/immix/global.rs:84-85`), so FinalMark was only re-armed at the allocation poll and never
+   fired when the Concurrent bucket drained while all mutators were quiescent/parked. Fix: `scheduler.rs::
+   respond_to_requests` self-requests `WorkerGoal::Gc` (→ `Pause::FinalMark`) on bucket-drain while all
+   workers are parked, gated to concurrent plans. **Validated for safety + correctness + no-regression**
+   (turing, sanity on: 4-domain continuation stressor ×5 clean; checksum identical across plans); the
+   *intermittent* end-to-end deadlock could not be reproduced on demand (never captured in an rr trace),
+   so the "deadlock gone" confirmation awaits a live sanity-build/rr capture. → RESEARCH_QUESTIONS RQ1;
+   NOTES (2026-06-25).
 
 9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
@@ -246,10 +250,15 @@ The active research/measurement threads behind the M8 milestone — the index; d
   instrumentation **disproved** the hypothesized clear-too-early (freshly-promoted referent); the real failure
   is **clear-too-LATE**: at the test heap the generational plans run **no full GC**, so mature-*dead* weaks are
   never cleared, and **`Gc.major_collections` counts nursery GCs**, so the test's major-count window is
-  unsatisfiable (same binary passes at a 16 MB heap). The generational-aware liveness shim is
-  **correct-but-doesn't-close-the-test** (kept as a sound defensive change). Real fix: schedule a **full GC
-  under mature pressure** + fix the **major-collection count**. **OPEN** (liveness, not a crash). Full GCs
-  unaffected; Immix byte-identical. → FAQ Q11; NOTES 2026-06-24; GitHub #5.
+  unsatisfiable (same binary passes at a 16 MB heap). The generational-aware liveness shim
+  (`ephe_is_reachable` treats non-nursery referents as live during a nursery GC) is
+  **correct-but-doesn't-close-the-test** — **LANDED 2026-06-25 (`2a05e10846`)** as the sound soundness
+  half (prevents mis-clearing a LIVE mature weak on a minor GC; weak-ephe-final finaliser/weaktest
+  byte-match, Immix unchanged). **STILL OPEN** (the test's clear-too-LATE half): schedule a **full GC
+  under mature pressure** + make **`Gc.major_collections` count only full GCs** — but counting-only-full
+  ALONE would *hang* `weaklifetime`'s `while major_collections < 20` loop, so it is held until the
+  companion full-GC trigger is designed. `finaliser_handover` SIGSEGV is the separate #55 sub-bug.
+  → FAQ Q11; NOTES 2026-06-25, 2026-06-24; GitHub #5.
 - **RQ7 — `Bactrian` hybrid (flagship research direction).** The faithful MMTk realization of
   OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
   (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,

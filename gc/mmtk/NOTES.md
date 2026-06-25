@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#4 FinalMark self-trigger + GH#5 generational weak-clear (soundness half) landed (2026-06-25)
+
+Two GC-correctness fixes from the turing round.
+
+**GH#4 / #30 — ConcurrentImmix small-heap deadlock (mmtk-core `72ee627050`, submodule bumped
+`a86ce19c18`).** Root cause (confirmed): the concurrent→FinalMark handoff had no self-driving
+trigger — FinalMark was requested only by `ConcurrentImmix::collection_required`, evaluated
+solely at the allocation poll, so once the `Concurrent` work bucket drained while every mutator
+was quiescent/parked (cont_lock spin, or idle at a small heap), no GC was requested and all
+workers parked with goal `None` forever. The intended hook
+(`gc_trigger.rs::trigger_internal_collection_request`) was `unimplemented!()`; literal FIXME at
+`concurrent/immix/global.rs:84-85`. **Fix:** in `scheduler.rs::respond_to_requests` (reached only
+from `on_last_parked` — all workers parked, no Concurrent packet in flight), if no `Gc` is already
+requested and concurrent marking is in progress with the `Concurrent` bucket drained, self-request
+`WorkerGoal::Gc`; the existing `Gc` arm resolves to `Pause::FinalMark` during concurrent marking,
+so FinalMark is scheduled immediately GC-worker-side. Gated to concurrent plans
+(`Plan::concurrent()` is `None` otherwise) — the normal STW path is untouched.
+
+**Validation scope (be precise).** On turing with the `sanity` feature on: `cargo check` clean;
+a 4-domain effect/continuation + alloc-burst stressor ×5 at `ConcurrentImmix`+sanity+10 MB
+completes cleanly (`done`, rc 0) — **no spurious/early FinalMark, no new hang/crash** (the real
+risk of this scheduler change); deterministic checksum **identical** across
+ConcurrentImmix/Immix/GenImmix (correctness preserved). **The intermittent end-to-end deadlock
+itself could NOT be reproduced on demand** despite extensive attempts (single- and multi-domain
+heavy compiles, the testsuite effect tests, the 4-domain continuation stressor at multiple small
+heaps, sanity on) — consistent with WF2's finding that it was only ever observed during real
+sanity-builds and never captured in an rr trace. So this is the **documented FIXME fix, validated
+for safety + correctness + no-regression**, but the end-to-end "deadlock gone" confirmation awaits
+a live sanity-build/rr capture. Low-risk (gated, only fires when all workers parked + bucket
+drained). The verifier additionally `cargo check`-traced every API + safety claim.
+
+**GH#5 — generational weak/ephemeron clear, soundness half (`2a05e10846`).** On a nursery (minor)
+GC only `[0,young)` is traced, so a mature referent reachable only through the mature heap is
+never visited and its liveness bit is stale; reading it as dead lets the clean pass clear a
+still-reachable weak/ephemeron key/data. Mirror stock OCaml (a minor GC clears only dead *young*
+referents): snapshot `is_current_gc_nursery()` at the top of `process_weak_refs`, and in
+`ephe_is_reachable` treat any non-nursery referent as live during a nursery GC. False on full GCs
+and non-generational plans → byte-identical there. Uses the already-merged mmtk-core nursery-query
+shim. **Validated:** weak-ephe-final `finaliser`/`weaktest` byte-match reference on GenImmix+Immix;
+the pre-existing `ephetest` diff is identical on Immix (where this change is a proven no-op) → no
+regression. **DEFERRED (not landed):** the `weaklifetime.ml` residual assert is the *orthogonal*
+clear-too-LATE issue (MMTk runs ~0 full GCs at the test heap, so mature-dead weaks never clear);
+its fix needs `Gc.major_collections` to count only full GCs **plus** a full-GC-under-mature-
+pressure trigger — counting-only-full ALONE would hang `weaklifetime`'s `while major_collections
+< 20` loop (the workflow verifier caught this), so it is held until the companion scheduler change
+is designed. `finaliser_handover` SIGSEGV is the separate #55 orphan-handover sub-bug.
+
+---
+
 ## Parallel-workflow integration: GH#8/#11/#12 + CLBG/Build/MSVC CI fixed; deep bug root-causes (2026-06-25)
 
 Four parallel investigation workflows (external issues, bugs/deadlocks, stock-GC deletion,
