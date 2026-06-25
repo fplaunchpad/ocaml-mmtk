@@ -2,13 +2,13 @@
 # mkgolden.sh — (re)generate golden/ for the quick panel at the PANEL (perf) sizes.
 #
 # Goldens are the canonical correct output of each bench (a checksum / result
-# line) at the exact perf sizes quickbench.sh times. They are plan-independent
-# (the GC must not change a program's result) and, for the three par_* benches,
+# line) at the exact perf sizes quickbench.py times. They are plan-independent
+# (the GC must not change a program's result) and, for the four parallel benches,
 # domain-count-independent (verified at 1 vs 4 domains — see verify below). We
 # generate under GenImmix (the default plan) at heap 512MB, using the native
 # binaries by default (set LINK=bytecode to use *.byte via $OCAMLRUN instead).
 #
-# Keep the sizes here in sync with quickbench.sh perf_args.
+# Keep the sizes here in sync with quickbench.py perf_args.
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,10 +39,11 @@ g spectralnorm          3000
 g mandelbrot            4000
 g matrix_multiplication 768
 g LU_decomposition      900
-# --- parallel (3) — golden generated at DOMAINS=1; domain-independent by
-#     construction (quickbench.sh --ci re-checks 1 vs N) ---
-g par_spectralnorm      4000 1
-g par_matmul            768  1
-g par_binarytrees       20   1
+# --- parallel (4) — golden generated at DOMAINS=1; domain-independent by
+#     construction (quickbench.py --ci re-checks 1 vs N) ---
+g par_spectralnorm      4000   1
+g par_matmul            768    1
+g par_binarytrees       20     1
+g chameneos_redux       500000 1
 
 echo "regenerated quick/golden from $PLAN ($LINK, perf sizes, heap ${HEAP}MB)"

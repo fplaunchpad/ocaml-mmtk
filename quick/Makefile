@@ -3,10 +3,10 @@
 # Builds the ten panel benches with the in-tree fork compiler. Two outputs per
 # bench (like the CLBG suite):
 #   build/<b>.byte    bytecode  (any MMTk plan; correctness smoke + goldens)
-#   build/<b>.native  native    (Immix-family plans; what quickbench.sh times)
+#   build/<b>.native  native    (Immix-family plans; what quickbench.py times)
 #
 # For an A/B feature run (e.g. no-zero OFF vs ON) build each variant's benches
-# into its OWN directory and point quickbench.sh --bin-a/--bin-b at them:
+# into its OWN directory and point quickbench.py --bin-a/--bin-b at them:
 #   make -C quick native BUILD=/path/off OCAMLOPT=<off-tree>/ocamlopt.opt ...
 #   make -C quick native BUILD=/path/on  OCAMLOPT=<on-tree>/ocamlopt.opt  ...
 #
@@ -52,7 +52,7 @@ $(BUILD)/%.native: src/%.ml | $(BUILD)
 	cd $(BUILD) && OCAMLLIB=$(STDLIB) $(OCAMLOPT) -I $(STDLIB) -o $*.native $*.ml
 
 # Regenerate golden outputs at the panel (perf) sizes (native, GenImmix). Keep
-# in sync with quickbench.sh perf_args. (Set LINK=bytecode for a bytecode run.)
+# in sync with quickbench.py perf_args. (Set LINK=bytecode for a bytecode run.)
 golden: native
 	./mkgolden.sh
 

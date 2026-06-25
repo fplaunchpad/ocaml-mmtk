@@ -14,12 +14,13 @@ exercising the GC** (each bench's 1-domain wall is ~0.5–1.5s on an M4 Pro at
 GenImmix / heap 512MB; the seven sequential + three parallel 1-domain runs sum to
 under 10s, leaving plenty of headroom for reps + the parallel domain sweep).
 
-## The panel (ten dependency-free sandmark/CLBG benches)
+## The panel (eleven dependency-free sandmark/CLBG/effects benches)
 
-All ten are **real, stdlib-only** programs adapted verbatim (or with a minimal,
-documented checksum tweak) from the sandmark suite under `benchmarks/` — no opam,
-no Domainslib, no Core. The three parallel benches port Domainslib's
-`Task.parallel_for` to **raw `Domain.spawn`** via a tiny in-file helper.
+All eleven are **real, stdlib-only** programs adapted verbatim (or with a minimal,
+documented checksum tweak) from the sandmark suite under `benchmarks/`, the CLBG
+set, and the effects-examples repo — no opam, no Domainslib, no Core. The four
+parallel benches port Domainslib's `Task.parallel_for` to **raw `Domain.spawn`**
+via a tiny in-file helper.
 
 | Bench | Par? | GC axis it probes | Source |
 |---|---|---|---|
@@ -33,13 +34,17 @@ no Domainslib, no Core. The three parallel benches port Domainslib's
 | `par_spectralnorm`      | **par** | **parallel float compute + GC-worker scaling**. | `multicore-numerical/spectralnorm2_multicore.ml` → raw `Domain.spawn` |
 | `par_matmul`            | **par** | **parallel boxed-matrix alloc + live set scaling**. | `multicore-numerical/matrix_multiplication_multicore.ml` → raw `Domain.spawn` |
 | `par_binarytrees`       | **par** | **parallel alloc + live set + cross-domain STW coordination**. | `multicore-numerical/binarytrees5_multicore.ml` → raw `Domain.spawn` |
+| `chameneos_redux`       | **par** | **effect-handler green threads — heavy effect/continuation (fiber) alloc + resume traffic** (the panel's effects workload). | `ocaml-multicore/effects-examples` (`mvar/chameneos.ml` + `MVar.ml` + `sched.ml`, inlined into one stdlib-only file) |
 
 Every bench is **deterministic and self-checking**: it prints a stable result /
 checksum line, compared byte-for-byte against `golden/`. Each `Random`-using bench
-seeds `Random.init 42` for reproducibility. The three parallel benches are
+seeds `Random.init 42` for reproducibility. The four parallel benches are
 **domain-count-independent by construction** — the same output at 1, 2, 4, 8
 domains (verified at 1 vs 4), which is itself a correctness check that the
-parallel split is sound. Additionally, `par_matmul`'s checksum **equals**
+parallel split is sound. (`chameneos_redux` runs a **fixed** total of 8 games
+split across the domains, so it is *strong*-scaling — total work constant in
+domain count, ideal speedup = #domains — and its checksum is identical at any
+domain count.) Additionally, `par_matmul`'s checksum **equals**
 `matrix_multiplication`'s at the same size (same seeded operands, same fold) — a
 cross-check that the parallel matmul computes the identical result.
 
@@ -56,7 +61,7 @@ cross-check that the parallel matmul computes the identical result.
 
 ## Input sizes
 
-Perf sizes (the panel sizes — what `quickbench.sh` and the goldens use; each ~0.5–1.5s
+Perf sizes (the panel sizes — what `quickbench.py` and the goldens use; each ~0.5–1.5s
 on an M4 Pro at GenImmix / heap 512MB, native):
 
 | Bench | Perf args | ~1-dom wall |
@@ -71,6 +76,7 @@ on an M4 Pro at GenImmix / heap 512MB, native):
 | `par_spectralnorm` | `4000` | ~1.3s |
 | `par_matmul` | `768` | ~0.7s |
 | `par_binarytrees` | `20` | ~0.9s |
+| `chameneos_redux` | `500000` | ~1.3s |
 
 CI/tiny sizes (fast smoke; `--ci` / `--quick` use these):
 
@@ -83,7 +89,7 @@ CI/tiny sizes (fast smoke; `--ci` / `--quick` use these):
 | `mandelbrot` | `200` | | | |
 | `matrix_multiplication` | `64` | | | |
 
-Override any size by editing `quickbench.sh`'s `perf_args` / `ci_args`; the
+Override any size by editing `quickbench.py`'s `PERF` / `CI` dicts; the
 goldens (regenerate with `make golden`) are tied to the perf sizes.
 
 ## Building
@@ -97,7 +103,7 @@ layout (e.g. a standalone `git worktree` of the `benchmarks` branch) pass `ROOT`
 # bytecode (any plan) — correctness smoke + goldens
 make -C quick bytecode ROOT=/path/to/fork
 
-# native (Immix-family plans only) — what quickbench.sh times
+# native (Immix-family plans only) — what quickbench.py times
 make -C quick native ROOT=/path/to/fork
 
 # regenerate goldens (native, GenImmix, perf/panel sizes)
@@ -112,60 +118,86 @@ make -C quick golden ROOT=/path/to/fork
 > MMTk links only on Linux** (the Rust staticlib is linked into the native
 > runtime there) — do native perf runs on a Linux box.
 
-> **Always run under ASLR-off.** `quickbench.sh` wraps every run in
+> **Always run under ASLR-off.** `quickbench.py` wraps every run in
 > `setarch <arch> -R` (and `mkgolden.sh` too). MMTk maps side metadata at fixed
 > addresses; an ASLR collision aborts startup (`failed to mmap meta memory`) — a
 > known mmtk-core issue, not a benchmark bug. Pass `--no-setarch` on macOS.
 
-## The harness — `quickbench.sh`
+## The harness — `quickbench.py`
+
+ONE self-contained [PEP 723](https://peps.python.org/pep-0723/) script that runs
+the benches, prints the table (+ optional ASCII chart), writes NDJSON results,
+**and** renders the PNG graphs — all in one run. Its `matplotlib`/`numpy` deps
+are declared inline, so [`uv`](https://docs.astral.sh/uv/) fetches them per-run;
+no venv, no global install:
 
 ```
-quickbench.sh [seq|par|all] [options]
+uv run quick/quickbench.py [seq|par|all] [options]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--plans P1,P2,...` | MMTk plans to run (default `GenImmix`) |
-| `--vanilla DIR` | also run a vanilla baseline (a dir of binaries) for ratios |
-| `--bin-a DIR --bin-b DIR` | A/B two prebuilt binary sets, interleaved (the **feature axis**) |
-| `--label-a S --label-b S` | labels for the two sets (default `a` / `b`) |
-| `--feature S` | cosmetic header label (e.g. `no_zero`) |
+| `--plans P1,P2,...` | MMTk plans (default `GenImmix`); `"A,B"` or `"A B"` both work |
+| `--vanilla DIR` | also run a vanilla baseline (a dir of native binaries) — the ratio baseline |
+| `--bin-a DIR --label-a S` | the MMTk-built bench dir (× plans); label default `mmtk` |
+| `--bin-b DIR --label-b S` | optional second binary set (A/B feature axis) |
 | `--domains 1,2,4,8` | (par) domain counts to sweep (default `1,2,4,8`) |
-| `--heap MB` | `MMTK_HEAP_SIZE_MB` (default `512`) |
-| `--reps N --warmup N` | reps / warmups per cell (default `3` / `1`) |
-| `--quick` | reps=1, warmup=0, CI/tiny sizes — smoke only |
-| `--ci` | CI/tiny sizes at the configured reps/warmup |
+| `--heap MB\|dynamic` | `MMTK_HEAP_SIZE_MB`; `dynamic` (default) = don't pin (memory parity) |
+| `--threads N` | pin `MMTK_THREADS=N`. **Default: unset** — MMTk uses its own default = **nproc**; each record logs the effective count (`nproc(<cpus>)`) |
+| `--reps N --warmup N` | reps / warmups per cell (default `3` / `1`); median of reps |
+| `--quick` / `--ci` | tiny CI sizes (smoke); `--quick` also sets reps=1 warmup=0 |
+| `--timeout SECS` | per-cell wall cap; an over-cap cell is killed (whole process group) and recorded `HANG` |
 | `--gc` | add GC-count / STW-ms columns (`MMTK_VERBOSE`, seq) |
 | `--bytecode` | use `*.byte` via `ocamlrun` (default: native `*.native`) |
-| `--cores LIST` | base core list for `taskset`; par uses the first K for K domains |
-| `--no-pin` / `--no-setarch` | skip `taskset` / `setarch` (e.g. macOS) |
+| `--cores LIST` / `--no-pin` / `--no-setarch` | `taskset` / `setarch` controls (skip on macOS) |
+| `--chart` | print a per-bench ASCII bar chart after the seq table |
+| `--json FILE` | NDJSON results path (default `quick/results.ndjson`) |
+| `--graphs DIR` / `--no-plot` | PNG output dir (default `quick/graphs/`) / skip plotting |
 
 - **Sequential** output: per (bench × variant) **median wall time + ratio vs the
-  first variant**. Uses `hyperfine` if installed (warmup + reps), else a built-in
-  median timer. With `--gc`, appends GC count / total STW ms per cell.
-- **Parallel** output: per bench a **scalability table** — wall time per domain
-  count and **speedup T(1 domain)/T(N)**.
-- The **feature axis** (`--bin-a`/`--bin-b`) A/Bs two prebuilt binary sets
-  interleaved under every plan — it works uniformly for no-zero ON-vs-OFF,
-  plan-vs-plan, and fork-vs-vanilla. The harness can't toggle a *compile-time*
-  feature itself, so you build each variant's benches into its own directory and
-  point `-a`/`-b` at them.
+  first variant**. We time the whole process directly (median of reps; warmup
+  excluded) — no `hyperfine`, so no seconds-vs-ms unit traps.
+- **Parallel** output: per bench a **scalability table** — wall per domain count
+  and **speedup T(1)/T(N)**. **GC workers default to nproc** (MMTk's own default —
+  we do *not* force a value); the effective count is printed and logged so the
+  curve's worker provisioning is explicit. Caveat: at `domains ≥ cores`, nproc GC
+  workers + `d` mutator domains **oversubscribe** the pinned core set — but the
+  multi-domain anti-scaling is STW-bound and shows at any worker count, so the
+  out-of-the-box default is the honest measurement.
+- A **per-cell timeout** is essential: some plans (ConcurrentImmix) **deadlock**
+  on some benches (it panics — `GC request sent to WorkerMonitor while GC is still
+  in progress` — then all GC workers die on the poisoned mutex). The cap kills the
+  whole process group (`start_new_session` + `killpg`) so a deadlock is flagged
+  `HANG` instead of wedging the run; those cells become `median_ms: null,
+  status: "hang"` in the JSON.
 
 ### Examples
 
 ```sh
-# default: GenImmix, native, full panel, ~5 min
-./quick/quickbench.sh all
+# fork-plans-vs-vanilla, full panel, graphs + JSON in ONE run:
+uv run quick/quickbench.py all \
+    --vanilla quick/build_vanilla --bin-a quick/build_mmtk --label-a mmtk \
+    --plans "GenImmix Immix ConcurrentImmix" \
+    --heap dynamic --timeout 30 --chart \
+    --json quick/results.ndjson --graphs quick/graphs --no-pin --no-setarch
 
-# sequential only, two plans, with GC columns
-./quick/quickbench.sh seq --plans GenImmix,Immix --gc
-
-# parallel scalability sweep on StickyImmix
-./quick/quickbench.sh par --plans StickyImmix --domains 1,2,4,8
-
-# quick smoke (tiny sizes, 1 rep) — just confirm it runs
-./quick/quickbench.sh all --quick --bytecode --no-pin --no-setarch
+# quick smoke (tiny sizes, 1 rep), table only:
+uv run quick/quickbench.py all --quick --no-pin --no-setarch --no-plot
 ```
+
+## Results JSON + graphs
+
+The same run writes machine-readable results as **NDJSON** (`--json`, default
+`quick/results.ndjson`) — one record per measured cell: `mode, bench, variant,
+plan, domains, threads, median_ms` (or `null`), `status` (`ok`/`hang`). The
+`threads` field logs the effective MMTk GC-worker count (`nproc(<cpus>)` when
+unset) so the panel self-documents its worker provisioning.
+
+And the same run renders two PNGs into `quick/graphs/` (unless `--no-plot`):
+`seq_ratio.png` (per-bench ratio-vs-vanilla bars, GenImmix/Immix) and
+`speedup_domains.png` (speedup T(1)/T(N) vs domains per plan, with the
+ideal-linear reference; red × marks a hung/crashed cell). Plotting is built into
+`quickbench.py` — no separate step.
 
 ## Deciding on the no-zero allocation change
 
@@ -179,9 +211,9 @@ make -C quick native ROOT=/path/to/fork-OFF BUILD=$PWD/bins/off
 make -C quick native ROOT=/path/to/fork-ON  BUILD=$PWD/bins/on
 
 # 2. A/B them across the panel + domain sweep
-./quick/quickbench.sh all \
+uv run quick/quickbench.py all \
     --bin-a $PWD/bins/off --bin-b $PWD/bins/on \
-    --label-a off --label-b on --feature no_zero \
+    --label-a off --label-b on \
     --plans GenImmix --domains 1,2,4,8 --gc
 ```
 
