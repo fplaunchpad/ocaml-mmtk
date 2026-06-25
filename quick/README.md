@@ -14,9 +14,9 @@ exercising the GC** (each bench's 1-domain wall is ~0.5–1.5s on an M4 Pro at
 GenImmix / heap 512MB; the seven sequential + three parallel 1-domain runs sum to
 under 10s, leaving plenty of headroom for reps + the parallel domain sweep).
 
-## The panel (eleven dependency-free sandmark/CLBG/effects benches)
+## The panel (twelve dependency-free sandmark/CLBG/effects benches)
 
-All eleven are **real, stdlib-only** programs adapted verbatim (or with a minimal,
+All twelve are **real, stdlib-only** programs adapted verbatim (or with a minimal,
 documented checksum tweak) from the sandmark suite under `benchmarks/`, the CLBG
 set, and the effects-examples repo — no opam, no Domainslib, no Core. The four
 parallel benches port Domainslib's `Task.parallel_for` to **raw `Domain.spawn`**
@@ -31,6 +31,7 @@ via a tiny in-file helper.
 | `mandelbrot`            | seq | **escape-time compute, ≈0 alloc** — emits an integer checksum over the P4 byte stream instead of a binary bitmap. | `benchmarksgame/mandelbrot6.ml` (checksummed) |
 | `matrix_multiplication` | seq | **boxed-int matrices → mature live set**. | `multicore-numerical/matrix_multiplication.ml` (seeded + checksummed) |
 | `LU_decomposition`      | seq | **large flat float array, in-place updates**. | `multicore-numerical/LU_decomposition.ml` (seeded + bit-checksummed) |
+| `kb`                    | seq | **term-rewriting / symbolic (Rocq/Coq-like) — many small short-lived terms + a growing rule set**. | OCaml testsuite `tests/misc-kb/` (modules inlined; canonical-set output → checksum) |
 | `par_spectralnorm`      | **par** | **parallel float compute + GC-worker scaling**. | `multicore-numerical/spectralnorm2_multicore.ml` → raw `Domain.spawn` |
 | `par_matmul`            | **par** | **parallel boxed-matrix alloc + live set scaling**. | `multicore-numerical/matrix_multiplication_multicore.ml` → raw `Domain.spawn` |
 | `par_binarytrees`       | **par** | **parallel alloc + live set + cross-domain STW coordination**. | `multicore-numerical/binarytrees5_multicore.ml` → raw `Domain.spawn` |
@@ -73,6 +74,7 @@ on an M4 Pro at GenImmix / heap 512MB, native):
 | `mandelbrot` | `4000` | ~0.7s |
 | `matrix_multiplication` | `768` | ~0.6s |
 | `LU_decomposition` | `900` | ~0.9s |
+| `kb` | `50` | ~0.7s |
 | `par_spectralnorm` | `4000` | ~1.3s |
 | `par_matmul` | `768` | ~0.7s |
 | `par_binarytrees` | `20` | ~0.9s |

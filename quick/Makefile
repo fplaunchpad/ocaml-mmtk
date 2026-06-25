@@ -24,7 +24,7 @@ STDLIB   ?= $(ROOT)/stdlib
 BUILD    ?= build
 
 SEQ_BENCHES := binarytrees nbody fannkuchredux spectralnorm mandelbrot \
-               matrix_multiplication LU_decomposition
+               matrix_multiplication LU_decomposition kb
 PAR_BENCHES := par_spectralnorm par_matmul par_binarytrees
 BENCHES     := $(SEQ_BENCHES) $(PAR_BENCHES)
 BYTECODE := $(addprefix $(BUILD)/,$(addsuffix .byte,$(BENCHES)))

@@ -70,13 +70,15 @@ WHAT EACH BENCH PROBES (GC axis)
   mandelbrot            compute-bound escape-time, ~0 alloc (CLBG, checksummed)
   matrix_multiplication boxed int matrices -> mature live set (sandmark)
   LU_decomposition      large flat float array, in-place (sandmark)
+  kb                    knuth-bendix completion: term-rewriting / symbolic
+                        (Rocq/Coq-like), many small short-lived terms (testsuite)
   par_spectralnorm      parallel float compute, GC-worker scaling (sandmark)
   par_matmul            parallel boxed-matrix alloc + live set scaling (sandmark)
   par_binarytrees       parallel alloc + live set + cross-domain STW (sandmark)
   chameneos_redux       effect-handler green threads: heavy effect/continuation
                         (fiber) alloc + resume traffic (effects-examples)
 
-All eleven are dependency-free (stdlib only). The four par_* / effect benches use
+All twelve are dependency-free (stdlib only). The four par_* / effect benches use
 raw Domain.spawn (no Domainslib) and split a FIXED total work across the domain
 count (STRONG scaling: ideal speedup = #domains).
 
@@ -107,7 +109,7 @@ STDLIB = os.environ.get("STDLIB", os.path.join(FORKROOT, "stdlib"))
 DEFAULT_OCAMLRUN = os.environ.get("OCAMLRUN", os.path.join(FORKROOT, "runtime", "ocamlrun"))
 
 SEQ_BENCHES = ["binarytrees", "nbody", "fannkuchredux", "spectralnorm",
-               "mandelbrot", "matrix_multiplication", "LU_decomposition"]
+               "mandelbrot", "matrix_multiplication", "LU_decomposition", "kb"]
 PAR_BENCHES = ["par_spectralnorm", "par_matmul", "par_binarytrees", "chameneos_redux"]
 
 # perf sizes: each run ~0.5-1.5s AND triggers real GC volume. ci sizes: tiny smoke.
@@ -115,13 +117,13 @@ PERF = {
     "binarytrees": "20", "nbody": "20000000", "fannkuchredux": "11",
     "spectralnorm": "3000", "mandelbrot": "4000", "matrix_multiplication": "768",
     "LU_decomposition": "900", "par_spectralnorm": "4000", "par_matmul": "768",
-    "par_binarytrees": "20", "chameneos_redux": "500000",
+    "par_binarytrees": "20", "chameneos_redux": "500000", "kb": "50",
 }
 CI = {
     "binarytrees": "10", "nbody": "10000", "fannkuchredux": "8",
     "spectralnorm": "200", "mandelbrot": "200", "matrix_multiplication": "64",
     "LU_decomposition": "64", "par_spectralnorm": "200", "par_matmul": "64",
-    "par_binarytrees": "12", "chameneos_redux": "2000",
+    "par_binarytrees": "12", "chameneos_redux": "2000", "kb": "5",
 }
 
 COLORS = {
