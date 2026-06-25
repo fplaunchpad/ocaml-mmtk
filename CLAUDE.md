@@ -48,6 +48,24 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - `AI.md` is the upstream OCaml policy on AI-assisted *contributions* (tool
   disclosure, CLA, "review every part yourself"). It matters if any of this is ever
   upstreamed; it is separate from the no-Claude-in-commits convention above.
+- **`#N` is a GitHub reference.** In GitHub-facing text (issue/PR comments, PR bodies,
+  commit messages) a bare `#<digits>` auto-links to GH issue/PR N. Our **internal**
+  ROADMAP/task/bug item numbers are NOT GitHub issues — never write them as bare
+  `#<digits>` in GH-facing text (it back-links the wrong issue/PR and spams it). Write
+  "internal item N" or refer by name. Alphanumeric tags (`#3c`, `#G1`, `#R3`) are safe
+  (GitHub only auto-links pure-digit `#N`). In repo docs (`*.md`) `#N` is not auto-linked,
+  so the existing internal `#N` usage there is fine.
+- **Close resolved GH issues; keep unresolved ones open.** If an issue is genuinely fixed,
+  close it citing the fix commit; if only partially addressed, comment with status and
+  leave it open. Don't leave resolved issues open or close unresolved ones.
+
+## How to work (preferences)
+
+- **Prefer agents.** Delegate diagnosis, code/search archaeology, and parallelizable work to
+  sub-agents (and `Workflow` for multi-agent fan-out / adversarial verify). Keep the heavy
+  **build + validate in the main loop** — sub-agents get reaped on rest and can't carry a long
+  build (see `memory/subagent-builds-reaped-on-rest.md`). Pattern: agents produce diffs/findings;
+  the main loop integrates, builds, and validates.
 
 ## Where things live (read these first each session)
 
