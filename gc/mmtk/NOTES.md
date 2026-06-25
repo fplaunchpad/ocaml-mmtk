@@ -13,9 +13,30 @@ perf sizes, with a `--timeout`) surfaced that **ConcurrentImmix hangs on `spectr
 plans. This is **distinct from the GH#4 small-heap sanity deadlock** (fixed by the FinalMark
 self-trigger, mmtk-core `72ee627050`, which is in this build): that was ~10 MB + effect/continuation
 churn; this is a normal-heap, compute-bound float kernel. Both are boxed-float, high-minor-allocation
-benches. Hypothesis: the FinalMark trigger fixes the *quiescent-mutator* case but there is a *second*
-concurrent→FinalMark stall specific to high-allocation float kernels (or a cont_lock/marking
-interaction). Needs an rr capture on Linux. ConcurrentImmix is therefore omitted from the README
+benches.
+
+**Root cause (confirmed by static analysis, 2026-06-25).** It is a **marker-vs-mutator livelock**,
+distinct from GH#4 (not merely a gap in its fix). Both FinalMark triggers — the worker-side `#4`
+self-trigger (`scheduler.rs::concurrent_marking_drained`) and the mutator poll-site
+(`ConcurrentImmix::collection_required`, `plan/concurrent/immix/global.rs:80-87`) — gate FinalMark on
+`work_buckets[Concurrent].is_drained()`. Under a hot boxed-float kernel the SATB barrier
+(`flush_satb` → `WorkBucket::add` → `notify_one_worker`, `plan/concurrent/barrier.rs:69-85`) refills
+the `Concurrent` bucket from the mutator on essentially every `caml_modify`, faster than the single
+default GC worker (`MMTK_THREADS=1`) drains it. So the bucket is **never empty at the instant all
+workers are parked**, `is_drained()` never holds at the decision point, **FinalMark is never
+requested**, concurrent marking never finishes, the heap/nursery fills, and the mutator blocks
+forever in `block_for_gc` → `park_until_resumed`. GH#4 fixed the *quiescent-mutator* case (mutator
+idle, marking drained, nobody requested FinalMark); this is the *active-mutator* case, where the
+mutator structurally prevents `is_drained()` from ever being observed. The authors already flagged
+the gap (`FIXME` at `global.rs:85`, "Immediately trigger FinalMark when the Concurrent bucket is
+drained"). **Fix direction:** add a **heap-pressure forced FinalMark** in `collection_required` —
+when `concurrent_marking_in_progress()` and the heap is full (`gc_trigger.is_heap_full()`), return
+`true` *regardless of* `is_drained()`; `schedule_collection` already maps marking-in-progress →
+`Pause::FinalMark`, whose STW pause halts the SATB feed and drains the bucket to completion. Must be
+mutator-driven (the poll path always runs on allocation), since the single-worker default makes the
+worker-side `on_last_parked` precondition hard to reach under load. Full file:line evidence + an rr
+confirmation recipe are in GH#14. Captured here so the perf panel's ConcurrentImmix omission has a
+mechanism, not just a symptom. ConcurrentImmix is therefore omitted from the README
 quick-panel table and remains the experimental plan (GH#4 closed for its specific scenario; this is a
 new, separate ConcurrentImmix stall — track under the ConcurrentImmix production-completion item).
 
