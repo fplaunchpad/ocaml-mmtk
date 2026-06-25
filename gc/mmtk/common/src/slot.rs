@@ -57,7 +57,23 @@ pub fn set_forwarding_bits_spec(spec: SideMetadataSpec) {
 #[inline]
 fn is_forwarded(addr: Address) -> bool {
     match FORWARDING_BITS_SPEC.get() {
-        Some(spec) => spec.load_atomic::<u8>(addr, Ordering::SeqCst) != 0,
+        Some(spec) => {
+            // Forwarding-bits side metadata is mapped ONLY by in-place moving spaces
+            // (ImmixSpace, CopySpace). LOS/immortal/non-moving spaces never reserve it,
+            // so reading it for an infix pointer whose parent lives there dereferences
+            // an UNMAPPED metadata page -> SIGSEGV (issue #12). Such objects never move
+            // and are never forwarded. Compute the metadata address from the spec's
+            // public fields (mirrors mmtk-core address_to_contiguous_meta_address) and
+            // read only when that page is mapped; otherwise report not-forwarded.
+            const LOG_BITS_IN_BYTE: usize = 3;
+            let shift = LOG_BITS_IN_BYTE - spec.log_num_of_bits;
+            let meta_addr =
+                spec.get_absolute_offset() + ((addr >> spec.log_bytes_in_region) >> shift);
+            if !memory_manager::is_mapped_address(meta_addr) {
+                return false;
+            }
+            spec.load_atomic::<u8>(addr, Ordering::SeqCst) != 0
+        }
         None => false,
     }
 }
