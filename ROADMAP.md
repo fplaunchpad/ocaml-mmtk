@@ -251,6 +251,22 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `caml_empty_minor_heap_promote`/minor barriers/`caml_minor_cycles_started`) is inert *as
    collection* but is the live `Domain.spawn`/terminate STW rendezvous — retiring it needs MMTk's
    STW to become the sole rendezvous, **the same rework as #3c (item 1)**. → NOTES 2026-06-24.
+   **Verified phased plan now exists (NOTES 2026-06-25).** A workflow mapped **every** caller of
+   `caml_try_run_on_all_domains`/`caml_empty_minor_heaps_once`, analysed each, and **adversarially
+   refuted** each removability claim. Verdict: **`partial`** — yes, but only as ONE coordinated change
+   re-homing EIGHT callers, not a grep-and-delete (the two functions are mutually load-bearing via the
+   terminate participant-set contract). **Cleanly removable now (refuters 0/2):** minor-heap-resize cap
+   (→ relaxed atomic) and global-major-slice (→ LOCAL `requested_major_slice`). **Conditional (only with
+   the whole family):** the minor-empty/spawn/terminate trio. **Need a replacement primitive, NOT MMTk
+   GC-STW:** runtime_events ring + frametables install are *legitimate non-GC* users — `stop_all_mutators`'
+   callback is hard-wired to GC marking, so they need a new "stop RUNNING + run a VM closure" hook or a
+   per-subsystem rwlock/epoch (exclusion = `RUNNING`). **Phases:** 0 (low) delete the two clean callers;
+   1 (med) re-home the domain-LOCAL minor-STW bookkeeping onto the safepoint/resume path; 2 (med) re-home
+   frametables + runtime_events; 3 (high) retire the rendezvous family together, MMTk STW sole, backup
+   thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
+   barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
+   continuation-scan hang. Loose end: re-analyse the process-exit `stw_terminate_domain` path before Phase 3
+   (its analyze agent dropped on a StructuredOutput cap). → NOTES 2026-06-25; RQ10 pole-A; #20.
    **Not a local cleanup — it is an architecture decision** (which generation the framework owns) that must
    be **reconciled structurally with how other runtimes do minor collection** (OCaml ParMinor, GHC local
    heaps, Erlang per-process heaps, the Julia/CRuby MMTk bindings), and weighed against the **inverse**
@@ -296,6 +312,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     OCaml's spawn/terminate rendezvous; who holds which lock across a collection; re-entry of a domain that
     re-acquires its lock mid-GC — the same STOPPED↔RUNNING edge as GH#6); and it is gated on MMTk's STW
     becoming the sole rendezvous (RQ10 pole-A / #18). → relates to #18, RQ10, GH#6; RESEARCH_QUESTIONS RQ10.
+    **Cross-runtime evidence backs the deletion (NOTES 2026-06-25):** every comparable runtime
+    (HotSpot/mmtk-openjdk, mmtk-julia, mmtk-ruby, GHC, Go, CoreCLR) has **ONE** GC-owned rendezvous and
+    handles a blocked/native thread with a **thread-state FLAG** (`_thread_in_native`, `JL_GC_STATE_SAFE`,
+    `_Gsyscall`, released-capability, preemptive-mode) the GC skips without waiting — **not** a per-domain
+    backup thread. OCaml-MMTk's backup thread is the outlier; the binding's `RUNNING` set is already exactly
+    that flag (a domain that released its lock is absent → not awaited; `mmtk_ocaml_try_mark_running` is the
+    return-edge re-check). Deleting the backup thread = **Phase 3** of the #18 verified plan.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

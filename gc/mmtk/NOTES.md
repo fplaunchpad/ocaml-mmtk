@@ -5,6 +5,99 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Retire OCaml's STW rendezvous — verified caller-by-caller plan (RQ10 pole-A / #18 / #20) (2026-06-25)
+
+Companion to the cross-runtime study below. Question: *can we delete `caml_try_run_on_all_domains` +
+`caml_empty_minor_heaps_once` and make MMTk's `stop_all_mutators` the sole all-domains rendezvous, and
+is there a good reason to keep them?* A multi-agent workflow mapped **every** caller, analysed each, and
+**adversarially refuted** each removability claim (2 skeptics/claim). Verdict: **`partial` — yes in
+principle, but only as ONE coordinated change that re-homes EIGHT callers; not a grep-and-delete.**
+
+**Why not symmetric.** `caml_empty_minor_heaps_once` (`minor_gc.c:482`) is **GC-dead** under MMTk
+(`caml_empty_minor_heap_promote`, `minor_gc.c:203`, promotes nothing — just resets the young region), so
+it's retirable *once its per-domain bookkeeping is re-homed*. But `caml_try_run_on_all_domains`
+(`domain.c:1780`) is a **generic all-domains barrier with SIX further live, non-GC users**, so it can only
+go after each is re-homed. The two are **mutually load-bearing**: the terminate flush loop
+(`domain.c:2128-2201`) must positively answer every *other* domain's in-flight rendezvous before it leaves
+`stw_domains` (participant-set contract, `domain.c:1582-1614`) — so while **any** `caml_try_run_on_all_domains`
+user survives, `caml_empty_minor_heaps_once` cannot be deleted in isolation without re-deadlocking.
+
+**Per-caller verdict (adversarially verified; refuters/2):**
+| caller | site | removable | refuters | note |
+|---|---|---|---|---|
+| minor-heap-resize | `domain.c:511-541` (`Gc.set`) | **yes** | 0/2 | cap → one relaxed atomic; no STW, no MMTk |
+| global-major-slice | `domain.c:1913-1922` | **yes** | 0/2 | dead in native; bytecode → set LOCAL `requested_major_slice` |
+| minor-empty rendezvous | `minor_gc.c:482` | conditional | 2/2 | retirable only with the whole family (Phase 3) |
+| domain spawn/terminate | `domain.c:1293/2113` | conditional | 2/2 | participant-set contract; the bug#3c seam |
+| runtime_events ring | `runtime_events.c:438/228` | conditional | 1/2 | needs a generic "stop RUNNING + run VM closure" hook — MMTk STW has none |
+| frametables install | `frame_descriptors.c:306/318` | conditional | 2/2 | sole caller = native dynlink; engineering economy only |
+
+**Good reasons to keep (all *conditional* — they block isolated deletion, not the coordinated retirement):**
+- **TERMINATE participant-set obligation** (`domain.c:2128-2201`). Real deadlock-avoidance, but evaporates
+  once the LAST `caml_try_run_on_all_domains` user is re-homed.
+- **runtime_events + frametables** need a "stop all RUNNING domains and run a VM closure" primitive that
+  MMTk's `stop_all_mutators` does **not** expose (its callback is hard-wired to GC marking on the worker
+  pool, `collection.rs:272-274`). They are *legitimate non-GC uses* of OCaml's rendezvous — but if (1) is
+  retired wholesale they must instead get a per-subsystem scheme (rwlock/epoch; the exclusion they need is
+  exactly `RUNNING`) or a new MMTk VM-work hook. This is the key finding the two refuters surfaced: **MMTk
+  GC-STW is not a drop-in for the non-GC callers.**
+- Minimal-diff fidelity to stock 5.5.0 (diff-cosmetics, weak).
+
+**Phased removal (each phase builds + is behaviour-preserving):**
+- **Phase 0 (low):** delete the two refuters-0/2 callers. minor-heap-resize → `caml_minor_heap_max_wsz`
+  becomes a relaxed atomic (or drop the cap; under MMTk it sizes no arena). global-major-slice →
+  `caml_request_major_slice(1)` sets the LOCAL flag (already consumed at `domain.c:1977-1984`).
+- **Phase 1 (med):** move the domain-LOCAL bookkeeping the minor-STW carries (minor-table clear, finalisers
+  `caml_final_empty_young`/`_update_last_minor`, `caml_memprof_after_minor_gc`, gc-stats sample, the
+  bytecode `caml_minor_collections_count` odometer) onto the triggering domain's safepoint / the
+  `caml_mmtk_uninterrupt` resume path (`mmtk.c:807`). Drop the dead `caml_mark_roots_stw` branch + the
+  minor-cycle barrier. Both functions stay live.
+- **Phase 2 (med):** re-home frametables + runtime_events off `caml_try_run_on_all_domains` — either a new
+  binding "request MMTk STW to run this VM closure" (drained inside `stop_all_mutators` after
+  `running.is_empty()`, before `mutator_visitor`) or a per-subsystem rwlock/epoch. *ConcurrentImmix caveat:*
+  GC workers read `descriptors[]` concurrently (`scanning.rs:322`), so the frametable swap needs RCU/epoch
+  retire — but that hazard **already exists today** (OCaml STW stops mutators, not MMTk workers); surfaced,
+  not introduced.
+- **Phase 3 (high, the payoff):** with every non-GC user re-homed, delete the AUTO minor-empty call
+  (`domain.c:1974`, bytecode-only — native already early-returns), the `Gc.minor()` promotion semantics, and
+  the TERMINATE call (`domain.c:2131`); terminate keeps only the bare participant-set departure fenced by
+  the **existing** MMTk deregister fence (`caml_mmtk_domain_terminate`: `mmtk_ocaml_deregister_domain` +
+  `mmtk_ocaml_wait_collection_done`, `mmtk.c:901-923`), retaining the `!caml_incoming_interrupts_queued()`
+  drain *during* the transition. Then delete `caml_empty_minor_heaps_once` /
+  `caml_try_empty_minor_heap_on_all_domains` / `caml_empty_minor_heap_promote`, then
+  `caml_try_run_on_all_domains[_async/_with_spin_work]`, `stw_leader`/`stw_request`, the
+  `all_domains_lock`-as-STW-barrier, the interruptor/**backup-thread** machinery (#20), and the
+  `domain_create` `stw_leader` spin-wait. Keep the parent/child `p.status` 2-party handshake (bug#3b) and
+  `register_mutator`/`RUNNING` ordering. **Validate:** build + `sanity` (small heap) + the bug#3c
+  deterministic repro (par_binarytrees 20, d8 pinned, `MMTK_THREADS=8`) at 0% hang + chameneos + full
+  testsuite on every STW plan.
+
+**Deadlock class this eliminates (and what it does NOT).** Phase 3 **structurally** kills the
+bug#3c-residual / dual-STW deadlock class: the STOPPED→RUNNING re-entry edge
+(`caml_mmtk_become_running` → `mmtk_ocaml_try_mark_running`, gated only on `!gc_active`) currently lets a
+terminating domain L re-mark RUNNING and lead a *new* OCaml all-domains STW while RUNNING, forming the
+4-way cycle (`stop_all_mutators` waits `running.is_empty()`→L; L holds `all_domains_lock` waits peers;
+peers parked for `gc_active==false`; `gc_active` clears only when running empties→needs L). Delete the
+OCaml STW and there is **no second barrier for L to lead → the cycle cannot form.** Two caveats: (1) the
+*specific* GH#6 d8 instance was rr-refuted as the `scheduler.rs:444` assert (already fixed), **not** the
+dual-STW — so this doesn't "fix #6," it removes a sibling class; (2) **chameneos under ConcurrentImmix has
+a SEPARATE still-open deadlock** (continuation-resume scan × concurrent marking, no scheduler panic) that
+is **not** the dual-STW and **survives** retiring (1).
+
+**Biggest risk:** the terminate participant-set desync window during Phases 2–3 — if the deletions are done
+out of order (dropping the minor-empty-join or the incoming-interrupt drain from terminate *before* the last
+`caml_try_run_on_all_domains` caller is re-homed), a terminating domain strands a peer's in-flight barrier
+forever (the exact sibling of bug#3c). Mitigation: retire the whole family in ONE coordinated Phase-3
+change *after* 0–2; keep the interrupt drain during the transition; lean on the proven MMTk deregister
+fence; gate the merge on the bug#3c repro + chameneos + full testsuite per plan.
+
+(Workflow caveat: 2 of 25 agents — `analyze:shutdown`, `analyze:driver-mechanics` — hit the StructuredOutput
+retry cap and dropped out; their callers are covered transitively by terminate/spawn + the driver mechanics
+in the synthesis, but a dedicated re-analysis of the process-exit `stw_terminate_domain` path
+(`domain.c:2308`) is a loose end to close before Phase 3.)
+
+---
+
 ## Cross-runtime STW-rendezvous study: ONE GC-owned rendezvous is universal; OCaml-MMTk's dual-STW is the outlier (2026-06-25)
 
 Motivated by the dual-STW deadlock class (#5/#6/bug#3c) and the plan to retire OCaml's own rendezvous
