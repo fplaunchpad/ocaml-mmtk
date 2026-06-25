@@ -5,6 +5,48 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Fence audit — MMTk preserves OCaml's memory-model fences exactly; its GC barrier is fence-lighter (RQ11, 2026-06-25)
+
+Grounding measurement for RESEARCH_QUESTIONS **RQ11** (memory-model × GC-framework co-design).
+Question: does swapping OCaml's GC for MMTk perturb the carefully-placed memory-model fences
+(the `stlr`/`dmb`/branch-after-load machinery the ocaml/ocaml `memory-model`-labelled PRs tune —
+#14074, #13393, #12715, #14209, …)? Method: disassemble the write-path symbols on **arm64** in the
+fork's `ocamlopt.opt` vs a **vanilla 5.5.0** `ocamlopt.opt` (opam switch), census barrier mnemonics
+(`objdump -d`, scope per-symbol, count `dmb`/`stlr`/`ldar`/`swpal`/`ldaddal`/…).
+
+| path | vanilla | MMTk fork |
+|---|---|---|
+| `caml_modify` | `1 dmb + 1 stlr` | **identical** |
+| `caml_initialize` | none | **identical** |
+| `caml_atomic_exchange_field` | `2 dmb + 1 swpal` | **identical** |
+| `caml_atomic_load_field` | `1 dmb + 1 ldar` | **identical** |
+| GC-barrier callee | `caml_darken`: **1 `ldaddal`** (atomic, per greyed write) | `mmtk_ocaml_{region,satb}_barrier`: **0 fences** (thread-local buffer append) |
+
+**Findings.** (1) **Mutator memory-model fences are preserved fence-for-fence.** Verified at source too:
+the fork leaves `asmcomp/arm64/emit.mlp` (the `emit_stlr` / `dmb ishld` logic, lines ~685-869) untouched —
+no commits since the 5.5.0 base — and changes only the *inside* of `write_barrier` (`memory.c:199/206`),
+so the "Note [MM]" `acquire-fence + release-store` (`memory.c:222/233`) is stock. The "MMTk double-fences
+the mutator" worry is **refuted**. (2) **MMTk's GC write barrier is fence-*lighter* than stock:** vanilla's
+SATB greys the old value with an atomic (`ldaddal`) into a shared mark stack on every barrier-active write;
+MMTk's SATB enqueues to a thread-local buffer drained at GC time (0 mutator fences). The fence cost moved
+**per-write → GC-time.** The instruction-count drop (`caml_modify` 66→16 insns) is just that MMTk's barrier
+is an out-of-line *gated call* (`caml_mmtk_generational`/`_concurrent`) vs inlined `caml_darken`. (3)
+Whole-runtime `dmb` total **177 (vanilla) vs 1740 (fork)** — the 10× is entirely the bundled mmtk-core
+collector + work-stealing scheduler, **off** the mutator path, not added mutator fences.
+
+**Caveat (the load-bearing one).** Deferring SATB to a buffer does NOT remove the *ordering obligation*.
+`d0c721a8b7` is the proof: `Atomic.exchange`/`compare_and_set` on pointers stored *before* `write_barrier`,
+so the slot-reading SATB call greyed the NEW value and lost the deleted edge — fixed by a dedicated
+`caml_mmtk_satb_barrier` *before* the store (`memory.c:355`). A memory-model × GC-barrier ordering bug at the
+MMTk seam — the class OCaml's fences exist to prevent.
+
+**Open from this audit (RQ11 sub-2):** the forwarding-bit read is `SeqCst` (`slot.rs:75`) while object/value
+reads are `Relaxed` (`slot.rs:108/119`); is `SeqCst` the minimal correct ordering under concurrent marking,
+or over-fenced? Needs the concurrent-marking side-metadata ordering audit + ideally a mechanised
+barrier↔fence composition proof.
+
+---
+
 ## GH#4 FinalMark self-trigger + GH#5 generational weak-clear (soundness half) landed (2026-06-25)
 
 Two GC-correctness fixes from the turing round.

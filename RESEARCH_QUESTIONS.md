@@ -642,6 +642,93 @@ resolved.
 
 ---
 
+### RQ11 — Can a language-agnostic GC framework compose with (and co-optimise for) a host's fine-grained memory model? *(memory-model × GC-framework co-design; novel — OCaml is the first MMTk client to pose it)*
+
+**Hook.** A pointer write in OCaml carries two *orthogonal but co-located* obligations: a **GC barrier**
+(record old→young for the generational remembered set; grey the old referent for SATB major marking) and
+a **memory-model fence** (publish the store with release ordering so a racy concurrent reader cannot
+observe a half-built object). OCaml places and *fuses* these with great care — `stlr` instead of
+`dmb ishld; str` on Apple Silicon (PR #14074), the branch-after-load read scheme (#13393/#13423), the
+`acquire-fence + release-store` sequence in `caml_modify` (`runtime/memory.c:219-233`, "Note [MM]"), CSE
+rules that forbid eliding atomic loads across the model (#12715/#12825), atomic record/array fields
+(#13404/#14380), and the `Weak.set`/ephemeron orderings (#14209/#14210). This is the *implementation* of
+the formal model of Dolan, Sivaramakrishnan & Madhavapeddy, *Bounding Data Races in Space and Time*
+(PLDI'18). **MMTk's barrier API is memory-model-agnostic:** it exposes barriers for *collector* correctness
+(object/slot remembering, SATB) and has no notion of the *mutator's* visibility ordering. Every prior MMTk
+binding has a host whose model is coarse or serialised — **Java** (JMM: SC-DRF, volatile-gated), **CRuby**
+(GIL), **Julia** (coarse) — so the GC barrier and the per-write memory-model fence never had to interlock.
+OCaml is the **first MMTk client with a fine-grained, formally-specified relaxed model and fused fences**,
+so it forces a question MMTk never faced.
+
+**The question.** *Does a language-agnostic GC framework compose with — and can it co-optimise for — a
+host's fine-grained memory model and its carefully-placed fences? Or does the fence burden stay entirely
+on the binding, risking redundancy (double-fencing → lost performance) or hazard (a mis-ordered fence → a
+model violation)?*
+
+**Preliminary result — fence audit (2026-06-25, arm64; measured, not argued).** Disassembled the
+write-path symbols in the MMTk-fork `ocamlopt.opt` vs a vanilla 5.5.0 `ocamlopt.opt` and counted barrier
+mnemonics:
+
+| path | vanilla | MMTk fork |
+|---|---|---|
+| `caml_modify` | `1 dmb + 1 stlr` | **identical** |
+| `caml_initialize` | none | **identical** |
+| `caml_atomic_exchange_field` | `2 dmb + 1 swpal` | **identical** |
+| `caml_atomic_load_field` | `1 dmb + 1 ldar` | **identical** |
+| GC-barrier callee | `caml_darken`: **1 `ldaddal`** (atomic mark-stack push, per greyed write) | `mmtk_ocaml_{region,satb}_barrier`: **0 fences** (thread-local buffer append) |
+
+Two findings. (1) **The mutator memory-model fences are preserved fence-for-fence** — verified at source
+too: the fork leaves `asmcomp/arm64/emit.mlp` (the `stlr`/`dmb ishld` logic) untouched and changes only the
+*inside* of `write_barrier` (`memory.c:199/206`), so the "Note [MM]" `acquire-fence + release-store` is
+stock. The naive "MMTk double-fences the mutator" worry is **refuted**. (2) **MMTk's GC write barrier is
+actually fence-*lighter* than stock**: vanilla's SATB greys the old value with an atomic (`ldaddal`) into a
+shared mark stack on every barrier-active write, whereas MMTk's SATB enqueues to a thread-local buffer
+drained at GC time (0 mutator fences). The fence cost **moved from per-write to GC-time.** (The
+whole-runtime `dmb` count is 1740 vs 177 — but that 10× is entirely the bundled mmtk-core collector and
+work-stealing scheduler, *off* the mutator path.)
+
+**But deferral does not remove the ordering obligation — and we have a confirmed bug at the seam.**
+`d0c721a8b7`: for `Atomic.exchange`/`compare_and_set` on pointers (`caml_atomic_exchange_field`,
+`memory.c:344`) the atomic store happens *before* the generic `write_barrier`, so the slot-reading SATB call
+would grey the **new** value and lose the deleted edge; we had to hoist a dedicated `caml_mmtk_satb_barrier`
+*before* the store (`memory.c:355`). That is exactly a memory-model × GC-barrier *ordering* bug — the class
+OCaml's fences exist to prevent — reappearing at the MMTk integration boundary.
+
+**Sub-questions, each grounded.**
+1. **Redundancy / fusion (perf) — partially ANSWERED.** The fence audit shows no mutator-side redundancy and
+   a *lighter* GC barrier; so the win is not "remove redundant fences" but "is the deferred-buffer SATB's
+   cost model (per-write 0 fences, GC-time drain) better than stock's eager-atomic SATB across the mutation
+   spectrum?" — a clean measurement tying back to RQ1's mutation-rate axis.
+2. **Correctness composition — one bug found, audit incomplete.** `d0c721a8b7` proves the seam is
+   non-trivial. The forwarding-bit read is `SeqCst` (`slot.rs:75`) while object/value reads are `Relaxed`
+   (`slot.rs:108/119`): is `SeqCst` the *minimal* correct ordering under concurrent marking, or over-fenced?
+   A systematic ordering audit + a **mechanised proof of the GC-barrier ↔ memory-model-fence composition**
+   (extending RQ5b's safepoint-protocol verification) is the contribution.
+3. **Moving × the model — genuinely new vs stock.** Stock's major heap is non-moving; MMTk *relocates*
+   mature objects (Immix/SemiSpace/GenCopy). Today this is safe by the **STW-only-move** discipline
+   (resume-mutators publishes relocations; the read-barrier-free C API is preserved — RQ6). But
+   **ConcurrentImmix marks concurrently**, so the marker reads fields + mark-bits *while* the mutator
+   writes — the one regime where MMTk's side-metadata ordering must interlock with OCaml's model, and where
+   the next bug (if any) lives.
+
+**The framework-side version (a contribution to MMTk itself).** Extend MMTk with **memory-model-aware
+barriers**: the binding declares its host's fence requirements (release-on-publish, the read scheme) and
+MMTk co-generates a *fused* GC-barrier + memory-model-fence sequence, rather than leaving the fence entirely
+to the binding. OCaml is the forcing function and the test case.
+
+**Related work / what's new.** MMTk and the practitioner reports (*Reconsidering GC in Julia*; *Reworking
+Memory Management in CRuby*, both ISMM'25) catalogue root/motion/safepoint impedance, but **none hits
+memory-model-fence impedance — because their hosts have coarse models or a GIL.** Pairing a precise,
+formally-specified language memory model (PLDI'18) with a general moving/concurrent GC framework, and
+measuring + mechanising the barrier↔fence composition, is unstudied. **Venue:** PLDI / ISMM (the
+mechanisation slice → CPP/ITP). **Risk:** medium (the audit is cheap; the mechanisation is the hard part).
+**Novelty: strong** — a *language-memory-model × GC-framework co-design* law, anchored to a real bug
+(`d0c721a8b7`) and a measured fence audit, on the first fine-grained-model language MMTk has met. It is a
+new axis of **RQ4** impedance, sharpens **RQ6** (read-barrier/C-API), and extends **RQ5b** (mechanised
+protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
+
+---
+
 ## What each question needs from the platform
 
 - **Common prerequisite (DONE):** M9 is complete; **#15 wired 10 plans (bytecode)**; **native runs 7**;
@@ -662,6 +749,12 @@ resolved.
   of M9* (re-introduce the minor-heap arena as a nursery), a promotion path that allocates MMTk mature
   objects from minor evacuation, a reconciled old→young remembered set vs MMTk's major barrier, and an
   MMTk-API path for an externally-owned nursery. Empirical motivation already in hand: `SCALABILITY.md`.
+- **RQ11 (memory-model × GC-framework):** the **fence audit is done** (arm64 disasm, fork vs vanilla 5.5.0 —
+  mutator fences identical, GC barrier fence-lighter; NOTES 2026-06-25). *Remaining:* the concurrent-marking
+  side-metadata ordering audit (is `slot.rs:75` `SeqCst` minimal?), the mutation-spectrum cost comparison of
+  deferred-buffer vs eager-atomic SATB (ties to RQ1), and the **mechanised barrier↔fence composition proof**
+  (extends RQ5b) — plus the MMTk-framework extension for memory-model-aware barriers. Anchored to the real
+  bug `d0c721a8b7`.
 - **RQ8 (no-zero allocation):** CONFIRMED + **LANDED on mainline** (~15–22% on alloc-bound code) via a runtime
   plan-gate; no-zero is **universal** — ON for all plans **including ConcurrentImmix** (verified allocate-black,
   RQ9). The `gc/mmtk-core` fork (`0.32-ocaml`) is now the mainline mmtk dep. *Remaining:* nothing for safety;
