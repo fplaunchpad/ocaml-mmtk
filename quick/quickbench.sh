@@ -217,7 +217,12 @@ exe_path(){ local dir=$1 b=$2; echo "$dir/$b.$(suffix)"; }
 # env+launcher for a variant; $1=plan ("" vanilla) $2=ocamlrun $3=domains
 launch_env(){ local plan=$1 dom=$2
   local e="OCAMLLIB=$STDLIB"
-  [ -n "$plan" ] && e="$e MMTK_PLAN=$plan MMTK_HEAP_SIZE_MB=$HEAP"
+  if [ -n "$plan" ]; then
+    e="$e MMTK_PLAN=$plan"
+    # --heap dynamic => don't pin a fixed heap; use the fork's dynamic (MemBalancer)
+    # default so RSS tracks the live set, for memory parity with vanilla.
+    [ "$HEAP" != "dynamic" ] && e="$e MMTK_HEAP_SIZE_MB=$HEAP"
+  fi
   [ -n "$dom" ]  && e="$e DOMAINS=$dom"
   echo "$e"
 }
