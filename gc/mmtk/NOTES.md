@@ -5,6 +5,34 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Two findings: ConcurrentImmix hangs on spectralnorm/LU (normal heap); LXR is NOT a clean merge (2026-06-25)
+
+**ConcurrentImmix hang (new, needs investigation).** The fixed quickbench harness (now reaching real
+perf sizes, with a `--timeout`) surfaced that **ConcurrentImmix hangs on `spectralnorm` and
+`LU_decomposition`** — native, single-domain, **dynamic (normal) heap**, >12s vs ~0.8s for the other
+plans. This is **distinct from the GH#4 small-heap sanity deadlock** (fixed by the FinalMark
+self-trigger, mmtk-core `72ee627050`, which is in this build): that was ~10 MB + effect/continuation
+churn; this is a normal-heap, compute-bound float kernel. Both are boxed-float, high-minor-allocation
+benches. Hypothesis: the FinalMark trigger fixes the *quiescent-mutator* case but there is a *second*
+concurrent→FinalMark stall specific to high-allocation float kernels (or a cont_lock/marking
+interaction). Needs an rr capture on Linux. ConcurrentImmix is therefore omitted from the README
+quick-panel table and remains the experimental plan (GH#4 closed for its specific scenario; this is a
+new, separate ConcurrentImmix stall — track under the ConcurrentImmix production-completion item).
+
+**LXR is NOT a clean git merge (decisive).** Added `wenyuzhao/mmtk-core` as a remote and tested
+`git merge lxr/lxr` into `0.32-ocaml` on a throwaway branch: the lxr branch is **1690 commits past the
+shared v0.32.0 root** (ours is +5). Merge result: **3 conflicts** (`policy/space.rs`,
+`util/alloc/immix_allocator.rs`, `util/options.rs` — exactly where our `no_zero_alloc` + trigger/nursery
+deltas overlap LXR) **plus 125 files** of LXR's divergent core dragged in (the entire research fork —
+all of wenyuzhao's plans/refactors/experiments + the binding-breaking VM-trait changes, and 1690 commits
+of API evolution that would not build against our 0.32.0 surface). So a merge is out; **one vendored
+branch is still the goal but only via a careful ADDITIVE, ADAPTED port** of just the RC pieces (args.rs,
+rc.rs, FieldBarrier, RC spec_defs/work-buckets, the lxr plan), gated behind `MMTK_PLAN=LXR`, with the
+files re-written against our 0.32.0 API (they can't be copied verbatim — they target the +1690 surface).
+This makes the phased plan (P1–P5) the right path and confirms it is real engineering, not a merge.
+
+---
+
 ## LXR fork study — API divergence + integration plan (RQ1, 2026-06-25)
 
 Study of **LXR** (Zhao/Blackburn/McKinley PLDI'22; RC on hierarchical Immix + concurrent SATB backup trace,

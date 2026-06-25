@@ -284,8 +284,15 @@ The active research/measurement threads behind the M8 milestone — the index; d
     **signature-breaking** for an existing 0.32 binding — but most are OpenJDK-shaped (class-unloading, klass
     pointers) and our OCaml binding can stub them (`get_class_pointer` → `Address::ZERO`, ignore `klass`, pass
     `false` for out-of-heap, no class unloading).
-  - **Strategy: MERGE LXR's RC half into `0.32-ocaml`, gated behind `MMTK_PLAN=LXR`** (every existing plan stays
-    byte-identical). *Not* a rebase onto `wenyuzhao/lxr` — that would force LXR's OpenJDK-shaped trait churn
+  - **A git merge is OUT (tested 2026-06-25):** `git merge lxr/lxr` into `0.32-ocaml` = 3 conflicts
+    (`space.rs`/`immix_allocator.rs`/`options.rs`, where our no-zero/trigger deltas overlap LXR) + **125 files**
+    of LXR's divergent core pulled in — the lxr branch is **1690 commits** past the shared v0.32.0 root (ours
+    +5), so it is a full research fork (binding-breaking VM-trait changes + 1690 commits of API evolution that
+    won't build against our 0.32.0 surface). One vendored branch is still the goal, but via an **additive,
+    ADAPTED port** of just the RC pieces (re-written against our 0.32.0 API — not copyable verbatim), gated.
+  - **Strategy: additively VENDOR + adapt LXR's RC half into `0.32-ocaml`, gated behind `MMTK_PLAN=LXR`** (every
+    existing plan stays byte-identical). *Not* a merge/rebase onto `wenyuzhao/lxr` — that would force LXR's
+    OpenJDK-shaped trait churn
     across the whole core and conflict with our `SpaceOverheadTrigger`/`no_zero_alloc`/FinalMark-trigger deltas;
     *not* a minimal cherry-pick — RC is not modular (the `immixspace.rs` hooks). Conflict map: HIGH on
     `gc_trigger.rs` (our SpaceOverheadTrigger vs LXR's survival-predictor triggers) and `immixspace.rs`/LOS (the

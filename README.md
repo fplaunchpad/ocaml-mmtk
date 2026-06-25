@@ -47,6 +47,29 @@ on a common substrate. The research agenda lives in
 The milestone-by-milestone plan and current status are in
 [`ROADMAP.md`](ROADMAP.md).
 
+### Performance (quick panel)
+
+A fast eyeball panel — 10 stdlib-only CLBG/sandmark programs, native, **dynamic heap (memory
+parity** with vanilla), best-of-3 on an Apple M4 Pro. Cells are `median-ms | ratio-vs-vanilla-5.5.0`;
+lower is better. Reproduce with `benchmarks/quick/quickbench.sh` (`--chart` for ASCII bars).
+
+| bench | vanilla | GenImmix *(default)* | Immix |
+|---|--:|--:|--:|
+| binarytrees | 1497 ms | 1567 (1.05×) | 1328 (0.89×) |
+| nbody | 654 ms | 654 (1.00×) | 660 (1.01×) |
+| fannkuchredux | 1442 ms | 1449 (1.00×) | 1449 (1.00×) |
+| spectralnorm | 645 ms | 874 (1.35×) | 794 (1.23×) |
+| mandelbrot | 687 ms | 691 (1.01×) | 690 (1.01×) |
+| matrix_multiplication | 712 ms | 651 (0.91×) | 635 (0.89×) |
+| LU_decomposition | 787 ms | 1785 (2.27×) | 1296 (1.65×) |
+
+Parity-or-better on the compute-bound and mature-live-set benches (and **faster** on
+matrix_multiplication); the two boxed-float kernels (spectralnorm, LU_decomposition) are the known
+structural outliers (MMTk Immix mature-space sweep/metadata cost). `ConcurrentImmix` is omitted —
+it's the experimental low-latency plan and currently **hangs on spectralnorm + LU_decomposition**
+(a distinct, post-`#4`-fix issue; see `gc/mmtk/NOTES.md`). *This is a quick eyeball panel, not the
+system of record — the macro-benchmark campaign (M8, `PERFORMANCE.md`) is authoritative.*
+
 ## Building
 
 Exactly like upstream OCaml — the MMTk static library is compiled with `cargo` and
