@@ -198,19 +198,24 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    *intermittent* end-to-end deadlock could not be reproduced on demand (never captured in an rr trace),
    so the "deadlock gone" confirmation awaits a live sanity-build/rr capture. → RESEARCH_QUESTIONS RQ1;
    NOTES (2026-06-25).
-   - **SEPARATE, still-OPEN ConcurrentImmix DEADLOCK — GH#14 (empirically root-caused 2026-06-25, fix not
-     yet landed).** Distinct from the `#4` small-heap deadlock above. **It is a PANIC, not a livelock**
-     (the earlier static "FinalMark-never-requested / heap-pressure forced-FinalMark" hypothesis was
-     *falsified by actually running it* — see NOTES). On `spectralnorm`/`LU_decomposition`/`par_spectralnorm`/
-     `chameneos_redux` it aborts with `"GC request sent to WorkerMonitor while GC is still in progress."`
-     (`scheduler.rs:444`, in `on_last_parked`) → poisoned `WorkerMonitor` mutex → all GC workers die →
-     deadlock. The assert is **stop-the-world-only** and its own comment says to remove it for concurrent
-     GC; under a concurrent plan a GC is legitimately re-requested while one is in progress, so it fires.
-     **Fix direction:** relax/remove that assert for concurrent plans (coalesce the redundant request),
-     per the code's own TODO — **NOT** a forced-FinalMark (that adds requests, makes it worse). **Open
-     correctness question:** whether our `#4` FinalMark self-trigger (`72ee627050`) contributes to reaching
-     the assert — needs a live rr capture on Linux. Full evidence in GH#14 + NOTES (2026-06-25). This is
-     why ConcurrentImmix is marked **deadlock** in the README quick-panel.
+   - **ConcurrentImmix scheduler-assert DEADLOCK — GH#14: assert FIXED 2026-06-25 (mmtk-core `d2e7f3493b`,
+     submodule bumped); one separate chameneos remnant remains.** Distinct from the `#4` small-heap deadlock
+     above. **It was a PANIC, not a livelock** (the earlier static "FinalMark-never-requested /
+     heap-pressure forced-FinalMark" hypothesis was *falsified by actually running it*). On
+     `spectralnorm`/`LU_decomposition`/`par_spectralnorm` it aborted with `"GC request sent to WorkerMonitor
+     while GC is still in progress."` (`scheduler.rs:444`, `on_last_parked`) → poisoned `WorkerMonitor` mutex
+     → all GC workers die → deadlock. **Fix (landed):** the STW-only assert is gated to non-concurrent plans
+     (`get_plan().concurrent().is_none()`); the redundant `Gc` request is coalesced in `goals.requests[Gc]`
+     and serviced after the in-progress GC (survives `on_current_goal_completed`) — NOT a forced FinalMark,
+     STW plans byte-identical. **Validated:** before 15/15 HANG → after 15/15 OK at small heaps
+     (32/64/128 MB) across spectralnorm/LU/par_spectralnorm, checksums byte-identical to golden under both
+     ConcurrentImmix and GenImmix. **`#4` self-trigger EXONERATED by static trace** (not needing rr):
+     `respond_to_requests` (which holds the self-trigger) runs only when `current()==None` (asserted at
+     `scheduler.rs:512`), so it cannot reach the `:444` assert; the trigger is the **mutator allocation-poll**
+     re-requesting a GC during the concurrent-marking window. **STILL OPEN remnant:** `chameneos_redux`
+     (effects/continuation workload) still hangs under ConcurrentImmix with **no** assert panic — a
+     *separate* deadlock (continuation-scan/resume × concurrent mark), needs its own diagnosis; keep GH#14
+     open for it. Evidence in NOTES (2026-06-25).
 
 9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most

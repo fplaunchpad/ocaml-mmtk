@@ -5,6 +5,55 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#14 FIXED: gate the STW-only scheduler assert for concurrent plans; #4 self-trigger exonerated (2026-06-25)
+
+**Resolves the panic in the entry below** (mmtk-core `d2e7f3493b` on `0.32-ocaml`, pushed; submodule
+bumped in the fork). The assert at `scheduler.rs:444` (`on_last_parked`, `WorkerGoal::Gc` arm) forbade a
+pending `Gc` request while a GC is in progress — its own comment said to remove it "when we support
+concurrent GC". **Fix:** gate it to non-concurrent plans:
+
+```rust
+if worker.mmtk.get_plan().concurrent().is_none() {
+    assert!(!goals.debug_is_requested(WorkerGoal::Gc), "GC request sent ... in progress.");
+}
+```
+
+**Why it's safe (coalescing, not dropping):** `WorkerGoals` keeps `current: Option` and a per-goal
+`requests` bitset *independently*. A `Gc` request raised while `current==Some(Gc)` just sets
+`requests[Gc]=true`; nothing clears it until `poll_next_goal`, reachable only from `respond_to_requests`
+(guarded by `assert!(current.is_none())` at `:512`). So the request survives `on_current_goal_completed`
+(which only nulls `current`) and is serviced by the next `respond_to_requests` after the in-progress GC
+finishes — exactly once, NOT a forced FinalMark. STW plans are byte-identical (predicate false for them).
+
+**`assert!` is a real release assert** (not `debug_assert!`; `debug_is_requested` is an ordinary `pub
+fn`, not `#[cfg(debug_assertions)]`) — so the panic fired in release, matching the report.
+
+**Validated (macOS, native).** Deterministic small-heap repro on spectralnorm / LU_decomposition /
+par_spectralnorm × heaps 32/64/128: **before 15/15 HANG → after 15/15 OK**, 0 panic; checksums
+byte-identical to golden under both ConcurrentImmix and GenImmix. Build gotcha worth recording: the
+native bench links `libasmrun.a`, which **bundles** the mmtk objects (`Makefile.mmtk`
+`MMTK_OBJS`/`MMTK_BUNDLE`); `make runtime` rebuilds only the *bytecode* archive — you must `make
+runtimeopt` (rebuilds `libasmrun.a`) **and** `cargo clean -p mmtk` once (a stale fingerprint made the
+first `cargo build` skip recompiling the edited submodule), or the bench silently links the old
+scheduler (kept panicking at the *old* line 444).
+
+**`#4` FinalMark self-trigger EXONERATED — by static trace, no rr needed.** The open question from the
+entry below ("does `72ee627050` contribute?") is settled: the self-trigger lives in
+`respond_to_requests`, which runs **only when `current()==None`** (asserted at `:512`) — both call sites
+(`on_last_parked:435` no-goal branch; `:474` after `on_current_goal_completed`) require it. So it can
+never set `requests[Gc]` while `current==Some(Gc)` and **cannot reach the `:444` assert**. The real
+trigger is the **mutator allocation-poll** path: the request flag is re-armed at InitialMark
+(`notify_mutators_paused`), so once mutators resume into the concurrent-marking window a normal
+allocation poll re-requests a GC, setting `requests[Gc]` while a GC is still current.
+
+**STILL-OPEN remnant — `chameneos_redux` hangs under ConcurrentImmix with NO assert panic.** The
+effects/continuation workload still deadlocks after this fix (d=1 and d=4, small heap) and its stderr
+shows **no** `scheduler.rs` panic — a *separate* deadlock (continuation scan/resume × concurrent
+marking), not GH#14's assert. Keep GH#14 open for it; diagnose separately. (The float kernels that
+*did* panic — spectralnorm, LU, par_spectralnorm — are fixed.)
+
+---
+
 ## CORRECTION: ConcurrentImmix "hang" is a scheduler PANIC, not a livelock — empirical run beats static analysis (2026-06-25)
 
 **Supersedes the static "marker-vs-mutator livelock" hypothesis below.** When the rebuilt quick panel

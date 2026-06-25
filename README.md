@@ -89,11 +89,14 @@ mature-space sweep/metadata cost).
 benches; a core-pinned `workers=domains` re-run is refining the magnitude.* Mechanism + the RQ10
 architecture question (per-domain minor vs MMTk-major-only): `SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
 
-**`ConcurrentImmix` currently deadlocks** on the float/effect benches: it panics in the GC scheduler
-(`scheduler.rs` — a stop-the-world-era assertion that forbids a GC request while a GC is in progress,
-which a concurrent plan legitimately does), poisoning the worker mutex (GitHub #14; see
-`gc/mmtk/NOTES.md`). *This is a quick eyeball panel, not the system of record — the macro-benchmark
-campaign (M8, `PERFORMANCE.md`) is authoritative.*
+**`ConcurrentImmix`: the GH#14 scheduler-assert deadlock is FIXED** (mmtk-core `d2e7f3493b`): the
+stop-the-world-era assert in `scheduler.rs` that forbade a GC request while a GC is in progress is now
+gated to non-concurrent plans, so a GC legitimately re-requested mid-concurrent-mark is coalesced, not
+asserted. spectralnorm / LU / par_spectralnorm now run clean (15/15, checksums match golden). **One
+remnant: `chameneos_redux` still hangs** under ConcurrentImmix via a *separate* deadlock (no assert — an
+effects/continuation-under-concurrent-mark issue), still open. The table's ConcurrentImmix cells predate
+the fix. *This is a quick eyeball panel, not the system of record — the macro-benchmark campaign (M8,
+`PERFORMANCE.md`) is authoritative.*
 
 ## Building
 
