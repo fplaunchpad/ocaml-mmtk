@@ -42,6 +42,15 @@
 #     --no-setarch              don't wrap in `setarch -R` (e.g. macOS).
 #     --gc                      add GC count / STW-ms columns (MMTK_VERBOSE;
 #                               an extra untimed run per cell, seq only).
+#     --chart                   after the seq table, print a per-bench ASCII bar
+#                               chart (bars scaled to the slowest variant in each
+#                               bench row) for a paste-into-README eyeball view.
+#     --timeout SECS            per-cell wall cap (default 0 = off). A cell whose
+#                               measurement exceeds SECS is killed and rendered
+#                               HANG instead of wedging the whole table — needed
+#                               because some plans (e.g. ConcurrentImmix) can hang
+#                               on a given bench. SECS is the cap for the WHOLE
+#                               warmup+reps measurement of one cell.
 #     -h|--help                 this help.
 #
 # WHAT EACH BENCH PROBES (GC axis)
@@ -87,7 +96,7 @@ SIZESET="perf"          # perf | ci
 LINK="native"           # native | bytecode
 BIN_A=""; BIN_B=""; LABEL_A="a"; LABEL_B="b"
 VANILLA=""; FEATURE=""
-CORES=""; PIN=1; USE_SETARCH=1; SHOW_GC=0
+CORES=""; PIN=1; USE_SETARCH=1; SHOW_GC=0; CHART=0; CELL_TIMEOUT=0
 
 # ---- input sizes ----------------------------------------------------------
 # Kept as case-functions (not associative arrays) so the harness runs on stock
@@ -149,6 +158,8 @@ while [ $# -gt 0 ]; do
     --no-pin)   PIN=0; shift;;
     --no-setarch) USE_SETARCH=0; shift;;
     --gc)       SHOW_GC=1; shift;;
+    --chart)    CHART=1; shift;;
+    --timeout)  CELL_TIMEOUT="$2"; shift 2;;
     -h|--help)  usage 0;;
     *) echo "unknown option: $1" >&2; usage 2;;
   esac
@@ -169,7 +180,13 @@ add_variant(){ VAR_LABEL+=("$1"); VAR_DIR+=("$2"); VAR_RUN+=("$3"); VAR_PLAN+=("
 ocamlrun_for(){ # binary dir -> ocamlrun to use for bytecode (dir/ocamlrun if present)
   local d=$1; if [ -x "$d/ocamlrun" ]; then echo "$d/ocamlrun"; else echo "$DEFAULT_OCAMLRUN"; fi; }
 
-IFS=',' read -r -a PLAN_ARR <<< "$PLANS"
+# Split plans on EITHER commas or whitespace, so both `--plans GenImmix,Immix`
+# and `--plans "GenImmix Immix"` work. (A space-separated string used to collapse
+# into a single bogus plan label "GenImmix Immix ...", which both rendered one
+# joined column AND produced a malformed `env MMTK_PLAN=GenImmix Immix …` whose
+# extra words were taken as the command to exec — so the bench binary + its size
+# argv never ran, giving the ~3 ms "instant" non-runs.)
+read -r -a PLAN_ARR <<< "$(echo "$PLANS" | tr ',' ' ')"
 build_variants(){
   local pl
   if [ -n "$VANILLA" ]; then
@@ -229,14 +246,37 @@ launch_env(){ local plan=$1 dom=$2
 
 have_hyperfine(){ command -v hyperfine >/dev/null 2>&1; }
 
+# Run a shell command string under a wall-clock cap (seconds). Returns the
+# command's exit status, or 124 if it was killed for exceeding the cap (like GNU
+# `timeout`). Portable (no coreutils `timeout` on macOS): a perl parent sets an
+# alarm, runs the command in its OWN process group, and on timeout kills that
+# whole group (so the bench AND its GC worker threads die, not just the shell).
+# CELL_TIMEOUT=0 disables (runs the command directly).
+cap_run(){ local cmd=$1
+  if [ "${CELL_TIMEOUT:-0}" = 0 ]; then eval "$cmd"; return $?; fi
+  CAP="$CELL_TIMEOUT" CMD="$cmd" perl -e '
+    use POSIX qw(setsid);
+    my $secs = $ENV{CAP}; my $cmd = $ENV{CMD};
+    my $pid = fork();
+    if ($pid == 0) { setsid(); exec("/bin/sh","-c",$cmd) or exit 127; }
+    local $SIG{ALRM} = sub { kill("KILL", -$pid); waitpid($pid,0); exit 124; };
+    alarm($secs);
+    waitpid($pid, 0);
+    alarm(0);
+    exit($? >> 8);
+  '
+}
+
 # Median wall (ms) of N reps via /usr/bin/time, fallback when no hyperfine.
-# args: <full command string>
+# args: <full command string>. Honours CELL_TIMEOUT (a capped, killed run is
+# recorded as the cap so the cell's median reflects "at least this slow / hung").
 time_median(){ local cmd=$1 reps=$2 warmup=$3 i t times=()
-  for ((i=0;i<warmup;i++)); do eval "$cmd" >/dev/null 2>&1; done
+  for ((i=0;i<warmup;i++)); do cap_run "$cmd" >/dev/null 2>&1; done
   for ((i=0;i<reps;i++)); do
-    local s e
-    s=$(date +%s%N); eval "$cmd" >/dev/null 2>&1; e=$(date +%s%N)
-    times+=( $(( (e - s) / 1000000 )) )
+    local s e rc
+    s=$(date +%s%N); cap_run "$cmd" >/dev/null 2>&1; rc=$?; e=$(date +%s%N)
+    if [ "$rc" = 124 ]; then times+=( $(( CELL_TIMEOUT * 1000 )) )
+    else times+=( $(( (e - s) / 1000000 )) ); fi
   done
   printf '%s\n' "${times[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
 }
@@ -256,7 +296,8 @@ gc_stats(){ local cmd=$1
 print_header(){
   echo "============================================================"
   echo "quick GC panel  —  mode=$MODE  link=$LINK  sizes=$SIZESET"
-  echo "plans=$PLANS  heap=${HEAP}MB  reps=$REPS  warmup=$WARMUP${FEATURE:+  feature=$FEATURE}"
+  local heapdesc; [ "$HEAP" = dynamic ] && heapdesc="dynamic" || heapdesc="${HEAP}MB"
+  echo "plans=${PLAN_ARR[*]}  heap=${heapdesc}  reps=$REPS  warmup=$WARMUP${FEATURE:+  feature=$FEATURE}"
   [ -n "$BIN_A" ] && echo "A=$LABEL_A ($BIN_A)   B=$LABEL_B ($BIN_B)"
   [ -n "$VANILLA" ] && echo "vanilla=$VANILLA"
   echo "variants: ${VAR_LABEL[*]}"
@@ -265,50 +306,89 @@ print_header(){
 
 # ---- sequential -----------------------------------------------------------
 # hyperfine median (ms) for a full shell command string, or "" if unavailable.
+# NB: hyperfine's --export-json reports every time in SECONDS regardless of
+# --time-unit (that flag only affects the human-readable stdout). The manual
+# time_median fallback returns integer milliseconds, so we convert here (×1000)
+# to keep ONE unit — milliseconds — across both code paths and the "ms" labels.
 hf_median(){ local cmd=$1
   have_hyperfine || { echo ""; return; }
-  # NOT -N: the command has `env VAR=… …`, which needs a shell to interpret.
-  hyperfine -w "$WARMUP" -r "$REPS" --time-unit millisecond \
-      --export-json /dev/stdout "$cmd" 2>/dev/null \
-    | sed -n 's/.*"median":[ ]*\([0-9.]*\).*/\1/p' | head -1
+  # Cap the WHOLE hyperfine run (it does warmup+reps internally; one hung run
+  # would otherwise wedge it forever). Budget = per-cell cap × invocations + a
+  # little slack. A capped/killed hyperfine -> sentinel HANG (propagated up).
+  local out rc total
+  if [ "${CELL_TIMEOUT:-0}" != 0 ]; then
+    total=$(( CELL_TIMEOUT * (WARMUP + REPS) + CELL_TIMEOUT ))
+    out="$(CELL_TIMEOUT="$total" cap_run "hyperfine -w $WARMUP -r $REPS --export-json /dev/stdout \"$cmd\" 2>/dev/null")"; rc=$?
+    [ "$rc" = 124 ] && { echo "HANG"; return; }
+  else
+    # NOT -N: the command has `env VAR=… …`, which needs a shell to interpret.
+    out="$(hyperfine -w "$WARMUP" -r "$REPS" --export-json /dev/stdout "$cmd" 2>/dev/null)"
+  fi
+  local sec
+  sec="$(echo "$out" | sed -n 's/.*"median":[ ]*\([0-9.]*\).*/\1/p' | head -1)"
+  [ -z "$sec" ] && { echo ""; return; }
+  awk -v s="$sec" 'BEGIN{printf "%.4f", s*1000}'
 }
 
 # one (variant, bench) median in ms — hyperfine if present, else manual timer.
+# Returns the literal HANG if a cap fired (so the table shows it, not a number).
 cell_median(){ local cmd=$1
   local m; m="$(hf_median "$cmd")"
+  [ "$m" = HANG ] && { echo "HANG"; return; }
   [ -z "$m" ] && m="$(time_median "$cmd" "$REPS" "$WARMUP")"
   echo "$m"
 }
 
+# Format a raw millisecond value (possibly a long hyperfine float like
+# 0.005633024679999999 or a manual-timer integer) into a short, column-friendly
+# string: >=100ms -> integer; >=10 -> 1dp; else 2dp. Keeps the table aligned.
+fmt_ms(){ awk -v v="$1" 'BEGIN{
+    if (v=="" ) { print "-"; exit }
+    if (v+0 >= 100)      printf "%.0f", v;
+    else if (v+0 >= 10)  printf "%.1f", v;
+    else                 printf "%.2f", v;
+  }'
+}
+
+# Medians recorded by run_seq for the optional ASCII chart, flat-indexed
+# bench_index*nvar + variant_index (plain indexed arrays => bash 3.2 safe).
+MED=(); SEQ_DONE=()
 run_seq(){
-  local COLW=24; [ "$SHOW_GC" -eq 1 ] && COLW=40
-  echo; echo "## sequential"
-  printf "%-16s" "bench"
+  local COLW=22; [ "$SHOW_GC" -eq 1 ] && COLW=34
+  local nvar=${#VAR_LABEL[@]}
+  echo; echo "## sequential   (cells: median-ms | ratio-vs-baseline)"
+  printf "%-22s" "bench"
   for v in "${VAR_LABEL[@]}"; do printf "%-${COLW}s" "$v"; done
   echo
-  printf "%-16s" "(ms | ratio)"
-  for v in "${VAR_LABEL[@]}"; do printf "%-${COLW}s" ""; done
+  # rule line under the header
+  printf "%-22s" "----------"
+  for v in "${VAR_LABEL[@]}"; do printf "%-${COLW}s" "--------------------"; done
   echo
   local prefix; prefix="$(pin_prefix 1)"
+  local bi=0
   for b in $SEQ_BENCHES; do
+    SEQ_DONE[$bi]="$b"
     local args; args="$(arg_for "$b")"
-    printf "%-16s" "$b"
+    printf "%-22s" "$b"
     local base=""   # baseline median for ratios (first variant)
     local vi
     for vi in "${!VAR_LABEL[@]}"; do
       local dir="${VAR_DIR[$vi]}" run="${VAR_RUN[$vi]}" plan="${VAR_PLAN[$vi]}"
       local exe; exe="$(exe_path "$dir" "$b")"
       local launcher=""; [ "$LINK" = bytecode ] && launcher="$run"
-      if [ ! -e "$exe" ]; then printf "%-${COLW}s" "n/a"; continue; fi
+      if [ ! -e "$exe" ]; then MED[$((bi*nvar+vi))]=""; printf "%-${COLW}s" "n/a"; continue; fi
       local env; env="$(launch_env "$plan" "")"
       local cmd="$prefix $SR env $env $launcher $exe $args"
       local med; med="$(cell_median "$cmd")"
+      MED[$((bi*nvar+vi))]="$med"
+      if [ "$med" = HANG ]; then printf "%-${COLW}s" "HANG (>${CELL_TIMEOUT}s)"; continue; fi
+      # baseline = first NON-hung variant (normally vanilla, which never hangs)
       [ -z "$base" ] && base="$med"
       local ratio="-"
       if [ -n "$base" ] && [ -n "$med" ] && [ "$base" != 0 ]; then
         ratio=$(awk -v m="$med" -v b="$base" 'BEGIN{printf "%.2fx", m/b}')
       fi
-      local cell="${med}ms | ${ratio}"
+      local cell="$(fmt_ms "$med") | ${ratio}"
       if [ "$SHOW_GC" -eq 1 ] && [ -n "$plan" ]; then
         local g; g="$(gc_stats "$cmd")"   # "GCs STWms"
         cell="$cell | gc ${g% *}/${g#* }ms"
@@ -316,8 +396,43 @@ run_seq(){
       printf "%-${COLW}s" "$cell"
     done
     echo
+    bi=$((bi+1))
   done
-  echo "(ratio is vs the first variant: ${VAR_LABEL[0]:-})"
+  echo "(ratio is vs the first variant: ${VAR_LABEL[0]:-} = baseline 1.00x)"
+}
+
+# Optional ASCII bar chart from the medians run_seq recorded. Per bench, bars are
+# scaled to the SLOWEST variant in that bench row (so the longest bar = slowest;
+# shorter = faster). Reads MED[]/SEQ_DONE[]/VAR_LABEL[].
+print_chart(){
+  [ "${#SEQ_DONE[@]}" -eq 0 ] && return
+  local nvar=${#VAR_LABEL[@]} width=40
+  echo; echo "## sequential — ASCII bar chart (longer = slower; scaled per bench)"
+  local maxlabel=0 v
+  for v in "${VAR_LABEL[@]}"; do [ ${#v} -gt $maxlabel ] && maxlabel=${#v}; done
+  local bi
+  for bi in "${!SEQ_DONE[@]}"; do
+    local b="${SEQ_DONE[$bi]}"
+    # row max (only over numeric medians; HANG / "" / n/a are skipped)
+    local rowmax=0 vi med
+    for ((vi=0; vi<nvar; vi++)); do
+      med="${MED[$((bi*nvar+vi))]:-}"
+      case "$med" in ''|*[!0-9.]*) ;; *) rowmax=$(awk -v a="$rowmax" -v b="$med" 'BEGIN{print (b>a)?b:a}');; esac
+    done
+    echo; echo "$b:"
+    [ "$rowmax" = 0 ] && { echo "  (no numeric data)"; continue; }
+    for ((vi=0; vi<nvar; vi++)); do
+      med="${MED[$((bi*nvar+vi))]:-}"
+      case "$med" in
+        '') printf "  %-*s n/a\n" "$maxlabel" "${VAR_LABEL[$vi]}"; continue;;
+        *[!0-9.]*) printf "  %-*s %s\n" "$maxlabel" "${VAR_LABEL[$vi]}" "$med"; continue;;  # e.g. HANG
+      esac
+      local nblk; nblk=$(awk -v m="$med" -v mx="$rowmax" -v w="$width" \
+        'BEGIN{n=int(m/mx*w+0.5); if(n<1)n=1; print n}')
+      local bar; bar=$(awk -v n="$nblk" 'BEGIN{s="";for(i=0;i<n;i++)s=s"\xe2\x96\x88";print s}')
+      printf "  %-*s %s %sms\n" "$maxlabel" "${VAR_LABEL[$vi]}" "$bar" "$(fmt_ms "$med")"
+    done
+  done
 }
 
 # ---- parallel -------------------------------------------------------------
@@ -349,7 +464,7 @@ run_par(){
         if [ -n "$t1" ] && [ -n "$med" ] && [ "$med" != 0 ]; then
           spd=$(awk -v t1="$t1" -v tn="$med" 'BEGIN{printf "%.2fx", t1/tn}')
         fi
-        printf "%-18s" "${med} | ${spd}"
+        printf "%-18s" "$(fmt_ms "$med") | ${spd}"
       done
       echo
     done
@@ -365,3 +480,4 @@ case "$MODE" in
   par) run_par;;
   all) run_seq; run_par;;
 esac
+[ "$CHART" -eq 1 ] && [ "$MODE" != par ] && print_chart

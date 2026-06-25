@@ -1,2 +1,14 @@
+# Build output dirs: the default build/ plus any per-variant dir
+# (build_mmtk/, build_vanilla555/, build52/, build3c/, build_matrix/, …).
 build/
+build*/
 results/
+
+# Stray compiler intermediates if a bench is ever compiled in place under src/
+# (the Makefile compiles inside a build dir, but guard against accidents).
+src/*.cmi
+src/*.cmx
+src/*.cmo
+src/*.o
+src/*.native
+src/*.byte
