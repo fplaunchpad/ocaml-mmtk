@@ -5,6 +5,80 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Parallel-workflow integration: GH#8/#11/#12 + CLBG/Build/MSVC CI fixed; deep bug root-causes (2026-06-25)
+
+Four parallel investigation workflows (external issues, bugs/deadlocks, stock-GC deletion,
+CI) ran; each produced adversarially-verified patches/diagnoses. **Landed this round** (all
+built + validated on the M4 Pro, pushed to `5.5+mmtk`):
+
+| change | commit | validation |
+|---|---|---|
+| GH#12 — `is_forwarded` guards unmapped forwarding-bit metadata (LOS/immortal infix) | `43484e0805` | cargo clean; camlinternalFormat no-regression on Immix/StickyImmix/GenImmix |
+| GH#11 — defer custom finalizer when a user `Gc.finalise` also targets the block | `5a82393980` | repro11b → `done` rc=0 (was abort 134) on 3 plans |
+| CLBG regression — keep zero-fill ON for MarkCompact (no-zero was over-broad) | `7b44c5d417` | MarkCompact binarytrees rc=0 (was CRASH139) |
+| stock-GC dead-code deletion (~127 lines, 7 symbols) | `50cc69980e` | finaliser.ml ref-match; Gc.stat compactions=0 |
+| CI: Build symbol-check skips bundled MMTk objects; MSVC neutered (POSIX-only GC) | `88ac1f9cf1` | awk member-filter; mmtk-core can't build on Windows |
+| GH#8 — benchmarks run.sh NATIVE_PLANS += GenImmix | `benchmarks@85a429f54b` | mechanical |
+
+**GH#11 fix is in `caml_mmtk_run_custom_finalizers` (runtime/mmtk.c), the single drain
+point** — so it covers *all* call sites (the earlier finalise.c reorder failed precisely
+because custom finalizers drain from multiple sites). Known incompleteness: the
+has-user-finaliser check inspects only the current domain's `final_info` (a cross-domain
+`Gc.finalise` is not yet deferred), and the exact-base compare misses infix-registered user
+finalisers (custom blocks are non-infix, so channels are unaffected).
+
+**CLBG was a real RQ8 regression:** the no-zero gate was made *universal* but RQ8 only
+validated Immix-family + ConcurrentImmix. MarkCompact's Lisp-2 VO-bit/forwarding-header
+reconstruction reads unzeroed garbage → SIGSEGV. Now gated: no-zero stays for the validated
+plans, zeroing ON only for MarkCompact.
+
+### Deep bug root-causes (diagnosed, NOT yet fixed — need Linux/rr or careful work)
+
+- **#4 / #30 — ConcurrentImmix small-heap deadlock (root cause FOUND, needs rr to confirm).**
+  The concurrent→FinalMark handoff has **no self-driving trigger**: `collection_required`
+  requests FinalMark only when `concurrent_marking_in_progress() && Concurrent bucket
+  is_drained()`, and that predicate is evaluated *only* at the allocation poll
+  (`gc_trigger.rs poll` ← `space.rs:307`). The intended internal trigger
+  (`gc_trigger.rs:184-200 trigger_internal_collection_request`) is `#[allow(unused)] +
+  unimplemented!()`, and there's a literal `FIXME` at `concurrent/immix/global.rs:84-85`.
+  So when the Concurrent bucket drains while every mutator is quiescent / at a safepoint /
+  spinning in `cont_lock` (likely at ~10 MB once the heap is consumed, and during sanity's
+  quiescent windows), nothing requests FinalMark → workers park with no goal forever. The
+  cont_lock yielding-spin (FAQ-Q3) reinforces it under effect/continuation churn. **Fix
+  direction:** implement the GC-worker-side internal FinalMark trigger (fire on Concurrent-
+  bucket drain), keep cont_lock as a yielding spin. Verify with a fresh rr trace under
+  `MMTK_PLAN=ConcurrentImmix` + sanity at ~10 MB (dump WorkerMonitor parked==worker_count /
+  goal==None + plan state). Highest-value GC fix — it makes ConcurrentImmix default-ready.
+
+- **#5 — generational weak/ephemeron cleared too early (macOS-fixable, SOLID, no patch yet).**
+  Fix direction (mirror stock): (1) `Gc.major_collections` must count only FULL collections,
+  not nursery GCs — the binding needs a separate full-GC counter; (2) the weak/ephemeron
+  clear must not treat nursery-GC survivors as fully traced under a generational plan.
+  Concrete edits not yet written; this is the next macOS-fixable correctness item (task #39).
+
+- **#55 — finaliser adoption residual (4 edits proposed, verdict NEEDS_MORE — not applied).**
+  Direction: route orphan-finaliser adoption to a domain guaranteed to keep polling (the
+  main domain, `all_domains[0]`) instead of an arbitrary one that may terminate. The verifier
+  flagged gaps, so it needs hardening before landing.
+
+- **#57 (terminate "cannot trace object") and the bug-#3c residual (~1%)** — both agents hit
+  the StructuredOutput retry cap; prior diagnosis stands (entry below). Need Linux/rr.
+
+### CI items still open (REVISE — not self-contained)
+
+- **Hygiene — the proposed `.gitattributes` exemption is SELF-DEFEATING.** Editing
+  `.gitattributes` flips `full_check_needed=true` in check-typo, re-arming the *whole-tree*
+  step (489 errors across configure.ac/Makefile/runtime C + upstream test files), so the job
+  stays red. A durable fix must either exempt all three trees (gc/mmtk + patched runtime/ +
+  root build files) or keep the whole-tree step gated. Separately, step 5 fails on autoconf
+  2.72-vs-2.71 (configure.ac pins `AC_PREREQ([2.71])`; fork regenerates with 2.72) — its own
+  fix. (The api.rs per-change failure is the box-drawing-Unicode + >80-col comments.)
+- **Testsuite (all GC plans)** — the latest failure was the shared `build` job's
+  check-symbol-names gate (now fixed by `88ac1f9cf1`); re-run to confirm the plan matrix
+  itself is green vs the known-unsupported set.
+
+---
+
 ## External GitHub issue triage + #11/#12 root-cause diagnoses (handoff, 2026-06-25)
 
 Triage of the open external issues on `fplaunchpad/ocaml-mmtk`, with root causes for the two

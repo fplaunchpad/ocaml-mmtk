@@ -187,7 +187,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    plus a real atomics-SATB-ordering bug found + fixed (`d0c721a8b7`); sanity-clean, macOS bytecode build
    verified. **Open (perf, not correctness):** the UNLOG-bit barrier gate is **de-prioritized** — native
    characterization showed the SATB barrier is ~free (<0.1% self), so the gate is empirically a non-issue;
-   the sanity-build-only ~10 MB deadlock (`rr`) remains. → RESEARCH_QUESTIONS RQ1; NOTES (2026-06-23).
+   the sanity-build-only ~10 MB deadlock (`rr`) remains — **root cause now found (2026-06-25):** the
+   concurrent→FinalMark handoff has no self-driving trigger (`gc_trigger.rs:184-200
+   trigger_internal_collection_request` is `unimplemented!()`; `FIXME` at
+   `concurrent/immix/global.rs:84-85`), so FinalMark is only re-armed at the allocation poll; when the
+   Concurrent bucket drains while all mutators are quiescent/parked it is never requested → wedge. Fix =
+   implement the GC-worker-side FinalMark trigger; confirm with a fresh rr trace. → RESEARCH_QUESTIONS RQ1;
+   NOTES (2026-06-25, 2026-06-23).
 
 9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
