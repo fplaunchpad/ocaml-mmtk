@@ -53,45 +53,53 @@ The milestone-by-milestone plan and current status are in
 
 ### Performance (quick panel)
 
-A fast eyeball panel — 11 stdlib-only CLBG/sandmark/effects programs, native, **dynamic heap (memory
-parity** with vanilla), best-of-3 on an Apple M4 Pro, MMTk GC workers = nproc. Reproduce the table +
-both graphs in **one** run: `uv run quick/quickbench.py all …` (single self-contained script; raw data
-in `quick/results.ndjson`).
+A fast eyeball panel — 12 stdlib-only CLBG/sandmark/effects programs, native, **dynamic heap (memory
+parity** with vanilla), best-of-5 on an Apple M4 Pro. **Single-domain runs use `MMTK_THREADS=1`** (the
+correct config at ≤ a few domains — MMTk's default `nproc` workers oversubscribe and heavily tax
+high-collection benches; a domain-aware worker pool is the open fix). The parallel sweep uses
+**`MMTK_THREADS=domains`, core-pinned**. Reproduce: `uv run quick/quickbench.py …` (raw data in
+`quick/results.ndjson`).
 
-**Sequential** — ratio vs vanilla 5.5.0 (lower is better):
-
-![sequential ratio vs vanilla](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_ratio.png)
+**Sequential** — ratio vs vanilla 5.5.0 at `MMTK_THREADS=1` (lower is better):
 
 | bench | GenImmix *(default)* | Immix | ConcurrentImmix |
 |---|--:|--:|--:|
-| binarytrees | 1.07× | 0.88× | 1.04× |
-| nbody | 0.97× | 0.97× | 0.97× |
-| fannkuchredux | 0.99× | 0.99× | 1.01× |
-| spectralnorm | 1.37× | 1.23× | **deadlock** |
-| mandelbrot | 1.01× | 1.00× | 1.00× |
-| matrix_multiplication | 0.92× | 0.92× | 0.90× |
-| LU_decomposition | 2.15× | 1.59× | **deadlock** |
+| binarytrees | 1.07× | 2.14× | **0.55×** |
+| nbody | 1.01× | 1.01× | 1.02× |
+| fannkuchredux | 0.99× | 1.00× | 1.00× |
+| spectralnorm | **0.96×** | 1.20× | 1.19× |
+| mandelbrot | 1.00× | 1.00× | 1.01× |
+| matrix_multiplication | **0.90×** | 0.87× | 0.88× |
+| LU_decomposition | **1.05×** | 1.25× | 1.31× |
+| kb *(symbolic, Rocq-like)* | 1.30× | 1.10× | **0.96×** |
 
-**Parallel scalability** — speedup `T(1)/T(N)` at 8 domains (ideal = #domains):
+**GenImmix (the default) is parity-or-better than vanilla on 7/8 sequential benches** (0.90–1.07×;
+spectralnorm and matmul are *faster*, from no-zero allocation). The lone GenImmix outlier is `kb`
+(1.30×, a symbolic term-rewriting churn) — where **ConcurrentImmix instead beats vanilla** (0.96×). The
+earlier "LU/spectralnorm ~2× structural outlier" was **not** a GC-design cost but a measurement artifact
+of the `nproc`-worker default: LU is 2.26× at `nproc` (it triggers ~2467 tiny collections from boxed
+intermediates, and 12 idle workers park/wake on each) but **1.05× at `MMTK_THREADS=1`**.
 
-![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
+**Parallel scalability** — speedup `S(N)=T(1)/T(N)` at 8 domains, **controlled** (core-pinned,
+`MMTK_THREADS=domains`, so domains + GC workers ≤ cores; ideal `S=8`):
 
-| bench (d=8 speedup) | vanilla | GenImmix | Immix | ConcurrentImmix |
+| bench | vanilla | GenImmix | Immix | ConcurrentImmix |
 |---|--:|--:|--:|--:|
-| par_spectralnorm | 4.96× | 1.53× | 1.93× | **deadlock** |
-| par_matmul | 5.57× | 3.79× | 3.69× | 3.69× |
-| par_binarytrees | 3.66× | 0.59× | 1.30× | 1.40× |
-| chameneos_redux *(effects)* | 4.27× | 0.54× | 2.21× | **deadlock** |
+| par_matmul | 5.72 | 4.71 | 5.31 | **5.78** |
+| par_binarytrees | 3.49 | 1.36 | hang† | 0.91 |
+| par_spectralnorm | 2.44‡ | hang† | hang† | 2.90 |
 
-Parity-or-better on the compute-bound sequential benches (and **faster** on matrix_multiplication); the
-two boxed-float kernels (spectralnorm, LU_decomposition) are the known structural outliers (Immix
-mature-space sweep/metadata cost).
+† an *intermittent* multidomain-rendezvous hang remains after the GH#6 assert fix (a rarer residual —
+see below). ‡ even *vanilla* regresses past d4 on par_spectralnorm (memory-bandwidth bound, not GC).
 
-**Setup.** stdlib-only `Domain.spawn` ports (no Domainslib); a fixed total work split across N domains
-(strong scaling, ideal `S(N)=N`); native; dynamic heap (RSS ≈ vanilla — memory parity); median of 3.
-*Preliminary: this panel ran GC-workers = nproc, unpinned, which over-states the gap on the alloc-heavy
-benches; a core-pinned `workers=domains` re-run is refining the magnitude.* Mechanism + the RQ10
-architecture question (per-domain minor vs MMTk-major-only): `SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
+**The dramatic "anti-scaling" was substantially a measurement artifact.** The earlier panel ran `nproc`
+GC workers unpinned, oversubscribing the cores; controlled (`MMTK_THREADS=domains`, pinned) and with the
+GH#6 deadlock fixed, the fork **scales as well as vanilla on `par_matmul`** (GenImmix 4.71,
+ConcurrentImmix 5.78 ≈ vanilla 5.72) and only **mildly sublinearly on the heaviest-alloc bench**
+(par_binarytrees GenImmix `S(8)=1.36`, vs the uncontrolled `0.64`). The same `nproc`-oversubscription
+inflated the sequential outliers above. The remaining real levers — a domain-aware GC-worker pool and
+the per-minor-collection cost — and the RQ10 architecture question (per-domain minor vs MMTk-major-only)
+are in `SCALABILITY.md` / `RESEARCH_QUESTIONS.md`.
 
 **Scheduler-assert deadlock FIXED for ALL plans** (mmtk-core `ec2f5079f8`): the stop-the-world-era
 `scheduler.rs` assert that forbade a GC request while a GC is in progress is **removed** — its premise
@@ -99,11 +107,12 @@ is false for OCaml's multi-domain model. It bit two ways: **ConcurrentImmix** (G
 re-requesting mid-concurrent-mark; spectralnorm / LU / par_spectralnorm now run clean, checksums match
 golden) **and** any **STW plan (e.g. GenImmix) at ≥8 domains** (GH#6 — a 2nd domain's alloc poll, or a
 domain being *created* refilling its TLAB; rr-confirmed, par_binarytrees d8 was a 100% hang → 5/5 OK
-after the fix). **One
-remnant: `chameneos_redux` still hangs** under ConcurrentImmix via a *separate* deadlock (no assert — an
-effects/continuation-under-concurrent-mark issue), still open. The table's ConcurrentImmix cells predate
-the fix. *This is a quick eyeball panel, not the system of record — the macro-benchmark campaign (M8,
-`PERFORMANCE.md`) is authoritative.*
+after the fix). **Two residuals remain, both open:** (1) a *rarer intermittent* multidomain-rendezvous
+hang (the assert was the dominant, deterministic cause — removing it unmasked a slower bug#3c-class race
+that still scatters some parallel cells, marked `hang†` above; needs more rr); (2) `chameneos_redux`
+hangs under ConcurrentImmix via a *separate* deadlock (no assert — an effects/continuation ×
+concurrent-mark issue). *This is a quick eyeball panel, not the system of record — the macro-benchmark
+campaign (M8, `PERFORMANCE.md`) is authoritative.*
 
 ## Building
 
