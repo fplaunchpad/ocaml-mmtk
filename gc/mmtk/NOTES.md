@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Three results: LXR P1 OCaml-build-validated; RQ10 pole-B design; #20 backup-thread design (2026-06-25)
+
+**LXR P1 — OCaml-build-validated.** The binding workspace builds **green** against
+`origin/0.32-ocaml-lxr` @ `f0319fb5e6` ("P1 — vendor + adapt RC scaffolding, additive, gated"); no
+errors (P1 is purely additive — args.rs/rc.rs/FieldBarrier/Pause::RefCount — so the binding's API
+surface is unaffected). Resolves the ROADMAP's "NOT yet OCaml-build-validated". Next: P2 (Immix-policy +
+LOS RC hooks). Done as a temporary submodule checkout + restore to `ec2f5079f8`.
+
+**RQ10 pole-B (stock minor + MMTk major-only) — key API finding (design agent).** MMTk's *mutator*
+allocator API does **not** admit promoting into a *generational* plan's mature space: in GenImmix the
+mature Immix space is reachable **only from the GC worker** via `alloc_copy(.., PromoteToMature)`
+(`gc/mmtk-core/src/util/copy/mod.rs:75`), and the mutator mapping exposes the nursery only
+(`plan/generational/mod.rs:76`). **So pole-B's baseline must use a NON-generational `Immix`/
+`ConcurrentImmix` major**, whose mutator Default *is* mature → promotion = `mmtk_ocaml_alloc` (registered
+via `post_alloc`), and **needs ZERO mmtk-core trait changes**. A generational-major-under-stock-minor
+would need an mmtk-core fork (a mutator-facing mature allocator) — the inverse of RQ7 Bactrian.
+Re-introduce: per-domain arena + real `Is_young` + `oldify`→`mmtk_ocaml_alloc` + old→young ref-table
+barrier; coordinate by draining all minors inside MMTk's `stop_all_mutators` before the major mark
+(stock-faithful). Phased P1–P6; **P3 (oldify→mature) is the moving-GC correctness crux** (validate with
+`sanity` at a tiny Immix heap). Mostly runtime-C; ~nil binding; no mmtk-core for the Immix baseline.
+
+**#20 backup-thread retirement — feasibility verdict (design agent): it is DOWNSTREAM of #18/RQ10
+pole-A, not standalone.** The backup thread is **not** kept alive by MMTk's STW at all — the binding's
+RUNNING set fully subsumes that (a lock-released domain is already STOPPED, so `stop_all_mutators` never
+awaits it; the GC *worker pool* drives the pause). It survives **only** to answer OCaml's *own*
+`caml_try_run_on_all_domains` rendezvous for a lock-released domain (spawn/terminate/minor-empty/
+minor-heap-resize/runtime_events/frame_descriptors — full caller table in the agent report). So deleting
+it requires first making MMTk's STW the **sole** rendezvous (#18 "big deletion"). The lock-acquisition
+reframe (the GC initiator acquires a released domain's `domain_lock` instead of its backup thread
+answering) is sound but has two deadlock hazards: (i) `all_domains_lock`→`domain_lock` order inversion vs
+spawn/terminate (which take them in the opposite order), and (ii) **holding `domain_lock` across an MMTk
+collection re-creates the exact GH#6 STOPPED↔RUNNING re-entry cycle**. Publishable claim: *under an
+always-on tracing GC with its own worker pool, the mutator-rendezvous STW (backup threads + dual
+barriers) is entirely eliminable* — which is the RQ10 pole-A question. → ROADMAP #20/#18; RQ10.
+
+---
+
 ## GH#6 multidomain d8 deadlock — rr-CONFIRMED: it was the GH#14 scheduler assert all along (FIXED, all plans) (2026-06-25)
 
 **This supersedes finding (1) of the entry below, which was WRONG.** The static-analysis agent's "bug#3c
