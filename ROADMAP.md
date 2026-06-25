@@ -86,9 +86,14 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      with GC disabled across each unmarshal). Profile; confirm slowdown not loop.
    - `output-complete-obj/test` — `-output-complete-obj` + manual `${mkexe}` link omits
      `mmtk_c_libraries` → `undefined reference to mmtk_ocaml_*`. Real gap for hand-linked objects.
-   - Re-enable candidates (disabled with now-stale "finaliser not supported" reasons —
-     finalisers work under `MMTK_WEAK_REFS=1`): `callback/test_finaliser_gc.ml`,
-     `callback/test_gc_alarm.ml`, `basic-more/simplif_under_lambda.ml` — restore `(* TEST *)` + verify.
+   - Re-enable candidates — **verified 2026-06-25 (the "not supported" reasons were stale, pre-M6 blanket
+     "tabled" disables; finalisers are default-on).** Result: `callback/test_gc_alarm.ml` **RE-ENABLED**
+     (passes native + bytecode, 8/8 robust). `callback/test_finaliser_gc.ml` and
+     `basic-more/simplif_under_lambda.ml` **stay disabled** but with *accurate* reasons now — not "missing
+     support" but **finaliser-timing diffs**: test_finaliser_gc's bytecode variant fires the finaliser later
+     than stock's minor-GC point (output order differs; native matches), and simplif_under_lambda's
+     `finalise_last` does not fire on the test's `Gc.full_major` under MMTk. (Lesson: the doc-based guess was
+     1/3 — verify before re-enabling.)
 
 5. **#14 / i386 — platform.** macOS native linking: **DONE** (2026-06-24, arm64) — native
    compile + link + run verified (`-lmmtk_ocaml` resolves via the stdlib symlink + auto

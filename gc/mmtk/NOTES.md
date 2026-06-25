@@ -5,6 +5,79 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Three findings: bug#3c residual root-caused (deterministic d8 repro), chameneos ConcImmix deadlock root-caused, KB workload favours Immix (2026-06-25)
+
+### (1) bug#3c residual — DETERMINISTIC repro + root cause: the RUNNING re-entry edge
+
+The controlled RQ10 re-run (pinned `2·domains` cores, `MMTK_THREADS=domains`) turned the ~1% multidomain
+STW deadlock into a **deterministic** one. **Repro (turing):** `par_binarytrees 20` at **8 domains**,
+`taskset -c 0-15`, `MMTK_THREADS=8` → hangs every time under **GenImmix** *and* Immix/StickyImmix/
+ConcurrentImmix (NOT plan-specific, NOT GH#14). At the hang **all 19 threads are in `futex_wait_queue`**
+(total deadlock). `ptrace_scope=1` on turing blocks `gdb -p` attach — use `rr` (it ptraces its own child)
+or `/proc/<pid>/task/*/wchan`.
+
+**Root cause (static analysis, agent):** the `7d66a6172f` bug#3c fix brackets `caml_empty_minor_heaps_once`
+with `caml_mmtk_enter_blocking`(STOPPED)…`caml_mmtk_become_running`(RUNNING), making the **STOPPED** edge
+atomic — but the **RUNNING re-entry** edge (`minor_gc.c:528` → `caml_mmtk_become_running` →
+`mmtk_ocaml_try_mark_running`, `collection.rs:197`) is racy. `try_mark_running` re-inserts the domain into
+MMTk's `running` set gated **only** on `!gc_active`. The losing interleaving: a domain L re-marks RUNNING,
+then enters a *new* all-domains OCaml STW (the terminate path `domain.c:2128-2201` holds `all_domains_lock`
+and calls `caml_empty_minor_heaps_once` repeatedly) **while RUNNING** — recreating exactly the bug#3c
+cross-STW capture topology on the re-entry edge. The 4-way cycle: MMTk `stop_all_mutators` waits on
+`running.is_empty()` → waits for **L**; **L** holds `all_domains_lock` / leads the OCaml STW, waits for the
+other domains; those domains were poisoned by `stop_all_mutators` and parked in `park_until_resumed`
+(`collection.rs:152`, **unbounded** wait) for `gc_active==false`; `gc_active` clears only when the GC
+finishes, which needs `running` empty → needs **L**. Closed.
+
+**Why pinning + 8 domains makes it deterministic:** ~25 runnable threads (8 domains + 8 GC workers + 8
+backup + main) on 16 pinned cores → CFS preempts L in the few-instruction window between `try_mark_running`
+returning and L's next safepoint with near-certainty; the system is STW-saturated so it is *continuously* in
+that transition; high domain count means multiple concurrent terminate-STWs always supply the "L leads a
+second STW while RUNNING" condition. Unpinned on 28 cores L usually races through → the ~1%.
+
+**Fix direction (not yet landed):** (a) **primary/structural** — keep the domain STOPPED across the *whole*
+terminate critical section (`caml_domain_terminate`, `domain.c:2113`: `enter_blocking` at entry,
+`become_running` only at the very end / rely on the deregister fence), not just per `caml_empty_minor_heaps_once`,
+so a domain is never RUNNING while it can hold `all_domains_lock`. (b) **surgical** — make
+`mmtk_ocaml_try_mark_running` also refuse while an OCaml STW is in flight (`stw_leader != 0`, exposed via a
+small C predicate); `become_running` already parks-and-retries on refusal. (c) **defense-in-depth** —
+convert `park_until_resumed`'s unbounded wait to a bounded `wait_timeout` re-validating against MMTk's
+authoritative GC state, so an orphaned/raced flag self-heals (deadlock → recoverable stall). **The
+deterministic repro means any candidate fix is empirically testable** (does d8-pinned stop hanging +
+sanity/checksums clean). Confirm the exact cycle with `rr` first (consult `running` set + `stw_leader` at the
+hang) per "confirmed beats guessed". → ROADMAP item 1 / #6; RESEARCH_QUESTIONS RQ10.
+
+### (2) chameneos_redux ConcurrentImmix deadlock — separate from GH#14, root-caused
+
+After the GH#14 assert fix, `chameneos_redux` STILL hangs under ConcurrentImmix (d=1, d=4, 64 MB) with **no
+assert panic** — a distinct deadlock. **Root cause (agent):** the continuation-resume critical section
+`caml_continuation_use_noexc` (`fiber.c:638` `CAMLnoalloc` … `:660` `caml_mmtk_cont_lock` … `:666`
+`caml_mmtk_cont_snapshot` — a full fiber-stack SATB walk) is a **no-safepoint window that holds the GC
+RUNNING set**. Under concurrent marking a GC worker can win `cont_lock(C)` via `try_lock` (`scanning.rs:337`)
+then be descheduled by an InitialMark/FinalMark pause; the resuming mutator spins forever in
+`cont_lock::lock` (`cont_lock.rs:57-67`, a `yield_now` spin with **no condvar / no liveness guarantee**),
+never reaching a safepoint → `stop_all_mutators` (`collection.rs:256`) never drains RUNNING → the worker
+holding `cont_lock` is never scheduled to `unlock`. Circular wait: mutator waits `cont_lock`(worker) ↔ GC
+pause waits RUNNING(mutator). This is the **same cont_lock Q3 (`55ab6ce40b`) introduced** to fix a
+*data race* under STW marking — concurrent marking re-exposes it as a *liveness* bug (mutators now resume
+*while* a worker holds the lock). **Fix direction:** make the resume critical section either safepoint-pollable
+or STOPPED-visible while it waits on `cont_lock` (e.g. `enter_blocking` before the blocking spin), or use a
+bounded `try_lock`-with-park. **Needs `rr` on Linux to confirm** (is a thread parked in `cont_lock::lock`
+spin while the holding worker is parked in the scheduler with `current_pause()==Some(FinalMark)`?). → #5.
+
+### (3) KB (Knuth-Bendix) — the symbolic/Rocq-like workload favours Immix over GenImmix
+
+New panel bench (testsuite `misc-kb`, term-rewriting completion; the panel's first non-numeric bench).
+Single-domain, size 50, dynamic heap, turing, checksum `608698882` identical across all plans. Wall vs
+vanilla **2.13 s**: **Immix 2.41 s (1.13×)**, GenImmix **2.88 s (1.35×)**, StickyImmix **3.17 s (1.49×)**.
+**Immix beats the GenImmix default here** — the opposite of the numeric benches. KB's torrent of short-lived
+intermediate terms + a growing (long-lived) rule set makes the copying-nursery per-minor-GC cost a net loss
+vs in-place Immix. A clean RQ2 characterization datapoint: plan-fit is workload-dependent, and a symbolic
+prover-like profile is NOT automatically a generational win. (MarkSweep/MarkCompact are bytecode-only;
+ConcurrentImmix wall pending.)
+
+---
+
 ## GH#14 FIXED: gate the STW-only scheduler assert for concurrent plans; #4 self-trigger exonerated (2026-06-25)
 
 **Resolves the panic in the entry below** (mmtk-core `d2e7f3493b` on `0.32-ocaml`, pushed; submodule

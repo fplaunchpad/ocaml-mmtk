@@ -1,4 +1,6 @@
-(* MMTk DISABLED: finalisers not yet supported (tabled — see ROADMAP workstream E). *)
+(* MMTk DISABLED: finaliser-timing. Finalisers work (default-on), but under *bytecode* MMTk the
+   finaliser fires later than at stock's minor-GC point, so the output order differs from the reference
+   (the native variant matches). A per-collection-point timing diff, not missing support. *)
 let z = ref (0, 1, 2, 3, 4, 5, 6, 7)
 let finaliser_pending = ref true
 
