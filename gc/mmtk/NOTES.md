@@ -5,6 +5,41 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## #G1 (narrow the minor-GC global-root scan to young-only): prototype FAILED as wired — PARKED with the corrected approach (2026-06-26)
+
+**Goal.** On a generational *nursery* (minor) GC the binding still scans every global root (`scan_vm_specific_roots`
+→ `caml_scan_global_roots`, all three lists). `caml_global_roots_old` is provably nursery-clean (the generational
+global-root invariant, maintained by `caml_modify_generational_global_root`), so a minor GC need only scan
+`caml_global_roots` + `caml_global_roots_young`. The plan: gate the call on `is_current_gc_nursery()` and use the
+already-present (zero-caller) `caml_scan_global_young_roots`.
+
+**Result: REVERTED — it SIGBUSes.** Wired it, built, validated: any program that uses `Domain.spawn` crashes
+(rc=138 / SIGBUS) — **even single-domain (d=1), even at a 1024 MB heap** (so not OOM); a non-`Domain` native
+program runs fine, and the pre-#G1 build gives the golden checksum at every adequate heap. So the fault is tied to
+`caml_register_generational_global_root` users, i.e. the per-domain `ml_values` (`term_sync`, `callback`).
+
+**Root cause — the promotion side-effect, not the skip.** `caml_scan_global_young_roots` doesn't only scan; after
+scanning it **promotes `_young` → `_old`** (moves the entries, empties `_young`), on stock's assumption that the
+minor GC evacuates *all* survivors to the mature heap. MMTk breaks that for `ml_values`: `term_sync` is a custom
+block holding a pthread mutex/condvar and is (almost certainly) **pinned**, so the copy-nursery cannot evacuate it
+to mature. The root is promoted to `_old` anyway; the *next* minor GC then **skips `_old`** → the still-young,
+still-live `term_sync` is never scanned → reclaimed → use-after-free → SIGBUS. (The *skip-`_old`* half is sound;
+reusing the *promoting* primitive is not.)
+
+**Corrected approach (parked, not implemented).** A **non-promoting** young scan: iterate `caml_global_roots` +
+`caml_global_roots_young`, skip `_old`, and **do NOT** promote `_young`→`_old`. Sound — skipping `_old` is correct
+by the invariant, and leaving `_young` in place just means a young root is re-scanned next minor GC (correct, only
+forgoing the per-root skip). That is a new ~5-line C helper in `globroots.c` (or a flag on the existing one), plus
+the `is_current_gc_nursery()`-gated wiring in `scanning.rs` — NOT the free re-use it looked like.
+
+**Why parked.** Even done right the payoff is **small**: generational global roots are few (`ml_values` per domain
++ a handful), so skipping `_old` saves little. The dominant minor-GC root cost is the **stacks**, and the real
+lever there is **recent-frames** stack scanning (`SCANNING_ONLY_RECENT_FRAMES`) — which exists in the 5.5.0 base
+but only on Linux/x86-64 + ARM64-TBI (not macOS), and is the worthwhile #G1 follow-up when the multi-domain
+per-collection STW cost (RQ10 / `SCALABILITY.md`) is the target. See the root-scan map in the 2026-06-26 session.
+
+---
+
 ## CORRECTION (2026-06-26): the GH#15 `plain_stress` "GenImmix lost-progress livelock" is a TIMEOUT FALSE POSITIVE — there is NO hang
 
 **Supersedes the earlier session claim that `plain_stress` revealed a residual GenImmix livelock.**
