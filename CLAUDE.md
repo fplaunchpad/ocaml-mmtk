@@ -66,6 +66,20 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   **build + validate in the main loop** — sub-agents get reaped on rest and can't carry a long
   build (see `memory/subagent-builds-reaped-on-rest.md`). Pattern: agents produce diffs/findings;
   the main loop integrates, builds, and validates.
+- **Study the upstream design before changing it — `git blame` → the PR → the discussion.** This
+  tree is OCaml 5.5; most runtime machinery (frame descriptors, the STW/safepoint/backup-thread
+  protocol, the minor/major GC, fibers) was designed by people who knew exactly what they were doing
+  (Dolan, Scherer, Sivaramakrishnan, …) and the **upstream `ocaml/ocaml` GitHub PRs carry excellent
+  design rationale and discussion**. Before replacing or "simplifying" any non-trivial concurrency or
+  GC code: `git blame`/`git log --follow` the critical lines to find the introducing commit, get its
+  **PR number** (`git show -s --format=%B <commit>`, usually `(#NNNNN)` or the merge), and read that
+  PR thread (WebFetch `github.com/ocaml/ocaml/pull/NNNNN`). Find out *why* the current shape was
+  chosen and whether the alternative you're about to build was already considered and rejected.
+  (Example: the frametable all-domains STW looked like a prime excision target — but the history shows
+  Dolan's original design was **GC-cycle RCU**, the multicore rework swapped it for STW, and that
+  rationale tells you the right MMTk replacement is cycle-keyed RCU, not a new ad-hoc barrier.) The
+  local clone has the upstream history + the `trunk`/`upstream-5.5.0` branches to diff against.
+  Applies to **everything**, not just frame descriptors.
 
 ## Where things live (read these first each session)
 

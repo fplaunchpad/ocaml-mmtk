@@ -5,6 +5,47 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise Phase 2 step 3 (frametables): REDESIGN to GC-cycle RCU (Dolan's original); + a latent quiesce-primitive deadlock found (2026-06-26)
+
+Studying the UPSTREAM design (per the new CLAUDE rule: `git blame` → PR → discussion) changed the step-3 plan
+and surfaced a bug in the step-1 primitive.
+
+**Upstream history of `frame_descriptors.c`:**
+- Dolan 2018 (`e91cea84e30`, "Remove dependency on shared heap from frametables"): frametables were
+  **GC-cycle RCU** — "no frametables are deallocated until after the end of the GC cycle in which they were
+  replaced. (This is effectively RCU)." The header's "valid until the next GC" contract is from this.
+- Multicore rework (Scherer `fb99258d67` 2023, "protect current_frametable update with a STW section"; +
+  `5a042b04d4` single global table; `aa6d3be9e9` "delay freeing stale tables until the next registration"):
+  **replaced** the cycle-RCU with an all-domains **STW** for the rebuild. `trunk` still uses the STW. The
+  fork's stale `#include "caml/major_gc.h" /* for caml_major_cycles_completed */` is a vestige of the old RCU.
+
+**Step-3 plan (REVISED):** replace the frametable STW with **GC-cycle RCU, not the step-1 quiesce.** Publish a
+fresh immutable `{mask, descriptors}` snapshot via `atomic_store_release`; tag the retired old snapshot with the
+current major cycle (`caml_major_cycles_completed`); free it only once a full MMTk major cycle has elapsed
+(checked lazily at the next registration). This drains BOTH mutator stack-walkers (the "valid until next GC"
+contract — they re-fetch every GC) AND ConcurrentImmix GC workers (the cycle completes), with **no quiesce, no
+`wait_collection_done`, and no new deadlock**. It is Dolan's original design re-keyed on the MMTk cycle. The
+opaque `caml_frame_descrs` (header forward-decl only) makes the struct split internal; the zombies/unregister
+path (custom-block-finalizer-reachable, under `mutex`) stays. (The agent's earlier quiesce-based step-3 design
+is superseded — it had the two deadlocks below.)
+
+**⚠ LATENT BUG in the step-1 quiesce primitive (`caml_mmtk_quiesce_running_domains`, merged):** its wait leaves
+RUNNING via the `caml_mmtk_enter_blocking` HOOK only (marks STOPPED in MMTk's RUNNING set) — it does NOT do the
+backup-thread handoff. So while it spins in the poll loop holding its domain lock, OCaml's still-present
+all-domains STW (spawn/terminate/minor `caml_try_run_on_all_domains`) would await this domain → **deadlock**. It
+did not manifest in step-2 validation (runtime_events destroy at exit + the native stress had no concurrent
+spawn/terminate during the quiesce). Fix: use the FULL blocking-section handoff (`caml_bt_exit_ocaml` +
+`caml_release_domain_lock`, à la `caml_mmtk_cooperative_park`/`caml_enter_blocking_section`) so the backup thread
+answers OCaml STWs during the wait. runtime_events still NEEDS the quiesce (its reader `write_to_ring` is
+per-event, not GC-cycle-tied, so cycle-RCU doesn't apply there) — so this fix matters for step-2 robustness.
+A second issue: the agent's step-3 `mmtk_ocaml_wait_collection_done()` call was placed while RUNNING → also a
+deadlock window; cycle-RCU avoids needing it at all.
+
+Upstream-PR archaeology (why multicore chose STW over RCU; whether RCU was discussed) is in flight (agent) — will
+refine. Until then: step 3 = cycle-RCU; the quiesce fix is a separate small commit.
+
+---
+
 ## BUG (GH#15): multi-domain GenImmix deadlock under infinite-alloc domains — PRE-EXISTING (A/B'd to 6dd121c2ea) (2026-06-26)
 
 Found while validating excise Phase 2 step 2 (a multi-domain runtime_events stress). **Reproduces on the
