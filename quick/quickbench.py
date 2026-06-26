@@ -39,12 +39,13 @@ USAGE
     --domains 1,2,4,8      (par) domain counts to sweep   (default 1,2,4,8)
     --heap MB|dynamic      MMTK_HEAP_SIZE_MB; "dynamic" = don't pin (default),
                            so RSS tracks the live set (memory parity w/ vanilla).
-    --threads N            pin MMTK_THREADS=N (GC workers). DEFAULT: unset — MMTk
-                           uses its own default = nproc (num_cpus::get()). We do
-                           NOT force a value; each record logs the effective count
-                           ("nproc(<cpus>)" when unset) so the panel self-documents.
-                           Pin =1 for a low-overhead single-domain run, or a small
-                           N to cap oversubscription at domains >= cores.
+    --threads V            GC-worker policy. DEFAULT "domains": workers = each
+                           cell's domain count, so single-domain runs use 1 worker
+                           (the recommended single-domain config) and the parallel
+                           sweep scales GC workers with mutator domains (matching GC
+                           to mutator parallelism, no nproc oversubscription). Pass
+                           an int to pin a fixed count, or "nproc"/"" to leave it
+                           unset (MMTk's own default = num_cpus::get()).
     --reps N               measured reps per cell        (default 3, median)
     --warmup N             warmup runs per cell          (default 1)
     --quick                reps=1 warmup=0 + tiny/CI sizes — smoke only.
@@ -146,7 +147,7 @@ def parse_args(argv):
     p.add_argument("--label-b", dest="label_b", default="b")
     p.add_argument("--domains", default="1,2,4,8")
     p.add_argument("--heap", default="dynamic")
-    p.add_argument("--threads", default="")          # "" => leave unset (=nproc)
+    p.add_argument("--threads", default="domains")   # "domains"=workers per cell (default); "nproc"/""=unset; int=pin
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--warmup", type=int, default=1)
     p.add_argument("--quick", action="store_true")
@@ -215,14 +216,26 @@ def pin_prefix(a, k):
     return ["taskset", "-c", f"0-{k-1}"]
 
 
-def effective_threads(a):
-    """The MMTK_THREADS value we set (or None => MMTk default = nproc)."""
-    return a.threads if a.threads else None
+def effective_threads(a, dom):
+    """MMTK_THREADS for this cell, or None => MMTk default (= nproc).
+    Policy "domains" (the default) sets GC workers = the cell's domain count:
+    single-domain -> 1 worker (the recommended single-domain config), and the
+    parallel sweep scales GC workers with mutator domains (matching GC parallelism
+    to mutator parallelism — no nproc oversubscription at domains < cores)."""
+    t = a.threads
+    if not t or t == "nproc":
+        return None
+    if t == "domains":
+        return dom if dom else 1
+    return int(t)
 
 
 def threads_label(a):
-    t = effective_threads(a)
-    return str(t) if t is not None else f"nproc({os.cpu_count()})"
+    if a.threads == "domains":
+        return "domains"
+    if a.threads and a.threads != "nproc":
+        return str(a.threads)
+    return f"nproc({os.cpu_count()})"
 
 
 def cell_env(a, plan, dom):
@@ -232,9 +245,10 @@ def cell_env(a, plan, dom):
         e["MMTK_PLAN"] = plan
         if a.heap != "dynamic":
             e["MMTK_HEAP_SIZE_MB"] = str(a.heap)
-        # GC-worker count: leave UNSET by default so the cell reflects MMTk's
-        # out-of-the-box default (= nproc). Only set it if --threads pins a value.
-        t = effective_threads(a)
+        # GC-worker count. Default policy "domains" sets workers = this cell's
+        # domain count (single-domain -> 1 worker; the parallel sweep scales GC
+        # workers with mutator domains). "nproc"/"" leaves it unset (MMTk default).
+        t = effective_threads(a, dom)
         if t is not None:
             e["MMTK_THREADS"] = str(t)
     if dom is not None:
