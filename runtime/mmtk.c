@@ -829,24 +829,22 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
     d->young_ptr             = d->young_start;
     d->young_trigger         = d->young_start;
     d->memprof_young_trigger = d->young_start;
-    /* Immediately hand the domain a fresh young region instead of leaving it
-       collapsed (young_start == young_end == young_ptr) until the next allocation
-       refills. A collapsed region keeps young_ptr at young_limit, so the inlined
-       native fast-path traps into caml_call_gc at EVERY poll/alloc safepoint until
-       a refill happens. For an allocation-light hot loop that runs after a GC but
-       seldom allocates (e.g. fft, whose float work is unboxed and whose live set is
-       a few large arrays), that refill may not come for a very long time, so the
-       domain pays a full stack-frame-descriptor walk + pending-action check at
-       every loop-back-edge poll — measured at ~36M spurious caml_garbage_collection
-       entries and ~1.4s (a 1.6x slowdown) on fft at an iso-sized heap, even though
-       only ONE real collection occurred. Refilling here keeps young_ptr above
-       young_limit so the fast path runs straight through. All mutators are stopped
-       (GC-worker resume context), so driving the allocator is safe; this is the
-       same call caml_mmtk_domain_init makes at domain creation. On true heap
-       exhaustion the refill returns 0 and we fall back to the collapsed state (the
-       next allocation then traps and raises Out_of_memory as before). The
-       caml_reset_young_limit below re-establishes young_limit for the new region. */
-    caml_mmtk_refill_tlab(d, Whsize_wosize(0));
+    /* Leave the young region COLLAPSED (young_start == young_end == young_ptr); the
+       mutator refills its own TLAB at its next allocation (caml_alloc_small_dispatch,
+       a normal mutator safepoint, outside any GC lock). We must NOT drive the
+       allocator here. This runs inside resume_mutators (binding/src/collection.rs),
+       which MMTk calls from on_gc_finished while holding the WorkerMonitorSync lock.
+       caml_mmtk_refill_tlab can hit a full space -> Space::acquire -> GCTrigger::poll
+       -> request_schedule_collection -> WorkerMonitor::make_request, which re-takes
+       that same lock -> a GC worker self-deadlocks on a lock it already holds
+       (rr/core-confirmed via the deterministic ocamldoc man-gen hang; gc/mmtk/NOTES.md).
+       The sibling MMTk bindings (mmtk-openjdk/julia/ruby) all resume WITHOUT touching
+       the allocator, for exactly this reason — resume_mutators only unblocks mutators.
+       (The fft poll-trap micro-perf an eager refill once avoided — a collapsed region
+       keeps young_ptr at young_limit so an alloc-light hot loop traps at every poll —
+       must be re-homed to the mutator's OWN resume path, caml_mmtk_become_running, not
+       this GC-worker hook. TODO; see ROADMAP.) caml_reset_young_limit below is still
+       valid for the collapsed region. */
   }
   /* A GC just finished — MMTk's finalizer queue may now hold dead custom blocks.
      Flag pending actions so this domain drains + runs them (caml_final_do_calls →
