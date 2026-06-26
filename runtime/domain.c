@@ -1947,11 +1947,13 @@ void caml_poll_gc_work(void)
   if (d->requested_minor_gc) {
     /* out of minor heap or collection forced */
     d->requested_minor_gc = 0;
-    caml_empty_minor_heaps_once();
-    /* excise Phase 1: run THIS domain's minor-cycle bookkeeping off the
-       all-domains STW. Reached only in bytecode (native takes the caml_mmtk_tlab
-       early-return above and never gets here), so bump_count=1 here is the single
-       caml_minor_collections_count bump per minor GC; native stays 0. */
+    /* excise Phase 3a: the all-domains minor-empty STW is gone. Reset THIS
+       domain's young region directly (the STW's only load-bearing residue) and
+       run THIS domain's minor-cycle bookkeeping. Reached only in bytecode (native
+       takes the caml_mmtk_tlab early-return above and never gets here), so
+       bump_count=1 here is the single caml_minor_collections_count bump per minor
+       GC; native stays 0. */
+    caml_minor_gc_reset_young_region(d);
     caml_minor_gc_domain_bookkeeping(d, /*bump_count=*/1);
   }
 
@@ -2115,15 +2117,15 @@ void caml_domain_terminate(bool last)
   while (!finished) {
     caml_finish_sweeping();
 
-    caml_empty_minor_heaps_once();
-    /* Note: [caml_empty_minor_heaps_once] will also join any ongoing
-       STW sections that has sent an interrupt to this domain. */
-    /* excise Phase 1: the all-domains minor STW no longer clears this domain's
-       sampled_gc_stats slot, so run the terminate bookkeeping explicitly.
-       bump_count=0: terminate must not bump caml_minor_collections_count (keeps
-       native at 0). caml_collect_gc_stats_sample_stw sees terminating==1 and
-       zeroes the slot, as the comment near caml_domain_terminate's stats teardown
-       requires. */
+    /* excise Phase 3a: the all-domains minor-empty STW is gone, so the terminate
+       flush no longer joins it (the surrounding loop's all_domains_lock /
+       interrupt-draining already handles any ongoing STW). Reset this domain's
+       young region directly and run its terminate bookkeeping explicitly, since
+       the STW no longer clears this domain's sampled_gc_stats slot. bump_count=0:
+       terminate must not bump caml_minor_collections_count (keeps native at 0).
+       caml_collect_gc_stats_sample_stw sees terminating==1 and zeroes the slot, as
+       the comment near caml_domain_terminate's stats teardown requires. */
+    caml_minor_gc_reset_young_region(domain_state);
     caml_minor_gc_domain_bookkeeping(domain_state, /*bump_count=*/0);
 
     if (last)

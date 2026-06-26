@@ -83,11 +83,10 @@ CAMLextern void caml_minor_collection (void);
 
 #ifdef CAML_INTERNALS
 extern void caml_set_minor_heap_size (asize_t); /* size in bytes */
-extern void caml_empty_minor_heap_no_major_slice_from_stw
-  (caml_domain_state* domain, void* unused, int participating_count,
-    caml_domain_state** participating); /* in STW */
-extern int caml_try_empty_minor_heap_on_all_domains(void); /* out STW */
-extern void caml_empty_minor_heaps_once(void); /* out STW */
+/* Per-domain young-region reset (excise Phase 3a) — the load-bearing residue of
+   the deleted all-domains minor-empty STW; called on the triggering domain's
+   safepoint + terminate path (bytecode only; native resets via the TLAB refill). */
+extern void caml_minor_gc_reset_young_region(caml_domain_state* domain);
 /* Domain-local minor-cycle bookkeeping, re-homed off the all-domains minor STW
    (excise Phase 1); called on the triggering domain's safepoint + terminate path. */
 extern void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain,
@@ -102,7 +101,6 @@ extern void caml_realloc_ephe_ref_table (struct caml_ephe_ref_table *);
 extern void caml_realloc_custom_table (struct caml_custom_table *);
 struct caml_minor_tables* caml_alloc_minor_tables(void);
 void caml_free_minor_tables(struct caml_minor_tables*);
-void caml_empty_minor_heap_setup(caml_domain_state* domain, void *);
 
 #ifdef DEBUG
 extern int caml_debug_is_minor(value val);
