@@ -274,10 +274,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `Is_young==0`; custom table read-never + self-bounded; memprof/stats per-domain + self-refreshed). Validated:
    clean world.opt, par_binarytrees d1==d8==golden, Gc.minor exactly-once, mmtk sanity small-heap clean —
    NOTES 2026-06-26); 2 (med) re-home
-   frametables + runtime_events **— design banked 2026-06-26** (agent + sibling-validated: a ragged-epoch
-   `caml_mmtk_quiesce_running_domains` primitive — NOT a second barrier, so deadlock-class-neutral; frametables →
-   RCU/epoch rebuild-and-publish à la Julia world-age, also fixes the latent ConcurrentImmix worker-vs-installer
-   hazard; runtime_events → monotonic publish for start + clear-enabled→quiesce→munmap for stop — NOTES 2026-06-26);
+   frametables + runtime_events. **Sub-steps 1+2 DONE 2026-06-26** (`3d2eef30a5` ragged-epoch
+   `caml_mmtk_quiesce_running_domains` primitive — NOT a second barrier, deadlock-class-neutral; `e06e717e51`
+   runtime_events start=monotonic publish / stop=clear-enabled→quiesce→munmap, closing a munmap-vs-write_to_ring
+   UAF; validated: native destroy+quiesce 10/10, lib-runtime-events A/B zero new failures, golden + counter
+   neutral). **Sub-step 3 (frametables RCU/epoch à la Julia world-age, also fixes the latent ConcurrentImmix
+   worker-vs-installer hazard) NEXT** — NOTES 2026-06-26. (Validation surfaced GH#15, a pre-existing multi-domain
+   GenImmix deadlock, unrelated to the excision.)
    3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
    barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos

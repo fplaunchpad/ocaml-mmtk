@@ -48,6 +48,35 @@ edge. Filed as GH#15 (https://github.com/fplaunchpad/ocaml-mmtk/issues/15).
 
 ---
 
+## Excise OCaml STW — PHASE 2 steps 1+2 DONE (quiesce primitive + runtime_events); step 3 (frametables RCU) next (2026-06-26)
+
+**Step 1 (`3d2eef30a5`):** the dormant `caml_mmtk_quiesce_running_domains()` ragged-epoch primitive (per-domain
+`mmtk_seen_quiesce_epoch` field acked at the safepoint; caller leaves RUNNING via enter_blocking, snapshots the
+RUNNING set, poisons + polls until each acks the epoch or leaves RUNNING, never un-poisons; Rust hooks
+`mmtk_ocaml_snapshot_running`/`mmtk_ocaml_is_running`). Built green, behaviour-neutral (golden + counter unchanged).
+
+**Step 2 (`e06e717e51`):** runtime_events start/stop off the all-domains STW. START = monotonic off→on release
+publish under a new `runtime_events_lifecycle_lock` (no stop). STOP (`caml_runtime_events_destroy`) = publish
+enabled=0 FIRST → `caml_mmtk_quiesce_running_domains()` (drain in-flight `write_to_ring` emitters) → munmap;
+teardown helper renamed `runtime_events_unmap`, no longer clears enabled (callers do, before the quiesce); the
+reorder closes a munmap-vs-write_to_ring UAF the old STW masked. Both `stw_*_runtime_events` callbacks deleted.
+
+**⚠ DISCOVERY during step-2 validation:** found GH#15 (pre-existing multi-domain GenImmix deadlock) — see entry
+above. NOT caused by Phase 2.
+
+**Validated (steps 1+2):** clean world.opt; native multi-domain start/emit/**destroy+quiesce** stress 10/10 (5
+before + 5 after the fresh build — the primitive's first real exercise, drains live RUNNING domains at teardown);
+lib-runtime-events testsuite A/B = **identical 10 pre-existing failures, ZERO new**, no crash/hang, and every
+previously-passing start/destroy/fork/cursor test still passes (92 passed). par_binarytrees d1/d8 golden +
+Gc.minor counter unchanged (step 1 neutrality).
+
+**Step 3 (next): frametables RCU** — rebuild-off-to-the-side + atomic-publish + ragged grace-period retire (Julia
+world-age); reader side unchanged. The two `caml_try_run_on_all_domains` callers at `frame_descriptors.c:306,318`.
+Validate with `lib-dynlink-domains` (concurrent native Dynlink.loadfile + busy domains) under sanity small-heap.
+Also fixes the latent ConcurrentImmix worker-vs-frametable-installer hazard. Design below.
+
+---
+
 ## Excise OCaml STW — PHASE 2 design (re-home frametables + runtime_events; the legitimate non-GC STW users) (2026-06-26)
 
 Agent-designed + sibling-validated; not yet implemented. The remaining `caml_try_run_on_all_domains` call sites
