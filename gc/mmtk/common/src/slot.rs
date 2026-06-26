@@ -27,6 +27,15 @@ use crate::header::{tag_of, wosize_of, TAG_INFIX, WORD_SIZE};
 /// enabled). For such slots `load` returns `None` and `store` is never called.
 const NOT_TRACEABLE: usize = usize::MAX;
 
+/// DEBUG (MMTK_DEBUG_ROOT_RACE), cached — logs each slot whose cached classification
+/// said "traceable pointer" but whose current value is an immediate/null (the
+/// concurrent classify-vs-load race, GH#15). Off unless the env var is set.
+#[inline]
+fn debug_root_race() -> bool {
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("MMTK_DEBUG_ROOT_RACE").is_some())
+}
+
 /// MMTk's local forwarding-bits side-metadata spec, injected once by the binding
 /// at MMTk init via [`set_forwarding_bits_spec`]. Reading it tells us,
 /// authoritatively, whether the object at an address has begun forwarding — the
@@ -191,8 +200,29 @@ impl Slot for FieldSlot {
         if self.info == NOT_TRACEABLE {
             return None;
         }
+        let raw = self.raw_value();
+        // GH#15: re-validate the CURRENT value, not just the cached classification.
+        // `info` was classified at capture (under roots_mutex / at a safepoint), but a
+        // terminating/spawning domain — scanned via the global-root path, which a
+        // collection processes regardless of mutator-stop — can concurrently mutate or
+        // free+reuse this slot before the worker loads it. If the slot now holds an
+        // immediate or null it is not a root, whatever it held at classify; handing it
+        // to the tracer panics ("cannot trace object 0x1"). Returning None here is
+        // always sound (an immediate is never a heap object to trace/update).
+        if raw & 1 != 0 || raw == 0 {
+            if debug_root_race() {
+                eprintln!(
+                    "[ROOT-RACE] slot {:#x}: classified info={:#x} but current value={:#x} \
+                     (immediate/null) — skipping",
+                    self.as_address().as_usize(),
+                    self.info,
+                    raw
+                );
+            }
+            return None;
+        }
         // raw - infix_offset is the object start (== raw for ordinary slots).
-        let start = unsafe { Address::from_usize(self.raw_value()) } - self.info;
+        let start = unsafe { Address::from_usize(raw) } - self.info;
         Some(unsafe { ObjectReference::from_raw_address_unchecked(start) })
     }
 

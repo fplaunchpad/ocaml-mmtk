@@ -839,10 +839,32 @@ static void init_domain_ml_values(struct domain_ml_values* ml_values,
   caml_register_generational_global_root(&ml_values->term_sync);
 }
 
-static void free_domain_ml_values(struct domain_ml_values* ml_values)
+/* [retire_after_gc] must be true on the terminating path (domain_thread_func) and
+   false on the spawn-failure path (caml_domain_spawn). See the GH#15 Bug B note
+   below the root removals. */
+static void free_domain_ml_values(struct domain_ml_values* ml_values,
+                                  bool retire_after_gc)
 {
   caml_remove_generational_global_root(&ml_values->callback);
   caml_remove_generational_global_root(&ml_values->term_sync);
+  /* GH#15 Bug B (use-after-free of a global root racing the GC root scan).
+     On the terminating path this domain has ALREADY been MMTk-deregistered by
+     caml_domain_terminate, so it now runs concurrently with collections. A GC
+     that started AFTER caml_domain_terminate's own wait_collection_done can have
+     snapshotted these two global-root slots (&callback / &term_sync) into a
+     ProcessEdges packet while iterating caml_global_roots_old. Freeing ml_values
+     now would let that worker later load a freed/reused slot and hand garbage to
+     trace_object -> "cannot trace object" panic. Having removed the roots above
+     (so no NEW collection can snapshot them), wait out any in-flight collection's
+     grace period before the free: an RCU-style retire, the same guarantee
+     caml_mmtk_domain_terminate gives the domain's own stack/roots.
+       The spawn-failure caller passes retire_after_gc=false: there the freeing
+     thread is the parent, a registered RUNNING mutator, which is stopped across
+     any collection and so cannot reach this free while a GC still holds the
+     snapshot (no UAF) — and a blocking wait on a running mutator could deadlock
+     against stop_all_mutators. */
+  if (retire_after_gc)
+    caml_mmtk_wait_collection_done();
   caml_stat_free(ml_values);
 }
 
@@ -1184,7 +1206,7 @@ domain_thread_func(void* v)
      root set after the mutex is unlocked. Otherwise, there is a risk
      of it being destroyed by [caml_mutex_finalize] while it remains
      locked, leading to undefined behaviour. */
-  free_domain_ml_values(ml_values);
+  free_domain_ml_values(ml_values, /*retire_after_gc=*/true);
   return 0;
 }
 
@@ -1243,7 +1265,10 @@ CAMLprim value caml_domain_spawn(value callback, value term_sync)
 
   err = caml_plat_thread_create(&th, 0, domain_thread_func, (void*)&p);
   if (err) {
-    free_domain_ml_values(p.ml_values);
+    /* retire_after_gc=false: the parent (this thread) is a registered, running
+       mutator — stopped across any collection, so it cannot reach this free while
+       a GC still holds a snapshot of these roots; no UAF and no wait needed. */
+    free_domain_ml_values(p.ml_values, /*retire_after_gc=*/false);
     caml_check_error(err, "failed to create domain thread: "
                      "caml_plat_thread_create");
   }

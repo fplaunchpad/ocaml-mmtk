@@ -1047,3 +1047,17 @@ void caml_mmtk_deregister_domain(caml_domain_state *dom)
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
   dom->mmtk_mutator = NULL;
 }
+
+/* Wait out the grace period of any in-flight collection (returns at once if none
+   is active). C wrapper so the OCaml runtime can RCU-retire memory that a GC
+   worker may have snapshotted as a root before freeing it. caml_mmtk_domain_terminate
+   above uses the same primitive to keep a terminating domain's OWN roots valid
+   until the scanning collection completes; free_domain_ml_values in domain.c uses
+   this wrapper to give the per-spawn domain_ml_values global-root block the same
+   guarantee (GH#15 Bug B: a collection started AFTER caml_domain_terminate's wait
+   may still hold &ml_values->callback/&term_sync — freeing the block underneath it
+   traced a dangling slot -> "cannot trace object" panic). */
+void caml_mmtk_wait_collection_done(void)
+{
+  mmtk_ocaml_wait_collection_done();
+}

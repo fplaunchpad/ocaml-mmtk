@@ -204,6 +204,11 @@ extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
  * MMTk's registry + RUNNING set, WITHOUT waiting for an in-flight collection (the
  * peer's roots are not torn down, so there is nothing to protect). */
 extern void caml_mmtk_deregister_domain(caml_domain_state *dom);
+/* Block until any in-flight collection finishes (returns at once if none is
+ * active). Used to RCU-retire memory a GC worker may have snapshotted as a root:
+ * remove the root, wait the grace period, then free (see free_domain_ml_values,
+ * GH#15 Bug B). */
+extern void caml_mmtk_wait_collection_done(void);
 
 /* Collection-suppression counter. While the count is non-zero MMTk does not
  * trigger a collection (the binding's VMCollection::is_collection_enabled reads

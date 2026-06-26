@@ -5,6 +5,108 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#15 ROOT-CAUSED + FIXED — it was TWO bugs (lock-cycle deadlock + a global-root use-after-free), both rr-confirmed on turing (2026-06-26)
+
+**GH#15 ("mutators park, markers idle, GC never resumes") was never one bug.** Decisive A/B + rr on
+turing (28 cores → reliable spawn/terminate repro) split it cleanly. Both fixed on `excise-ocaml-stw`.
+The "rarer sibling root-scan panic (`cannot trace …`)" the Phase-3a entry below already flagged was
+Bug B all along.
+
+**Bug A — 4-way lock-order deadlock (fix `73f780c566`).** A terminating domain, still in MMTk's
+RUNNING set, blocks on `all_domains_lock`; that lock is held (transitively) by a spawning domain
+waiting on another terminating peer's `domain_lock`; that peer holds `domain_lock` while parked in
+`mmtk_ocaml_wait_collection_done`; and that collection is wedged in `stop_all_mutators` on the first
+domain being RUNNING. Found via live gdb with TID-verified `pthread_mutex.__owner` fields. **Fix:** in
+`caml_domain_terminate`, call `caml_mmtk_enter_blocking` (leave the RUNNING set) immediately *before*
+the unbounded `all_domains_lock` block and *after* the marking/sweeping flush body (the flush must run
+RUNNING so a concurrent collection scans this domain's roots consistently — placing it at the top of
+the function instead exposes an extra scan-during-flush window). turing confirmed the cycle is gone
+(`all_domains_lock.__owner == 0` in the post-fix hangs).
+
+**Bug B — a GC worker hands a non-heap value to `trace_object` during spawn/terminate.** TWO distinct
+root mechanisms reach the same `cannot trace object` panic, and BOTH must be fixed:
+
+**Bug B variant 1 — use-after-free of a `Domain.spawn` global root racing the GC root scan (fix B1).** rr
+(`rr record -c 10000`, caught on the first try once B2 made the panic a loud abort) → reverse-continue
+from the panic: the mis-traced slot is **`&ml_values->term_sync`** of a `struct domain_ml_values`
+(the per-spawn callback/term_sync block, `caml_stat_alloc`'d in `caml_domain_spawn`, registered as TWO
+generational global roots). Chain: a **terminating** domain, in `domain_thread_func`'s tail **after**
+`caml_domain_terminate` has already MMTk-**deregistered** it (so it now runs concurrently with GC),
+calls `free_domain_ml_values` → removes the two roots, then `caml_stat_free(ml_values)`. But a live GC
+worker doing `scan_vm_specific_roots → caml_scan_global_roots` (iterating `caml_global_roots_old`) has
+already snapshotted `&ml_values->term_sync` into a `ProcessEdges` packet; when it later `FieldSlot::
+load`s that slot it reads the **freed/reused** block (rr shows the value drift across the run) → garbage
+to `trace_object` → "cannot trace object" panic. The panicking worker then unwinds+exits, leaving
+`WorkerMonitor.worker_count` one high forever → `on_last_parked` never fires → `gc_active` stuck →
+every domain wedges. That last step IS GH#15's original "markers idle, never resumes" signature — it was
+a **dead worker**, not a missed wakeup. Confirmed `GC_ACTIVE==1` at the free.
+
+**Why the existing bug#3 mitigation didn't cover it.** `caml_mmtk_domain_terminate` already does
+deregister-then-`wait_collection_done` (bug#3, the spawn-burn root-scan), but that wait only covers the
+collection active *at terminate time* and only the domain's **own** (mutator-scanned) roots. `ml_values`'
+roots live in the **global** set (`caml_global_roots_old`), which `scan_vm_specific_roots` scans on
+*every* GC **regardless of registry membership**, and they're removed only later in
+`free_domain_ml_values` — so a **new** GC, started after the terminate wait, snapshots them and races the
+free. `ml_values` is the **unique** site of this: it is the only block that is *both* in the global root
+set *and* `caml_stat_free`'d. (`domain_state`'s global roots `dls_root`/`backtrace_last_exn` are safe —
+`domain_state` lives in the pooled `all_domains[]` array, reused, never freed; `final_info`/`ephe_info`
+are per-domain mutator-scanned roots, orphaned/drained before free and covered by the deregister wait at
+domain.c:1779.)
+
+**Fix B1 (variant 1 — RCU retire).** `free_domain_ml_values(ml_values, retire_after_gc)`: remove the two
+roots, then — on the terminating path only — `caml_mmtk_wait_collection_done()` (new thin C wrapper over
+the binding primitive, in mmtk.c/`caml/mmtk.h`) to wait out any in-flight collection's grace period,
+*then* `caml_stat_free`. Same shape as the frametable cycle-RCU: remove from the root set so no NEW GC can
+snapshot the slots, wait for any GC that snapshotted them BEFORE removal to drain (it read still-valid
+memory), then free. Safe at the call site: `sync_and_terminate` has already run
+`caml_plat_assert_all_locks_unlocked()` (domain.c:1114), so the terminating thread holds **no** locks
+when it waits — no Bug-A-style cycle. The **spawn-failure** caller (`caml_domain_spawn` error path)
+passes `retire_after_gc=false`: there the freeing thread is the parent, a *registered RUNNING* mutator,
+which is stopped across any collection and so cannot reach the free while a GC still holds the snapshot
+(no UAF) — and a blocking wait on a running mutator could itself deadlock against `stop_all_mutators`.
+
+**Bug B variant 2 — classify-vs-load TOCTOU (an immediate reaches the tracer; the local-dominant variant;
+fix B1′).** Caught locally (M4 Pro, lighter than turing): the mis-traced value is **`0x1` = `Val_unit`**,
+not freed garbage. `FieldSlot` caches its traceability classification (`info`) at `classify()`-capture
+time, but `Slot::load()` re-reads the slot's *current* value and trusts the cached `info` — it did NOT
+re-check the immediate bit. So a slot classified as a pointer whose value is concurrently changed to an
+immediate before the worker loads it yields `Some(0x1)` → `trace_object(0x1)` → panic (or a SIGSEGV in
+`is_in_mmtk_spaces`'s metadata read on the bad value — same bug, two faces; the local rc=139s were this).
+The mutation is the deliberate **early callback-release** `caml_modify_generational_global_root(&ml_values
+->callback, Val_unit)` (domain.c:1172) racing a concurrent global-root scan during the spawn/terminate
+storm. **Fix B1′:** `Slot::load()` re-validates the *current* value — `if raw & 1 != 0 || raw == 0 {
+return None }` (slot.rs) — before applying the cached infix offset. Always sound: an immediate/null is
+never a heap object to trace/update, so this can NEVER drop a real root (a real root is a non-immediate
+pointer); and at the `&callback` release the old closure stays alive via the stack local
+`unrooted_callback` across `caml_callback_res`, so skipping the now-`Val_unit` global slot frees nothing
+prematurely. Gated diag `MMTK_DEBUG_ROOT_RACE` logs each such skip (slot addr + cached info + current
+value). NB B1′ alone is INSUFFICIENT for variant 1: freed-block reuse can yield an *even* value
+(turing saw `0x8abef88cf329848e`) that passes the low-bit check and is still mis-traced — only B1's
+retire prevents that. The two fixes are complementary, both needed.
+
+**Bug B2 (safeguard, fix `55007a9022`).** A panic hook installed at `mmtk_ocaml_init` prints then
+`std::process::abort()`s, so a GC-worker panic fails as a **loud SIGABRT + core** at the faulting frame
+instead of silently wedging `worker_count`. Not a root-cause fix — but it converts the hang into an
+honest crash and made the rr capture trivial (break on `abort`).
+
+**Why Bug A's fix unmasked Bug B (turing spawnstorm: 8/12 → 11/12).** With the lock cycle gone, domains
+actually *reach* teardown concurrently with live GCs instead of wedging first — so the UAF dominates.
+Bug B is **pre-existing**: it reproduces on pre-excision mainline `a77290b6e` (≈14 h before Phase 0),
+8/12, independent of the lock fix — NOT an excision regression; the excision/Bug-A-fix only expose it.
+
+**Validation (local, M4 Pro).** Clean `world.opt` (B1+B1′+B2). `spawnstorm` burst (200×8 short-lived
+domains, GenImmix 48 MiB) **60/60 clean** across `MMTK_THREADS`∈{1,2,default} — was ~11% panic/segv with
+B1 alone (B1′ closes the immediate variant; `MMTK_DEBUG_ROOT_RACE` showed the skips were `info=0 →
+value=0x1`). par_bt d1/d8 checksums stable + correct (d8 == 8×d1) under GenImmix and StickyImmix (moving
+mature); bytecode GC sanity clean. **turing decisive before/after + mmtk `sanity` at a small heap pending**
+— the reliable 11/12 repro (the *even-garbage* variant-1 UAF, which only B1 fixes) is the authoritative
+check; also rr-pinpoint variant 2's exact interleaving there. Evidence on turing `~/gh15/`:
+`B1_rootcause.txt`, `bugB_panic_backtrace.txt`, replayable rr trace `~/gh15/rrtraces/ag`. **Merge gate:**
+once turing is green, fast-forward Phase 3 (3a/3b/3c + Bug A + B1 + B1′ + B2) to mainline — GH#15 was the
+last blocker.
+
+---
+
 ## Excise Phase 3a+3b DONE (committed, NOT merged) — "one STW" functionally achieved; 3c = delete dead family; GH#15 gates merge (2026-06-26)
 
 **3a `cdd3021a1c` + 3b `0618509717` on `excise-ocaml-stw`, deliberately NOT fast-forwarded to mainline.**
