@@ -265,7 +265,15 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `stw_resize_minor_heaps_reservation` deleted; `caml_poll_gc_work` clears `requested_global_major_slice`
    locally + `stw_global_major_slice` deleted; bytecode-validated, par_binarytrees d1/d4/d8 checksum-stable;
    `caml_try_run_on_all_domains_async` now dead-but-retained for Phases 1/3 — NOTES 2026-06-25);
-   1 (med) re-home the domain-LOCAL minor-STW bookkeeping onto the safepoint/resume path; 2 (med) re-home
+   1 (med) re-home the domain-LOCAL minor-STW bookkeeping onto the safepoint/resume path **— DONE 2026-06-26**
+   (`d556fb6ea6` + `4677c9b580`: new `caml_minor_gc_domain_bookkeeping` wired at the bytecode safepoint
+   (bump=1, single per-minor-GC count bump; native stays 0) + terminate (bump=0); STW handler stripped to
+   `{leader cycle bump; promote}`; `promote` kept for its load-bearing `caml_reset_young_limit` (the bytecode
+   safepoint poison) but stripped of stats-sample + the `minor_gc_end_barrier`; dead `caml_mark_roots_stw`
+   branch removed. Re-home to the *triggering* domain only is multi-domain-safe (ephe_ref/finaliser vacuous via
+   `Is_young==0`; custom table read-never + self-bounded; memprof/stats per-domain + self-refreshed). Validated:
+   clean world.opt, par_binarytrees d1==d8==golden, Gc.minor exactly-once, mmtk sanity small-heap clean —
+   NOTES 2026-06-26); 2 (med) re-home
    frametables + runtime_events; 3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
    barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos

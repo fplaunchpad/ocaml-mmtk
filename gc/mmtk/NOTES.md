@@ -5,34 +5,54 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## Excise OCaml STW — PHASE 1 plan (re-home minor-STW bookkeeping); step 1/2 done; cut gated on one verification (2026-06-26)
+## Excise OCaml STW — PHASE 1 DONE: minor-cycle bookkeeping re-homed off the all-domains STW (2026-06-26)
 
-Toward "one STW to rule them all" (MMTk `stop_all_mutators` sole rendezvous). Phase 1 re-homes the
-**domain-LOCAL** bookkeeping out of the all-domains minor STW onto the triggering domain's safepoint, so the
-STW handler becomes a bare shell that Phase 3 can delete. Agent-designed + verified (minor_gc.c).
+Toward "one STW to rule them all" (MMTk `stop_all_mutators` sole rendezvous). Phase 1 moved the
+**domain-LOCAL** minor-cycle bookkeeping out of the all-domains minor STW onto each triggering domain's own
+safepoint, leaving the STW handler a bare shell that Phase 3 can delete. Agent-designed + multi-domain-
+adversarially verified; integrated + built + validated in the main loop. Branch `excise-ocaml-stw`.
 
-**Step 1/2 DONE (`d556fb6ea6`, branch `excise-ocaml-stw`):** added `caml_minor_gc_domain_bookkeeping(domain,
-bump_count)` (minor_gc.c) = gc-stats sample → memprof → `caml_final_update_last_minor` → `caml_empty_minor_heap_domain_clear`
-→ (bytecode-only) bump `caml_minor_collections_count`. Additive, builds green, unused yet.
+**Step 1/2 (`d556fb6ea6`):** added `caml_minor_gc_domain_bookkeeping(domain, bump_count)` (minor_gc.c) =
+gc-stats sample → memprof → `caml_final_update_last_minor` → `caml_empty_minor_heap_domain_clear` →
+(if bump_count) bump `caml_minor_collections_count`. Additive, behaviour-neutral.
 
-**Step 2/2 (the coordinated cut — one commit):** call the bookkeeping at the bytecode safepoint (`domain.c`
-~1947, `bump_count=1`) + terminate (`domain.c` ~2107, `bump_count=0`); empty `caml_stw_empty_minor_heap_no_major_slice`;
-move the `caml_minor_cycles_started` increment into the `caml_empty_minor_heaps_once` driver (its only reader is
-that driver's retry loop); delete the dead `caml_mark_roots_stw` branch + `caml_gc_mark_phase_requested` sampling,
-the `minor_gc_end_barrier`/`minor_gc_leave_barrier`. **Constraints:** (1) the wire + the empty MUST be one commit
-(else `caml_minor_collections_count` double-bumps); (2) terminate keeps the gc-stats sample (it self-clears the
-terminating domain's slot — `domain.c:2215` asserts it) with `bump_count=0`; (3) do NOT re-home to
-`caml_mmtk_uninterrupt` — GC-worker context, holds the worker-monitor lock (resume_mutators fix `cd62bd47f9`).
+**Step 2/2 (`4677c9b580`, the coordinated cut, one commit):**
+- `caml_stw_empty_minor_heap_no_major_slice` stripped to `{leader cycle bump; promote}` — memprof/finaliser/
+  table-clear/stats-sample gone; dead `caml_mark_roots_stw` branch removed (`caml_gc_mark_phase_requested`
+  never set under MMTk).
+- `caml_empty_minor_heap_promote` **kept** (its `caml_reset_young_limit` re-arms the safepoint poison) but
+  stripped of its stats-sample + the split `minor_gc_end_barrier`; `minor_gc_leave_barrier` + the
+  `minor_gc_end_barrier` global deleted.
+- `caml_empty_minor_heap_setup`: no longer bumps the counter or resets the barrier.
+- `domain.c` safepoint (`caml_poll_gc_work`): `caml_minor_gc_domain_bookkeeping(d, 1)` after
+  `caml_empty_minor_heaps_once()` — reached only in bytecode (native early-returns), so this is the single
+  collections-count bump per minor GC; native stays 0. Terminate flush: `(domain_state, 0)`.
+- `caml_minor_cycles_started` bump **stays in the handler** (`participating[0]==domain`) — it must advance
+  inside the STW for the driver retry loop, and the driver caller is not necessarily `participating[0]`.
 
-**⚠ GATING HAZARD for Step 2 — verify before dropping the `caml_empty_minor_heap_promote` call:** promote does
-more than the (re-homed) stats sample + barrier — its young-region reset (`minor_gc.c:232-249`) is NOT obviously
-dead. The **native** `if (caml_mmtk_tlab)` branch (237-240) IS redundant with `caml_mmtk_uninterrupt`'s
-young-region collapse. But the **bytecode `else` branch (241-249)** sets `young_ptr=young_end`, `young_trigger`,
-`memprof_young_trigger`, `caml_reset_young_limit` — must confirm bytecode-under-MMTk doesn't rely on these at its
-safepoint (`Caml_check_gc_interrupt` reads `young_ptr` vs `young_limit`) before removing promote. **Safer Step 2
-if not redundant:** KEEP promote (it carries the young-region reset) but strip only its stats-sample (`:256`) +
-the barrier (`:271-307`); re-home the other 4 pieces; that still removes the all-domains barrier without the
-young-reset risk. Resolve this one question first; the rest of Step 2 is mechanical.
+**Gating hazard RESOLVED (the reason promote is kept):** promote's young-region reset (`minor_gc.c:228-245`)
+is NOT dead. The native `if (caml_mmtk_tlab)` branch is redundant with `caml_mmtk_uninterrupt`, but the
+**bytecode `else` branch's `caml_reset_young_limit` is load-bearing** — `young_limit` IS the bytecode
+safepoint mechanism (`Caml_check_gc_interrupt` reads `young_ptr` vs `young_limit`; `caml_mmtk_interrupt`
+poisons it). Dropping promote would leave the safepoint poisoned → stuck. So promote stays; only its
+stats-sample + barrier were stripped (the "safer variant").
+
+**Correctness (multi-domain-adversarial):** re-homing to only the *triggering* domain is safe because for any
+domain dragged into the STW that did not itself trigger: `ephe_ref` is never populated and the finaliser
+update is vacuous (both `Is_young`-gated, `Is_young==0` under MMTk); the `custom` table is never *read* under
+MMTk and is self-bounded by each domain's own `extra_heap_resources_minor` minor-GC self-trigger; memprof/stats
+are per-domain and refreshed at that domain's own next safepoint (every dragged-in domain runs
+`caml_poll_gc_work` right after the STW callback).
+
+**Validated:** clean `world.opt` (native+bytecode incl. ocamldoc manpages — the former deadlock site);
+`par_binarytrees` native d1==d8 == golden (`checksum=355319636 long_lived_check=2097151`, domain-count-
+independent); `Gc.minor` ×100 bumps 100 (bytecode) / 0 (native) — exactly-once semantics preserved; mmtk
+`sanity` small-heap clean on StickyImmix+GenImmix (par_binarytrees d1/d8, Gc.minor, a 12k-def heavy compile)
+— no dangling-edge panic.
+
+**Next:** Phase 2 (re-home frametables + runtime_events off `caml_try_run_on_all_domains`), then Phase 3 (delete
+the now-shell minor STW so MMTk `stop_all_mutators` is the sole all-domains rendezvous; backup-thread removal;
+multi-domain-exit `caml_stop_all_domains` must remove_running/deregister cancelled peers).
 
 ---
 
