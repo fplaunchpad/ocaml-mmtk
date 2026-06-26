@@ -177,6 +177,21 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   the binary directly, not `env VAR=… exe`** — otherwise gdb's executable is
   `/usr/bin/env` and OCaml symbols never load; export the vars instead. rr disables
   ASLR itself.
+  - **Multi-domain timing races (e.g. GH#15) won't reproduce under plain `rr record`**
+    — its serialized schedule hides the interleaving. **Chaos mode (`rr record -h`/
+    `--chaos`) ABORTS under always-on MMTk** (`failed to mmap meta memory: Inappropriate
+    ioctl for device` — MMTk's meta-mmap vs rr's seccomp layout). **Workaround (KC):
+    `rr record -c <N>`** — a tunable scheduling number that records OK under MMTk —
+    and **VARY N** (sweep e.g. 1000 / 10000 / 100000; the default is unknown, check
+    `rr record --help`). Changing that number exposes different schedules and is a
+    known way to surface rare interleaving bugs — then you get a *replayable* trace,
+    far better than a one-shot live backtrace.
+  - **Attaching `gdb -p` on turing fails** (`ptrace_scope=1`, no passwordless sudo) with
+    EPERM / "Inappropriate ioctl for device", even on a same-session child. **Workaround:
+    `LD_PRELOAD` a tiny shim whose constructor calls `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)`**
+    — then any process can attach. A live multi-thread `gdb` backtrace + reading the
+    contended `pthread_mutex_t.__data.__owner` fields gives TID-level lock owners, which
+    deterministically nailed the GH#15 4-way lock cycle without rr at all.
 - **Debugging the moving GC.** Enable mmtk's `sanity` feature in
   `gc/mmtk/Cargo.toml` (full-heap re-trace after each GC) and run at a **small heap**
   — small heaps force frequent + full GCs so the checker actually runs, and it flags
