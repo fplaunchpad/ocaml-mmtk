@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise OCaml STW — PHASE 1 plan (re-home minor-STW bookkeeping); step 1/2 done; cut gated on one verification (2026-06-26)
+
+Toward "one STW to rule them all" (MMTk `stop_all_mutators` sole rendezvous). Phase 1 re-homes the
+**domain-LOCAL** bookkeeping out of the all-domains minor STW onto the triggering domain's safepoint, so the
+STW handler becomes a bare shell that Phase 3 can delete. Agent-designed + verified (minor_gc.c).
+
+**Step 1/2 DONE (`d556fb6ea6`, branch `excise-ocaml-stw`):** added `caml_minor_gc_domain_bookkeeping(domain,
+bump_count)` (minor_gc.c) = gc-stats sample → memprof → `caml_final_update_last_minor` → `caml_empty_minor_heap_domain_clear`
+→ (bytecode-only) bump `caml_minor_collections_count`. Additive, builds green, unused yet.
+
+**Step 2/2 (the coordinated cut — one commit):** call the bookkeeping at the bytecode safepoint (`domain.c`
+~1947, `bump_count=1`) + terminate (`domain.c` ~2107, `bump_count=0`); empty `caml_stw_empty_minor_heap_no_major_slice`;
+move the `caml_minor_cycles_started` increment into the `caml_empty_minor_heaps_once` driver (its only reader is
+that driver's retry loop); delete the dead `caml_mark_roots_stw` branch + `caml_gc_mark_phase_requested` sampling,
+the `minor_gc_end_barrier`/`minor_gc_leave_barrier`. **Constraints:** (1) the wire + the empty MUST be one commit
+(else `caml_minor_collections_count` double-bumps); (2) terminate keeps the gc-stats sample (it self-clears the
+terminating domain's slot — `domain.c:2215` asserts it) with `bump_count=0`; (3) do NOT re-home to
+`caml_mmtk_uninterrupt` — GC-worker context, holds the worker-monitor lock (resume_mutators fix `cd62bd47f9`).
+
+**⚠ GATING HAZARD for Step 2 — verify before dropping the `caml_empty_minor_heap_promote` call:** promote does
+more than the (re-homed) stats sample + barrier — its young-region reset (`minor_gc.c:232-249`) is NOT obviously
+dead. The **native** `if (caml_mmtk_tlab)` branch (237-240) IS redundant with `caml_mmtk_uninterrupt`'s
+young-region collapse. But the **bytecode `else` branch (241-249)** sets `young_ptr=young_end`, `young_trigger`,
+`memprof_young_trigger`, `caml_reset_young_limit` — must confirm bytecode-under-MMTk doesn't rely on these at its
+safepoint (`Caml_check_gc_interrupt` reads `young_ptr` vs `young_limit`) before removing promote. **Safer Step 2
+if not redundant:** KEEP promote (it carries the young-region reset) but strip only its stats-sample (`:256`) +
+the barrier (`:271-307`); re-home the other 4 pieces; that still removes the all-domains barrier without the
+young-reset risk. Resolve this one question first; the rest of Step 2 is mechanical.
+
+---
+
 ## Excise OCaml STW — PHASE 0 DONE: retired the two clean `caml_try_run_on_all_domains` callers (2026-06-25)
 
 First cut of the pole-A excision (the verified plan below). The two callers the adversarial verify had cleared
