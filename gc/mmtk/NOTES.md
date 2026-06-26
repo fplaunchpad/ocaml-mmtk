@@ -5,6 +5,53 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise OCaml STW — PHASE 2 design (re-home frametables + runtime_events; the legitimate non-GC STW users) (2026-06-26)
+
+Agent-designed + sibling-validated; not yet implemented. The remaining `caml_try_run_on_all_domains` call sites
+(6 total): minor-GC rendezvous (`minor_gc.c:419`, Phase 1/3), spawn + terminate (`domain.c:2296`, Phase 3), and
+the **two legitimate non-GC users Phase 2 retires**: frametables install (`frame_descriptors.c:306,318` →
+`stw_register_frametables`) and runtime_events start/stop (`runtime_events.c:438,228`). These can't ride MMTk's
+`stop_all_mutators` (its STW callback is hard-wired to GC marking), so they need a non-GC replacement.
+
+**Key design decision — a ragged epoch, NOT a second barrier.** New common primitive
+`caml_mmtk_quiesce_running_domains()` (mmtk.c, backed by collection.rs): bump a global epoch, poison every
+domain's `young_limit` (reuse `caml_mmtk_interrupt`), block the caller until every domain RUNNING at call time
+has passed one safepoint (new per-domain `seen_quiesce_epoch` bumped in `caml_poll_gc_work`). STOPPED domains
+(parked/blocking/terminating) hold no transient reader pointer, so aren't awaited — same invariant the RUNNING
+set already encodes. **No leader, no all-domains barrier** → does NOT re-create the bug#3c dual-STW seam (Phase 3's
+payoff). The quiesce wait must itself be a cooperative safepoint (park if `mmtk_ocaml_stw_active()`), like the
+`caml_empty_minor_heaps_once` bracketing. Pattern from Julia world-age (`jl_world_counter` + lazy revalidation,
+no barrier) + `jl_gc_add_quiescent`; Ruby `rb_vm_barrier` ragged; OpenJDK reuses its GC safepoint / a lock —
+all three: *one GC-owned safepoint; a true all-threads stop only for state no thread may observe stale.*
+
+**Frametables → RCU/epoch (writer-rare, reader-hot).** Today `add_frame_descriptors` frees the old `descriptors[]`
+in place and `remove_entry` moves entries within it — a UAF/torn-probe hazard for any concurrent native stack-walk
+(GC root scan `fiber.c:272-294`, backtrace, signals, tsan; also ConcurrentImmix GC *workers* via
+`scanning.rs:322` — a pre-existing latent hazard). Fix: rebuild a FRESH array off to the side, publish via one
+`atomic_store_release` of a single immutable snapshot pointer; readers take one acquire-load snapshot per walk
+(they already call `caml_get_frame_descrs()` once at top); retire the old array via grace period
+(`caml_mmtk_quiesce_running_domains` + `mmtk_ocaml_wait_collection_done` to also cover GC workers) then free. A
+`frame_descrs_writer_lock` serializes installers (the old STW-leader role). No global stop; only the rare
+dynlink installer waits one safepoint round. Also fixes the ConcurrentImmix worker-vs-installer hazard.
+
+**runtime_events → monotonic publish (start) + ragged drain (stop).** Each domain writes only its own ring slot
+indexed by `Caml_state->id` off the single global `current_metadata` mmap — no per-domain pointer to publish.
+START: under a setup lock, mmap+init, `release`-publish `current_metadata` then `runtime_events_enabled=1`;
+readers self-gate on `ring_is_active()`; a missed event in the enable window is harmless (flight recorder) → **no
+stop needed**. STOP (the only op needing reader quiescence — `munmap` vs in-flight `write_to_ring` UAF): reorder
+to `enabled=0` FIRST (release), then `caml_mmtk_quiesce_running_domains()` (drain emitters past the
+`ring_is_active()` check — `write_to_ring` is bounded straight-line, one ragged round suffices), THEN `munmap`.
+
+**Edit order (independently buildable):** (1) add dormant primitive (validate: build + sanity, behaviour-neutral);
+(2) runtime_events (validate: `lib-runtime-events/test_caml_parallel` + fork/external, under sanity + ASan/TSan
+for the munmap race); (3) frametables RCU (validate: `lib-dynlink-domains` native — concurrent `Dynlink.loadfile`
++ busy domains — under sanity small-heap, every Immix plan; adversarial: loop loadfile on one domain while others
+run deep native recursion at `MMTK_HEAP_SIZE_MB=32`). After Phase 2, only GC/spawn/terminate participant-set users
+remain for Phase 3 to delete wholesale. **Do NOT touch the terminate/minor-empty join in Phase 2** (participant-set
+contract must stay intact until Phase 3's coordinated cut). Full design: agent report 2026-06-26 (ROADMAP #18 Phase 2).
+
+---
+
 ## Excise OCaml STW — PHASE 1 DONE: minor-cycle bookkeeping re-homed off the all-domains STW (2026-06-26)
 
 Toward "one STW to rule them all" (MMTk `stop_all_mutators` sole rendezvous). Phase 1 moved the
