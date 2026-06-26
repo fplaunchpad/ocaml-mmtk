@@ -66,18 +66,18 @@ median of 5 reps on an Apple M4 Pro. Single-domain uses **one GC worker** (`MMTK
 | binarytrees | 1.02× | 2.12× | **0.56×** |
 | nbody | 0.99× | 1.00× | 1.00× |
 | fannkuchredux | 1.00× | 1.00× | 1.00× |
-| spectralnorm | **0.95×** | 1.15× | hang† |
+| spectralnorm | **0.95×** | 1.15× | 1.21× |
 | mandelbrot | 0.99× | 1.00× | 1.00× |
 | matrix_multiplication | **0.91×** | 0.91× | **0.91×** |
-| LU_decomposition | 1.09× | 1.27× | hang† |
+| LU_decomposition | 1.09× | 1.27× | 1.34× |
 | kb | 1.27× | 1.03× | **0.89×** |
 
 GenImmix (default) is parity-or-better on 6 of 8 benches at one GC worker; `kb` (1.27×) is the lone
 outlier, where ConcurrentImmix wins (0.89×). ConcurrentImmix is fastest on alloc-heavy `binarytrees`
-(**0.56×**) but is **not yet general-purpose**: it †**intermittently livelocks** on the high-allocation
-float kernels `spectralnorm` / `LU_decomposition` at perf sizes — GH#14, a marker-vs-mutator
-concurrent-marking livelock the scheduler-assert removal did not cover (it fixed only the deterministic
-abort). `Immix` lags on `binarytrees` at one worker (2.12×); parallel marking closes most of that gap (0.90× at nproc=12).
+(**0.56×**); its earlier livelock on the high-allocation float kernels `spectralnorm` / `LU_decomposition`
+is now **fixed** (GH#14, mmtk-core `88ab2f5ea5` — an orphaned-SATB-packet lost-wakeup that stalled the
+final concurrent-mark), so it completes those at 1.2–1.3×. `Immix` lags on `binarytrees` at one worker
+(2.12×); parallel marking closes most of that gap (0.90× at nproc=12).
 
 **Parallel** — speedup at 8 domains, controlled (pinned, `MMTK_THREADS=domains`; ideal = 8):
 
@@ -93,10 +93,11 @@ The fork scales ≈ vanilla on `par_matmul`; the "anti-scaling" earlier reported
 `nproc`-worker oversubscription artifact (now controlled). †intermittent multidomain hang; ‡vanilla also
 regresses (bandwidth). Mechanism + RQ10: `SCALABILITY.md`.
 
-The scheduler-assert *abort* is fixed for all plans (GH#6/#14, mmtk-core `ec2f5079f8`). Open residuals:
-the intermittent multidomain hang above, and a ConcurrentImmix concurrent-marking **livelock** on
-high-allocation kernels — single-domain `spectralnorm`/`LU_decomposition` (seq table) and `chameneos_redux`
-(GH#14). *Eyeball panel — the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
+The scheduler-assert abort (GH#6/#14, mmtk-core `ec2f5079f8`) **and** the follow-on ConcurrentImmix
+concurrent-marking **livelock** on high-allocation kernels (single-domain `spectralnorm`/`LU_decomposition`
+and `chameneos_redux`) are both **fixed** — the latter by mmtk-core `88ab2f5ea5` (an orphaned-SATB-packet
+lost-wakeup; GH#14). Open residual: the intermittent multidomain hang above (#31). *Eyeball panel — the M8
+macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
 
 ## Building
 

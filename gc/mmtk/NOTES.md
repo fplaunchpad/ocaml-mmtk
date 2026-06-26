@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#14 ConcurrentImmix livelock FIXED — orphaned-SATB-packet lost-wakeup in mmtk-core (godel-diagnosed, integrated + validated locally, 2026-06-26)
+
+**Root cause (mmtk-core `scheduler.rs`, godel agent + the prior core dump — supersedes both the `cont_lock`
+circular-wait and the heap-pressure-forced-FinalMark hypotheses).** After an InitialMark pause, `end_of_gc`
+sets `concurrent_marking_active=true`, then `on_gc_finished` called `schedule_concurrent_packets()`, which
+**disabled+closed** the `Concurrent` bucket whenever it was momentarily empty — *while marking is still in
+progress*. A resumed mutator's SATB barrier (`flush_satb`, sees `concurrent_work_in_progress()==true`) then
+`add()`s a `ProcessModBufSATB` into that disabled+closed bucket. The packet is **orphaned**: `notify_one_worker`
+suppresses the wakeup, `find_more_work_for_workers`/`poll` skip disabled buckets, and `is_drained()`
+short-circuits to `true` via `!is_enabled()` despite a non-empty queue → FinalMark is never reached →
+`gc_active` stays stuck → every mutator blocks forever in `park_until_resumed`. This is the SAME mechanism
+behind the `chameneos_redux` remnant AND the single-domain `spectralnorm`/`LU_decomposition` perf-size livelock
+the quick panel surfaced — not two bugs.
+
+**Fix (mmtk-core `88ab2f5ea5` on `ec2f5079f8`, +29/−4):** `schedule_concurrent_packets(concurrent_marking_active)`
+keeps the `Concurrent` bucket **enabled+open** whenever marking is in progress (not only when non-empty), so a
+late SATB `add()` notifies a worker and stays pollable; it returns `true` only when there is actual work. The
+flag is read from `get_plan().concurrent().is_some_and(|c| c.concurrent_work_in_progress())` — non-concurrent
+plans get `None`→`false`→**byte-identical**.
+
+**Diagnosis on godel** (56-core): the hang would not reproduce live there (~450 ConcurrentImmix runs on the
+unfixed binary) — it is rarer than the panel's "5 reps" estimate — so the fix rests on the already-core-dump-
+confirmed mechanism + code analysis + clean stress (21×12 parallel mixed runs, 0 hangs) + `sanity` + no-regression.
+**Integrated + validated locally** (this build, M4 Pro): the panel's previously-reliable repro is now the decisive
+before/after — `spectralnorm 3000` and `LU_decomposition 900` under ConcurrentImmix, which **reliably HUNG** at
+perf sizes (both `MMTK_THREADS=1` and nproc), now run **48/48 clean, 0 hangs**; `binarytrees` regression check
+clean. GenImmix/Immix byte-identical (concurrent-gated). → GH#14; integrated from the godel fix branch (push
+blocked by godel's expired credential, so applied here).
+
+---
+
 ## Issue-tracker sweep (2026-06-26): closed GH#2 / GH#10 / GH#16; GH#5 / GH#6 / GH#7 confirmed still open
 
 Swept every open GH issue against current HEAD (`397e0e0de4`), confirm-or-refute each via repro + code on the

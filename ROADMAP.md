@@ -230,10 +230,16 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      ConcurrentImmix and GenImmix. **`#4` self-trigger EXONERATED by static trace** (not needing rr):
      `respond_to_requests` (which holds the self-trigger) runs only when `current()==None` (asserted at
      `scheduler.rs:512`), so it cannot reach the `:444` assert; the trigger is the **mutator allocation-poll**
-     re-requesting a GC during the concurrent-marking window. **STILL OPEN remnant:** `chameneos_redux`
-     (effects/continuation workload) still hangs under ConcurrentImmix with **no** assert panic — a
-     *separate* deadlock (continuation-scan/resume × concurrent mark), needs its own diagnosis; keep GH#14
-     open for it. Evidence in NOTES (2026-06-25).
+     re-requesting a GC during the concurrent-marking window. **Remnant FIXED 2026-06-26 (mmtk-core
+     `88ab2f5ea5`):** the `chameneos_redux` hang — AND the single-domain `spectralnorm`/`LU_decomposition`
+     perf-size livelock the quick panel later surfaced — were the **same** bug: an **orphaned-SATB-packet
+     lost-wakeup**. `schedule_concurrent_packets` disabled+closed the `Concurrent` bucket while marking was
+     still active, so a resumed mutator's late SATB `add()` got no worker wakeup and `is_drained()`
+     short-circuited true → FinalMark never fired → mutators parked forever. Fix: keep the bucket enabled+open
+     while marking is in progress (concurrent-gated; non-concurrent plans byte-identical). Diagnosed on godel
+     (the live hang is rarer than the panel estimate), integrated + validated locally: the panel's reliable
+     repro — `spectralnorm 3000`/`LU 900` under ConcurrentImmix, which **reliably HUNG** at both worker counts
+     — now runs **48/48 clean**. Evidence in NOTES (2026-06-26).
 
 9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
