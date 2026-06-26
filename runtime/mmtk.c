@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>   /* usleep — caml_mmtk_quiesce_running_domains poll wait */
 
 #include "caml/config.h"
 
@@ -725,6 +726,37 @@ void caml_mmtk_cont_snapshot(value cont)
 
 /* ── Stop-the-world ──────────────────────────────────────────────────── */
 
+/* Global epoch for the ragged safepoint (caml_mmtk_quiesce_running_domains).
+   Bumped (release) by a quiescing writer; each domain stores the current value
+   into its own caml_domain_state.mmtk_seen_quiesce_epoch at every safepoint
+   (caml_mmtk_quiesce_ack, called from caml_poll_gc_work) with no lock on the
+   hot path. The writer waits until every domain RUNNING at call time has acked
+   an epoch >= its bump (or left RUNNING), which proves each in-flight lock-free
+   reader has passed a safepoint and dropped any pre-bump transient pointer.
+   DORMANT: no callers yet (excise Phase 2 step 1 adds only the primitive). */
+static atomic_uintnat caml_mmtk_quiesce_epoch;
+
+/* Max domains the quiesce snapshot buffer holds. Domains are capped by
+   caml_params->max_domains (default 128); 256 is a safe ceiling that keeps the
+   snapshot on the C stack. mmtk_ocaml_snapshot_running truncates to this. */
+#define CAML_MMTK_QUIESCE_MAX_DOMAINS 256
+/* Poll interval while waiting for acks (microseconds). Rare op; a short sleep
+   avoids busy-spinning a core during the (typically sub-ms) grace period. */
+#define CAML_MMTK_QUIESCE_POLL_US 50
+
+/* Hot-path ack: record that this domain has reached a safepoint. Plain atomic
+   store, no STW lock. Called from caml_poll_gc_work (both the TLAB and bytecode
+   paths) right where the domain self-clears its young_limit poison, so a
+   poisoned domain that trapped to the safepoint records its passage in the same
+   place it un-poisons. Release-ordered so a reader's prior loads of the (now
+   stale) shared state are ordered before the ack the writer observes. No-op
+   cost when no quiesce is in flight (a single store of the global epoch). */
+void caml_mmtk_quiesce_ack(caml_domain_state *d)
+{
+  atomic_store_release(&d->mmtk_seen_quiesce_epoch,
+                       atomic_load_acquire(&caml_mmtk_quiesce_epoch));
+}
+
 /* Park this domain for an MMTk collection, cooperating with OCaml's own
    stop-the-world.
 
@@ -851,6 +883,87 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
      caml_mmtk_run_custom_finalizers) at its next safepoint. */
   if (caml_mmtk_weak_refs) caml_set_action_pending(d);
   caml_reset_young_limit(d);
+}
+
+/* Ragged safepoint (excise Phase 2, step 1): block the caller until every OCaml
+   domain that was RUNNING OCaml at call time has passed one safepoint OR left
+   the RUNNING set (parked / blocked / terminated). No global STW barrier, no GC.
+   The two future callers (frametables RCU retire; runtime_events ring teardown)
+   publish new state, then call this to drain all in-flight lock-free readers of
+   the OLD state before freeing it. DORMANT: defined here, no callers yet.
+
+   Protocol:
+     1. epoch = ++caml_mmtk_quiesce_epoch (release). Domains store this into
+        their own mmtk_seen_quiesce_epoch at each safepoint (caml_mmtk_quiesce_ack).
+     2. The caller is itself RUNNING and holds its domain lock; if it spun here
+        it could deadlock a concurrent GC (which waits for running.is_empty()).
+        So it leaves RUNNING for the wait — caml_mmtk_enter_blocking(self) — and
+        re-enters cooperatively afterwards (caml_mmtk_become_running(self)), the
+        exact handoff a C blocking section uses. As the WRITER it reads nothing of
+        the old state between publish and free, so dropping RUNNING is reader-safe.
+     3. Snapshot the RUNNING set NOW (mmtk_ocaml_snapshot_running). Domains in it
+        are the in-flight readers we must wait for. (A domain that re-enters
+        RUNNING after the bump via try_mark_running was STOPPED during our publish,
+        so it cannot hold a pre-bump pointer — and it is NOT in our snapshot, so it
+        never makes us hang.)
+     4. Poison every snapshot domain (caml_mmtk_interrupt) so a running one traps
+        to its next safepoint and acks. A domain self-clears its OWN young_limit at
+        that safepoint (caml_reset_young_limit), so we never call
+        caml_mmtk_uninterrupt — which would clobber a CONCURRENT GC's poison.
+     5. Wait until, for every snapshot domain, EITHER mmtk_seen_quiesce_epoch >=
+        epoch (it acked) OR it is no longer RUNNING (mmtk_ocaml_is_running == 0:
+        parked / blocked / terminated holds no transient reader pointer). Poll on
+        a short sleep, re-poisoning stragglers each round (a domain may have
+        cleared its poison at an unrelated safepoint before acking our epoch).
+
+   Latency caveat: a domain spinning in a tight allocation-free, poll-free loop
+   never reaches a safepoint; the young_limit poison only bites at the next
+   allocation or explicit poll. OCaml's bytecode loop polls and native back-edges
+   insert poll points, so ordinary code reaches a safepoint promptly, but a
+   hand-rolled C busy-loop with no caml_process_pending_actions is a (pre-existing,
+   same as GC STW) bounded-latency exception.
+
+   Re-entrancy: the epoch is a single global monotone counter, so two concurrent
+   quiescers are individually correct (each waits for acks >= its OWN bump, and a
+   later bump only makes earlier waiters' predicate easier). The future callers
+   still serialise themselves with their own retire/teardown lock; this primitive
+   does not require it for safety. */
+void caml_mmtk_quiesce_running_domains(void)
+{
+  uintnat self = (uintnat) Caml_state;
+  uintnat epoch = atomic_fetch_add(&caml_mmtk_quiesce_epoch, 1) + 1;
+
+  /* Leave RUNNING for the wait so a concurrent GC's running.is_empty() barrier
+     does not wait on us (we hold our domain lock and are RUNNING). The backup
+     thread covers our OCaml-STW participation while we are stopped. */
+  caml_mmtk_enter_blocking(self);
+
+  /* Snapshot the domains RUNNING right now — the in-flight readers to drain.
+     Self was just removed from RUNNING by enter_blocking, so it is not awaited. */
+  uintnat snap[CAML_MMTK_QUIESCE_MAX_DOMAINS];
+  size_t n = mmtk_ocaml_snapshot_running(snap, CAML_MMTK_QUIESCE_MAX_DOMAINS);
+
+  for (;;) {
+    int all_done = 1;
+    for (size_t i = 0; i < n; i++) {
+      caml_domain_state *d = (caml_domain_state *) snap[i];
+      if (atomic_load_acquire(&d->mmtk_seen_quiesce_epoch) >= epoch)
+        continue;                       /* acked a safepoint at/after our bump */
+      if (!mmtk_ocaml_is_running(snap[i]))
+        continue;                       /* parked/blocked/gone: holds no reader */
+      /* Still RUNNING and not yet acked — poison so it traps to a safepoint. */
+      caml_mmtk_interrupt(snap[i]);
+      all_done = 0;
+    }
+    if (all_done) break;
+    usleep(CAML_MMTK_QUIESCE_POLL_US);
+  }
+
+  /* Re-enter OCaml as a RUNNING participant (parks cooperatively if a GC is now
+     active). We do NOT un-poison anyone: each target self-cleared its own
+     young_limit at its safepoint, and a global uninterrupt would clobber a
+     concurrent GC's poison. */
+  caml_mmtk_become_running(self);
 }
 
 /* A domain is entering / leaving a C blocking section. While blocking it is

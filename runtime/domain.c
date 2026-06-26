@@ -1910,6 +1910,9 @@ void caml_poll_gc_work(void)
     d->requested_minor_gc = 0;
     d->requested_major_slice = 0;
     d->requested_global_major_slice = 0;
+    /* Ragged-safepoint ack (caml_mmtk_quiesce_running_domains): record that this
+       domain has passed a safepoint. Plain atomic store, no lock. */
+    caml_mmtk_quiesce_ack(d);
     caml_reset_young_limit(d);
     return;
   }
@@ -1973,6 +1976,9 @@ void caml_poll_gc_work(void)
     d->requested_global_major_slice = 0;
   }
 
+  /* Ragged-safepoint ack (caml_mmtk_quiesce_running_domains): record that this
+     domain has passed a safepoint. Plain atomic store, no lock. */
+  caml_mmtk_quiesce_ack(d);
   caml_reset_young_limit(d);
 }
 

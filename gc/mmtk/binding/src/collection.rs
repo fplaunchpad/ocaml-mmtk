@@ -186,6 +186,41 @@ pub extern "C" fn mmtk_ocaml_wait_collection_done() {
     }
 }
 
+/// Ragged safepoint (excise Phase 2, step 1) — snapshot the set of domains
+/// currently RUNNING OCaml into `buf` (caller-provided, `len` entries). Returns
+/// the number written. If more than `len` domains are RUNNING the result is
+/// truncated to `len` (the C caller sizes `buf` at >= caml_params->max_domains,
+/// so truncation does not happen in practice). One lock acquisition; the
+/// returned addresses are the in-flight lock-free readers a quiescing writer
+/// must wait to drain. DORMANT: only caml_mmtk_quiesce_running_domains calls it,
+/// which has no callers yet.
+///
+/// # Safety
+/// `buf` must point to `len` writable `usize` slots.
+#[no_mangle]
+pub unsafe extern "C" fn mmtk_ocaml_snapshot_running(buf: *mut usize, len: usize) -> usize {
+    let s = STW.lock().unwrap();
+    let mut n = 0;
+    for &addr in s.running.iter() {
+        if n >= len {
+            break;
+        }
+        *buf.add(n) = addr;
+        n += 1;
+    }
+    n
+}
+
+/// Ragged safepoint — true iff domain `addr` is currently RUNNING OCaml. A
+/// quiescing writer uses this to drop a snapshot domain that has since parked /
+/// blocked / terminated (it left the RUNNING set, so it holds no pre-bump
+/// transient reader pointer). One lock acquisition. DORMANT (see above).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_is_running(addr: usize) -> i32 {
+    let s = STW.lock().unwrap();
+    s.running.contains(&addr) as i32
+}
+
 /// Atomically try to transition domain `addr` to RUNNING. Fails (returns 0) iff a
 /// collection is currently active — in which case the caller must park
 /// cooperatively (release the domain lock, let its backup thread service OCaml's

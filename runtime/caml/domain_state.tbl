@@ -210,5 +210,15 @@ DOMAIN_STATE(void*, mmtk_mutator)
    caml_mmtk_domain_init). Appended near the end so it does not shift the
    offsets of fields baked into native codegen (young_ptr/young_limit/...). */
 
+DOMAIN_STATE(atomic_uintnat, mmtk_seen_quiesce_epoch)
+/* MMTk ragged-safepoint ack (caml_mmtk_quiesce_running_domains). The domain
+   stores the current global caml_mmtk_quiesce_epoch here each time it passes a
+   safepoint (caml_poll_gc_work), with NO lock on the hot path. A quiescing
+   writer bumps the global epoch then waits until every domain that was RUNNING
+   at call time has either acked an epoch >= the bump or left the RUNNING set —
+   proving every in-flight lock-free reader has passed a safepoint and dropped
+   any pre-bump transient pointer. Like mmtk_mutator, kept just before
+   extra_params so it doesn't shift native-codegen field offsets. */
+
 DOMAIN_STATE(extra_params_area, extra_params)
 /* This member must occur last, because it is an array, not a scalar */

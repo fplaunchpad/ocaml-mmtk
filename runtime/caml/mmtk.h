@@ -178,6 +178,17 @@ extern void caml_mmtk_cont_snapshot(value cont);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 
+/* Ragged safepoint (excise Phase 2, step 1). caml_mmtk_quiesce_ack records, at a
+ * safepoint, that this domain has passed one (a plain atomic store of the global
+ * quiesce epoch into the domain's mmtk_seen_quiesce_epoch; no lock — called from
+ * caml_poll_gc_work). caml_mmtk_quiesce_running_domains blocks the caller until
+ * every domain RUNNING OCaml at call time has either acked a safepoint or left
+ * the RUNNING set, WITHOUT a global STW barrier and WITHOUT a GC — so a writer
+ * that just published new state can drain all in-flight lock-free readers of the
+ * OLD state before freeing it. DORMANT: no callers yet. See runtime/mmtk.c. */
+extern void caml_mmtk_quiesce_ack(caml_domain_state *d);
+extern void caml_mmtk_quiesce_running_domains(void);
+
 /* Blocking-section participation: a domain in a C blocking section is safe for
  * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking are called
  * from caml_enter/leave_blocking_section with the domain's caml_domain_state

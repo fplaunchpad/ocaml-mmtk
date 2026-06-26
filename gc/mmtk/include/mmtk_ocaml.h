@@ -102,6 +102,14 @@ void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
     valid until any collection that snapshotted the registry has finished. */
 void mmtk_ocaml_wait_collection_done(void);
 
+/** Ragged safepoint (excise Phase 2, step 1). Snapshot the addresses of domains
+    currently RUNNING OCaml into buf[0..len); returns the count written
+    (truncated to len). mmtk_ocaml_is_running reports whether one domain is still
+    RUNNING. Used by caml_mmtk_quiesce_running_domains to wait for in-flight
+    lock-free readers to drain. DORMANT: no callers yet. */
+size_t mmtk_ocaml_snapshot_running(uintptr_t* buf, size_t len);
+int mmtk_ocaml_is_running(uintptr_t addr);
+
 /* ── Write barrier (generational plans) ─────────────────────────────── */
 
 /**
