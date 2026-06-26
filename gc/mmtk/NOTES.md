@@ -44,6 +44,23 @@ once that counter has advanced (a full MMTk collection elapsed). This drains BOT
 reachable, under `mutex`) stays, with the removed descriptors' free also deferred to the grace period. (The
 agent's earlier quiesce-based step-3 design is superseded — it had the two deadlocks below.)
 
+**Concrete design (verified, edits ready):** split opaque `struct caml_frame_descrs { int mask; frame_descr**
+descriptors; }` (immutable snapshot) from a writer-side `struct frame_descrs_state { num_descr; frametables;
+zombies; mutex; writer_lock; }`; a published `_Atomic(struct frametable_version*) current_frametable`, where
+`frametable_version { caml_frame_descrs table; caml_frametable_list *retired; atomic_uintnat free_prev_after_cycle;
+frametable_version *prev; }`. `install_frametables` (under `writer_lock`): detach zombies → `build_frame_descrs`
+(fresh array) → `ft->prev = old`; `ft->free_prev_after_cycle = mmtk_ocaml_gc_count()`; `atomic_store_release(
+&current_frametable, ft)`. `caml_get_frame_descrs` acquire-loads `current_frametable`, calls `reclaim_retired(ft)`
+(frees the whole `ft->prev` CHAIN — #11673 fix, not a single prev — once `ft->free_prev_after_cycle < gc_count()`,
+under `mutex`, common-case lock-free when tag==`No_need_to_free`), returns `&ft->table`. `caml_find_frame_descr`
+unchanged. **CORRECTION to the agent's final form:** do the reclaim ONLY in `caml_get_frame_descrs` (Dolan's exact
+placement) — its proposed install-time `reclaim_retired(ft)` is a no-op/wrong anchor (ft's tag == current count,
+so `tag < gc_count()` is never true right after publish); dropping it is simpler + correct (caml_get_frame_descrs
+runs every GC root scan, so retired chains free within ~1 GC anyway). Startup publishes single-domain (no reclaim);
+OOM raises before any publish. **Validate:** lib-dynlink-domains native (concurrent loadfile + busy domains) under
+GenImmix + sanity small-heap across Immix plans (sanity catches a premature free as `Invalid reference`);
+par_binarytrees d1/d8 golden (native frametable path); A/B dynlink failures vs `5.5+mmtk`.
+
 **⚠ MUST-FIX COUNTER TRAP:** `caml_major_cycles_completed` is **DEAD under MMTk** — initialised 0 in
 `major_gc.c:55`, only ever *read* (`sys.c:175`); the stock major-GC machinery that bumped it is bypassed. The
 fork's `#include "caml/major_gc.h" /* for caml_major_cycles_completed */` (`frame_descriptors.c:23`) is a vestige.
