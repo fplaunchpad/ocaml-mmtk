@@ -5,6 +5,49 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## BUG (GH#15): multi-domain GenImmix deadlock under infinite-alloc domains — PRE-EXISTING (A/B'd to 6dd121c2ea) (2026-06-26)
+
+Found while validating excise Phase 2 step 2 (a multi-domain runtime_events stress). **Reproduces on the
+DEFAULT plan (GenImmix), bytecode**, and is **NOT** caused by the STW excision — see A/B below.
+
+**Repro** (`scratchpad/plain_stress.ml`, macOS, no runtime_events needed):
+```ocaml
+let () =
+  let _ds = Array.init 4 (fun _ -> Domain.spawn (fun () ->
+    let r = ref [] in
+    while true do r := (Array.make 10 0) :: !r; if List.length !r > 2000 then r := [] done)) in
+  let r = ref [] in
+  for _ = 1 to 3_000_000 do r := (Array.make 5 0) :: !r; if List.length !r > 2000 then r := [] done;
+  ignore (Sys.opaque_identity r); exit 0
+```
+`MMTK_PLAN=GenImmix ./runtime/ocamlrun plain_stress.byte` hangs (3/3, perl-alarm 25s). 4 never-joined domains
+in tight infinite alloc loops + a busy main. Native (`.opt`) did NOT hang in ~5 runs — bytecode-specific or
+timing-sensitive.
+
+**Sample (`sample <pid>`, 22 threads, ALL blocked — hard deadlock, no thread runs):**
+- 13 threads in `caml_mmtk_park` → `mmtk_ocaml_stw_park` (collection.rs:172) → `__psynch_cvwait` — mutator
+  domains + their backup threads parked waiting `gc_active==false`.
+- GC worker threads in `mmtk::scheduler::worker_monitor::WorkerMonitor::park_and_wait` (worker_monitor.rs:221)
+  — **idle, no work** (a few caught mid `ProcessEdgesWork::do_work`/`PlanScanObjects`/`visit_slot` tracing.rs:137,
+  i.e. marking had been happening then drained).
+- backup threads in `caml_plat_wait` (unix.c:686).
+- So: a collection is in progress (every mutator parked on it), the markers have run out of work and parked,
+  but the coordinator never declares the GC done → `resume_mutators` never fires → everyone waits forever.
+  Classic **marker-vs-mutator / lost-progress livelock**, but on a STOP-THE-WORLD plan (GenImmix), distinct
+  from the ConcurrentImmix chameneos hang (#5) and the relaxed STW assert (GH#14).
+
+**A/B — pre-existing, not the excision:** checked out the GC/STW files at pre-excision mainline `6dd121c2ea`
+(before Phase 0/1/2), rebuilt the bytecode runtime, re-ran `plain_stress.byte` → hangs IDENTICALLY (3/3). And
+the repro uses no runtime_events at all. So the excision (Phase 0/1/2) did not introduce it.
+
+**Root cause: TODO** (deferred — separate from the excision). Hypothesis: a collection where all mutators park
+but the scheduler's "all workers parked + no work ⇒ GC done" condition is missed (lost wakeup / a work packet
+that never gets added or a worker that parks before the coordinator observes the last unit), so the cycle never
+ends. Relates to the multi-domain-deadlock class (#5/#6); needs Linux `rr`/`bpftrace` to pin the missed-progress
+edge. Filed as GH#15 (https://github.com/fplaunchpad/ocaml-mmtk/issues/15).
+
+---
+
 ## Excise OCaml STW — PHASE 2 design (re-home frametables + runtime_events; the legitimate non-GC STW users) (2026-06-26)
 
 Agent-designed + sibling-validated; not yet implemented. The remaining `caml_try_run_on_all_domains` call sites
