@@ -19,15 +19,38 @@ and surfaced a bug in the step-1 primitive.
   **replaced** the cycle-RCU with an all-domains **STW** for the rebuild. `trunk` still uses the STW. The
   fork's stale `#include "caml/major_gc.h" /* for caml_major_cycles_completed */` is a vestige of the old RCU.
 
+**Why upstream used STW (PR archaeology, confirms the redesign):** the multicore STW-ification was **PR #11980**
+(`frametables-in-stw`, Scherer) + #11935 (batch dynlink) — driven by a **quadratic natdynlink slowdown** that
+regressed Coq/Frama-C (perf, NOT correctness). Scherer explicitly weighed 3 options — STW vs a concurrent
+hashtable vs a reader-writer lock — and picked STW **pragmatically/transitorily** ("too lazy", "a better-scaling
+approach could be proposed later, much easier on top of this PR"). Dolan's objection to the rw-lock: reader
+contention — the reader path (every GC root scan / backtrace / signal) **must stay sync-free**. So a better-
+scaling replacement was *explicitly invited as future work*; cycle-RCU is exactly that. The "valid until next GC"
+contract is **enforced by reader discipline** (each reader re-fetches `caml_get_frame_descrs()` at the top of its
+walk and never holds it across a safepoint: the GC-root reader runs *inside* the GC; backtrace readers are
+`CAMLnoalloc` straight-line) → one GC cycle is a sound grace period. "Delay-until-next-registration"
+(`aa6d3be9e9`) is safe *only because of the STW* — remove the STW and it no longer drains readers, so we MUST
+substitute a real grace period.
+
 **Step-3 plan (REVISED):** replace the frametable STW with **GC-cycle RCU, not the step-1 quiesce.** Publish a
-fresh immutable `{mask, descriptors}` snapshot via `atomic_store_release`; tag the retired old snapshot with the
-current major cycle (`caml_major_cycles_completed`); free it only once a full MMTk major cycle has elapsed
-(checked lazily at the next registration). This drains BOTH mutator stack-walkers (the "valid until next GC"
-contract — they re-fetch every GC) AND ConcurrentImmix GC workers (the cycle completes), with **no quiesce, no
-`wait_collection_done`, and no new deadlock**. It is Dolan's original design re-keyed on the MMTk cycle. The
-opaque `caml_frame_descrs` (header forward-decl only) makes the struct split internal; the zombies/unregister
-path (custom-block-finalizer-reachable, under `mutex`) stays. (The agent's earlier quiesce-based step-3 design
-is superseded — it had the two deadlocks below.)
+fresh immutable `{mask, descriptors}` snapshot via `atomic_store_release` (bundle mask+descriptors so they swap
+atomically — never a new mask vs old descriptors); a writer-lock serialises installers; tag the retired old
+snapshot with **`mmtk_ocaml_gc_count()`** and free it lazily (at the next registration / in `caml_get_frame_descrs`)
+once that counter has advanced (a full MMTk collection elapsed). This drains BOTH mutator stack-walkers (the
+"valid until next GC" contract) AND ConcurrentImmix GC workers (the cycle completes), with **no quiesce, no
+`wait_collection_done`, and no new deadlock**. Dolan's original 2018 design (`frametable_version` +
+`free_prev_after_cycle`, `git show e91cea84e30`) re-keyed onto the MMTk cycle. The opaque `caml_frame_descrs`
+(header forward-decl only) makes the struct split internal; the zombies/unregister path (custom-block-finalizer-
+reachable, under `mutex`) stays, with the removed descriptors' free also deferred to the grace period. (The
+agent's earlier quiesce-based step-3 design is superseded — it had the two deadlocks below.)
+
+**⚠ MUST-FIX COUNTER TRAP:** `caml_major_cycles_completed` is **DEAD under MMTk** — initialised 0 in
+`major_gc.c:55`, only ever *read* (`sys.c:175`); the stock major-GC machinery that bumped it is bypassed. The
+fork's `#include "caml/major_gc.h" /* for caml_major_cycles_completed */` (`frame_descriptors.c:23`) is a vestige.
+Keying the retire on it would free the old table prematurely/never. **Use `mmtk_ocaml_gc_count()`**
+(`collection.rs:324`, `+1` per `resume_mutators` = once per MMTk collection; surfaced via `caml_mmtk_gc_stats`,
+`mmtk.c:631`). It counts every MMTk collection (minor+major) — conservative + fine for a grace period (Dolan even
+noted a minor GC suffices).
 
 **⚠ LATENT BUG in the step-1 quiesce primitive (`caml_mmtk_quiesce_running_domains`, merged):** its wait leaves
 RUNNING via the `caml_mmtk_enter_blocking` HOOK only (marks STOPPED in MMTk's RUNNING set) — it does NOT do the
