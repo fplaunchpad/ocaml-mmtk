@@ -1032,3 +1032,18 @@ void caml_mmtk_domain_terminate(caml_domain_state *dom)
   mmtk_ocaml_wait_collection_done();
   dom->mmtk_mutator = NULL;
 }
+
+/* Deregister a domain WITHOUT waiting for an in-flight collection — used by
+   caml_stop_all_domains (excise Phase 3b) when the main domain forcibly cancels
+   running peers at process exit. Unlike caml_mmtk_domain_terminate, the caller
+   does NOT tear the peer's stack/roots down (it was pthread_cancel'd in an
+   unknown state and left in memory), so there is nothing to protect with a
+   collection-done wait; we only need to remove the dead peer from MMTk's mutator
+   registry + RUNNING set so a stop_all_mutators stops awaiting a thread that will
+   never reach a safepoint again. Idempotent / no-op if not bound. */
+void caml_mmtk_deregister_domain(caml_domain_state *dom)
+{
+  if (dom->mmtk_mutator == NULL) return;
+  mmtk_ocaml_deregister_domain((uintptr_t) dom);
+  dom->mmtk_mutator = NULL;
+}

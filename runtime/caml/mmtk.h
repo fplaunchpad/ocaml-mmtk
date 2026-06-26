@@ -200,6 +200,10 @@ extern void caml_mmtk_quiesce_running_domains(void);
 extern void caml_mmtk_enter_blocking(uintnat dom);
 extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
+/* Deregister a force-cancelled peer (excise Phase 3b, caml_stop_all_domains) from
+ * MMTk's registry + RUNNING set, WITHOUT waiting for an in-flight collection (the
+ * peer's roots are not torn down, so there is nothing to protect). */
+extern void caml_mmtk_deregister_domain(caml_domain_state *dom);
 
 /* Collection-suppression counter. While the count is non-zero MMTk does not
  * trigger a collection (the binding's VMCollection::is_collection_enabled reads

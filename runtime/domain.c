@@ -2263,46 +2263,63 @@ void caml_domain_terminate(bool last)
     atomic_fetch_add(&caml_num_domains_running, -1);
 }
 
-/* Try and terminate the currently running domain.
-   This is only invoked when extra domains are left running while the
-   main one is terminating. In this case, we are not in a state where
-   we can safely release resources. The best we can do is cancel the
-   extra running threads. */
-static void stw_terminate_domain(caml_domain_state *domain, void *data,
-  int participating_count,
-  caml_domain_state **participating)
-{
-  if (!caml_plat_thread_equal(domain_self->tid, *(caml_plat_thread *)data)) {
-    if (caml_bt_is_self()) {
-      /* If this STW request is handled by the backup thread, the
-         domain thread is currently running C code. */
-      domain_self->domain_canceled = true;
-      (void)caml_plat_thread_cancel(domain_self->tid);
-      /* We are intentionally not waiting for the thread to terminate here,
-         and not decrementing the number of running domains either, since
-         we don't know the state of the various locks and condition
-         variables in this state. */
-      atomic_store_release(&domain_self->backup_thread_msg, BT_INIT);
-    } else {
-      /* Domain threads forced to exit here will not have a chance to
-         run caml_domain_terminate() on their own, so we need to ask
-         the backup thread to terminate here. */
-      terminate_backup_thread(domain_self);
-      caml_plat_unlock(&domain_self->domain_lock);
-      /* No particular memory resource cleanup is attempted here, for we
-         have no idea which state each domain is in. */
-    }
-    caml_plat_thread_exit();
-  }
-}
+/* Stop every domain other than the main one when the program exits with peers
+   still running (i.e. domains were never joined). This used to run a callback on
+   each domain via OCaml's all-domains STW (caml_try_run_on_all_domains +
+   stw_terminate_domain). excise Phase 3b removes that: MMTk is the sole STW
+   rendezvous, so caml_stop_all_domains no longer joins OCaml's STW. Instead the
+   main domain iterates the running peers itself and forcibly cancels each one.
 
+   We are not in a state where we can safely release a peer's resources: a
+   cancelled peer may have been anywhere (mid-allocation, holding its domain lock,
+   inside C). So, exactly as before (PR #12964), we do NOT touch a peer's heap or
+   roots and do NOT wait for it to terminate; the best we can do is cancel it.
+   The one thing we MUST do for each cancelled peer is deregister it from MMTk:
+   a pthread_cancel'd peer will never reach a GC safepoint again, so if it stayed
+   in MMTk's mutator registry / RUNNING set, a stop_all_mutators in flight (or the
+   one a final collection starts) would block forever on running.is_empty(). */
 void caml_stop_all_domains(void)
 {
+  /* Blocks any new domain spawn from here on (checked in caml_domain_spawn). */
   atomic_store_relaxed(&domains_exiting, 1);
 
-  caml_plat_thread myself = caml_plat_thread_self();
-  do {} while (!caml_try_run_on_all_domains(
-               &stw_terminate_domain, &myself, NULL));
+  /* all_domains_lock guards stw_domains membership and the interruptor.running
+     flag transitions, so under it the active region [0, active_domains) is
+     exactly the set of domains currently running OCaml. We never take an MMTk
+     lock -> all_domains_lock anywhere, and the MMTk deregister path never reaches
+     back into all_domains_lock (stop_all_mutators takes only MMTk locks and calls
+     into C solely via caml_mmtk_interrupt/uninterrupt, pure atomic stores), so
+     holding all_domains_lock here while deregistering cannot invert lock order. */
+  caml_plat_lock_blocking(&all_domains_lock);
+  for (int i = 0; i < stw_domains.active_domains; i++) {
+    dom_internal *d = stw_domains.domains[i];
+    if (d == domain_self)
+      continue;
+
+    /* Forcibly cancel the peer. We run no callback on it (no caml_bt_is_self
+       distinction): the cancel request comes from the main domain. */
+    (void)caml_plat_thread_cancel(d->tid);
+
+    /* Load-bearing: drop the peer from MMTk's mutator registry AND RUNNING set
+       BEFORE we stop waiting on it, so a collection's stop_all_mutators can reach
+       running.is_empty() instead of hanging on a thread that will never hit a
+       safepoint again. Deregister-only (no collection-done wait): we do not tear
+       the peer's roots down, so there is nothing to protect. */
+    caml_mmtk_deregister_domain(d->state);
+
+    /* Ask the peer's backup thread to terminate (safe to call for another domain
+       from the main thread: the assert only requires the CALLER not be a backup
+       thread, which the main domain is not). caml_free_domains() spins on
+       backup_thread_running(dom) for every slot, so this must fire or it hangs. */
+    terminate_backup_thread(d);
+
+    /* The peer was cancelled in an unknown state, so its domain_lock may be held
+       or half-released: mark it so caml_free_domains() does NOT free that lock. We
+       intentionally do not wait for the peer to terminate, do not decrement
+       caml_num_domains_running, and do not unlock its domain_lock. */
+    d->domain_canceled = true;
+  }
+  caml_plat_unlock(&all_domains_lock);
 
   terminate_backup_thread(domain_self);
   caml_plat_unlock(&domain_self->domain_lock);
