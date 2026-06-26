@@ -167,10 +167,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      **adaptive survival-rate (~10%) controller with a per-GC-cost amortization floor** (not
      heap-proportional, not a fixed cap) — future work, isolated as an opt-in *mode* (a
      trigger/policy feature, not a new plan); keep a frozen baseline config. → NOTES 2026-06-24.
-   - **GC worker pool — FIXED 2026-06-24.** The `nproc` default made every worker park/wake on every
-     collection (82% of GC-worker CPU in futex contention); defaulting to **1 worker** is 1.37× faster on
-     single-domain minor GC. Intended policy "workers = running domains" is a gc/mmtk-core-fork follow-up
-     (the pool is fixed at init). Also pending: **#G1** (the binding does full major-root scanning every
+   - **GC worker pool — default is `nproc` (force-1 tried 2026-06-24, then REVERTED).** The `nproc` default
+     makes every worker park/wake on every collection (~82% of GC-worker CPU in futex contention), and forcing
+     **1 worker** is ~1.37× faster on single-domain minor GC — but that was reverted as a band-aid: worker
+     count does **not** fix multi-domain throughput scaling (STW-bound, not pool-bound), so the default stays
+     mmtk-core's `nproc` (`api.rs:147`). Set `MMTK_THREADS=1` yourself for the lowest-overhead single-domain
+     runs. Intended policy "workers = running domains" is a gc/mmtk-core-fork follow-up (the pool is fixed at
+     init). Also pending: **#G1** (the binding does full major-root scanning every
      minor — narrow it to young-only + recent-frames; machinery already in the C runtime).
    - Earlier first-round levers (StickyImmix closes much of the gap). → full ranked backlog in
      `PERFORMANCE.md` Appendix A; NOTES `Workstreams archive`.
@@ -296,16 +299,14 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    mmtk `sanity` 24/24 clean. Fixing Bug B unmasked the **pre-existing** #31/GH#3 `Domain.join` result-UAF
    (~9% on 28-core joinstorm) — equally on mainline, so Phase 3 is a strict improvement; merge shipped, #31
    tracked separately (GH#3 reopened; harden the result-handoff for high-core load). → NOTES 2026-06-26.
-   3 (high) retire the rendezvous family together, MMTk STW sole, backup
-   thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
-   barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
-   continuation-scan hang. **Gap-close (2026-06-25): plan verdict unchanged, no blocker** — there is **no MMTk
-   teardown at process exit** (no `harness_end` race possible), and the driver sub-parts are deletable except
-   `all_domains_lock`+`stw_domains` (keep as a **plain spawn/terminate mutex**, not a barrier) and the
-   `young_limit`-poison (keep — MMTk's STW reuses it). **+1 NEW Phase-3 item:** the multi-domain exit caller
-   `caml_stop_all_domains`→`stw_terminate_domain` must `remove_running`+deregister each cancelled peer when
-   re-homed, else the sole rendezvous hangs on a dead thread; add an **unjoined-domains-at-exit** test (absent
-   today). → NOTES 2026-06-25; RQ10 pole-A; #20.
+   Phase 3 **structurally eliminated the bug#3c/dual-STW deadlock class** (no second barrier for a
+   terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
+   continuation-scan hang. Kept (as plain spawn/terminate state, not barriers): `all_domains_lock` +
+   `stw_domains` (now a plain spawn/terminate mutex) and the `young_limit`-poison (MMTk's STW reuses it);
+   the backup thread is systhreads-entangled, so its deletion is deferred to **#20**. The multi-domain exit
+   caller (`caml_stop_all_domains`) now `remove_running`+deregisters each cancelled peer so the sole
+   rendezvous never hangs on a dead thread (the unjoined-domains-at-exit path shipped in Phase 3b).
+   → NOTES 2026-06-26; RQ10 pole-A; #20.
    **Not a local cleanup — it is an architecture decision** (which generation the framework owns) that must
    be **reconciled structurally with how other runtimes do minor collection** (OCaml ParMinor, GHC local
    heaps, Erlang per-process heaps, the Julia/CRuby MMTk bindings), and weighed against the **inverse**

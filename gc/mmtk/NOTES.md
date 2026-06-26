@@ -1800,6 +1800,11 @@ small heap.
 
 *2026-06-24*
 
+> **UPDATE — this was REVERTED.** The force-1 default was a band-aid: worker count does **not** fix
+> multi-domain throughput scaling (STW-bound, not pool-bound), so the default was reverted to mmtk-core's
+> own `nproc` (`api.rs:147`). Set `MMTK_THREADS=1` yourself for the lowest-overhead single-domain runs. The
+> profile below (the single-domain park/wake tax) still holds; only the *default* changed back.
+
 The turing perf profile (`~/perfgc-minor.md`) showed the "~1.2 ms minor-GC floor" was two costs:
 (1) a **worker-handshake tax linear in `MMTK_THREADS`** — at the nproc default, every worker parks/wakes on
 EVERY collection contending on one `WorkerMonitor` mutex+condvar; perf attributes **82% of GC-worker CPU to

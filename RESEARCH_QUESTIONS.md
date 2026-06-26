@@ -270,12 +270,15 @@ max STW pause 3–4×** (binarytrees 76→20 ms; total STW 760→205 ms; ≈88% 
 moved off the stop-the-world). The residual pause is **root-scan-bound** — STW in both vanilla and MMTk
 (InitialMark scans roots; FinalMark uses `new_no_scan_roots`) — so the next latency frontier is concurrent/lazy
 root scanning, not marking. This **retires the perf worry behind the UNLOG-bit barrier gate (#30)**: the barrier
-is not a hot path. Caveat for any production low-latency claim: the multidomain init-time `Domain.spawn`
-deadlock (bug #3c / GH#2) must be fixed first. Detail: NOTES 2026-06-24, `~/concurrent-immix-native-perf.md`.
+is not a hot path. Caveat for any production low-latency claim: the bug#3c-class multidomain deadlock is
+**fixed** (and structurally eliminated by the Phase-3 one-STW excision, ROADMAP #18), but two residuals
+remain — the separate ConcurrentImmix `chameneos_redux` continuation-scan hang (GH#14 remnant, still open)
+and the `Domain.join` result-UAF (#31/GH#3) that the Phase-3 excision unmasked under high core load. Detail:
+NOTES 2026-06-24, `~/concurrent-immix-native-perf.md`.
 
 ### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest research risk; precursor to RQ1)*
 
-**The platform.** Finish M9, then ROADMAP #15 wires the rest of MMTk's plans cheaply — *one language,
+**The platform.** M9 is done, and ROADMAP #15 wired the rest of MMTk's plans cheaply — *one language,
 one runtime, one set of workloads, N collectors* (Immix, GenImmix, StickyImmix, MarkSweep, SemiSpace,
 GenCopy, MarkCompact, Compressor, ConcurrentImmix). This is *Myths and Realities* / *Distilling the Real
 Cost* methodology applied to a language family those studies never covered.
@@ -578,16 +581,21 @@ MPLR/ISMM.
 
 ### RQ10 — What is the right minor-collection architecture for OCaml-on-MMTk? Keep stock's scalable minor, or make MMTk's STW the sole rendezvous? *(architecture; motivated by the multi-domain anti-scaling finding)*
 
-**Hook (the empirical trigger).** The 2026-06 scalability study (`SCALABILITY.md`) found the fork's default
-(GenImmix) *anti-scales* across domains on allocation-heavy parallel work: vanilla OCaml 5.5 speeds up
-~3.9× at 8 domains where the fork gets *slower* (S(8) ≈ 0.64), and on a 56-core box the generational plans
-**cliff** (GenImmix times out past 16 domains). The mechanism is **not** GC-worker count and **not** the
-per-terminate forced GC; it is that **every MMTk collection is an all-domains stop-the-world whose
-per-collection cost grows with domain count**, and enlarging the nursery (8→64 MiB, landed) lowers the
-whole curve but does not change its upward slope (S(8) stays 0.71 with 8× fewer collections). Decisively,
+**Hook (the empirical trigger).** The 2026-06 scalability study (`SCALABILITY.md`) found that the fork's
+default (GenImmix) is **mildly sublinear** across domains on allocation-heavy parallel work — *not* the
+dramatic "anti-scaling" the first runs reported. On a clean, core-pinned re-run (turing 28-core,
+`MMTK_THREADS=domains`, `par_binarytrees` d21) GenImmix-default is **S(8)=1.23** (StickyImmix 1.36,
+GenImmix-256 MiB 1.59), and `par_matmul` scales as well as vanilla (GenImmix S(8)=4.71). The earlier
+"GenImmix gets *slower* (S(8)≈0.64) / cliffs past 16 domains" headline was a **measurement artifact** —
+`nproc` GC-worker oversubscription on shared cores plus the GH#14/GH#6 scheduler-assert deadlock (since
+removed, mmtk-core `ec2f5079f8`), not a structural STW-pause property. The residual is genuine but **mild**,
+and its *slope* (a d4→d8 regression that survives even a large nursery) is the per-collection all-domains
+STW cost: every MMTk collection stops all domains, and that pause grows with domain count. Decisively,
 **vanilla's minor GC is *also* all-domains STW yet scales** — its per-collection pause is cheap enough that
 parallel mutator work dominates. So the deficit is the per-minor-collection *cost* of MMTk's nursery, not
-the existence of a barrier — which makes the minor-collection **architecture** the open lever.
+the existence of a barrier. Two levers: **nursery size** (a *level* lever — GenImmix-256 MiB is ~20% faster
+but still regresses d4→d8) and **off-STW marking** (ConcurrentImmix — the *slope* fix). That makes the
+minor-collection **architecture** the open lever.
 
 **Two poles of the design space — and the question.**
 
@@ -611,14 +619,22 @@ the existence of a barrier — which makes the minor-collection **architecture**
   of RQ7's Bactrian (which *reimplements* OCaml's minor inside MMTk); here we keep the bespoke minor and
   make MMTk pluggable only underneath it.
 
-**Why (B) is a real research question, not a fallback.** It attacks the anti-scaling at its root (keep the
-minor collector that demonstrably scales), and it sharpens the MMTk-vs-vanilla comparison: with the *same*
-minor, the major collector is the only variable, isolating MMTk's major-heap design choices (complementary
-to RQ7's same-*everything* comparison). It also revives an architecture the bring-up actually passed
-through: the **vanilla-minor + MMTk-major intermediate was an implementation stage that was *superseded*
-(not merely deferred) by the all-MMTk M9 excision** (ROADMAP "Known caveats"). RQ10 revisits it for a
-*different* reason than the original bring-up convenience — **scalability** — and asks whether the all-MMTk
-decision should be partially reversed.
+**Why (B) was a real research question — and the go/no-go verdict: NO-GO (2026-06-25).** It attacks the
+anti-scaling at its root (keep the minor collector that demonstrably scales), and it sharpens the
+MMTk-vs-vanilla comparison: with the *same* minor, the major collector is the only variable, isolating
+MMTk's major-heap design choices (complementary to RQ7's same-*everything* comparison). It also revives an
+architecture the bring-up actually passed through: the **vanilla-minor + MMTk-major intermediate was an
+implementation stage that was *superseded* (not merely deferred) by the all-MMTk M9 excision** (ROADMAP
+"Known caveats"). **Feasibility + experiment (ROADMAP #18; `SCALABILITY.md` §11):** (B) is FEASIBLE against
+a non-generational Immix major with *zero* mmtk-core changes (mutator `Default` → mature Immix; promotion =
+`mmtk_ocaml_alloc(.., Default)`; barrier clean under Immix) and NOVEL (no MMTk binding keeps a VM nursery in
+front of an MMTk major) — but the go/no-go experiment **killed the motivation**: pole-B keeps the
+all-domains minor STW, so it does **not** fix the residual *slope* (the per-collection STW cost), and the
+clean re-run showed the residual is only mild and is addressed by **off-STW marking (ConcurrentImmix)**, not
+by pole-B. **→ Pole-B NO-GO.** Pole-A (MMTk's STW as the sole rendezvous) is what **Phase 3 actually
+implemented** (ROADMAP #18, merged 2026-06-26); the *different* reason RQ10 revisited the question —
+**scalability**, not bring-up convenience — leaves the open lever on the minor-collection *cost*, not its
+ownership.
 
 **The hard parts (what makes it research, and the cost).** (1) M9 *deleted* the stock minor-heap arena and
 the minor/major collectors; (B) requires re-introducing the minor heap as a nursery in front of MMTk's
