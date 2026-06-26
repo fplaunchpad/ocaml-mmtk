@@ -1685,6 +1685,26 @@ void caml_domain_terminate(bool last)
     /* No stock shared heap to orphan under always-on MMTk. */
     CAMLassert(marking_and_sweeping_done(domain_state));
 
+    /* GH#15 fix: leave MMTk's RUNNING set right HERE — after the flush body above
+       (which ran while RUNNING, so a concurrent collection waited for it and
+       scanned this domain's roots/minor-tables consistently) and right before the
+       UNBOUNDED block on all_domains_lock below. The all_domains_lock may be held
+       (transitively) by a spawning domain blocked on a terminating peer's
+       domain_lock, which that peer holds while waiting in mmtk_ocaml_wait_collection_done
+       for a collection that stop_all_mutators is wedging on US being RUNNING — the
+       4-way lock-order deadlock GH#15. Leaving RUNNING here breaks the cycle: the GC
+       stops awaiting us and finishes. We stay in the MUTATOR REGISTRY (roots still
+       scanned, and now stable — the flush is done, teardown hasn't started) until
+       caml_mmtk_domain_terminate deregisters us at the end. NB it must be HERE, not
+       at the top of caml_domain_terminate: marking STOPPED before the flush body
+       would leave this domain STOPPED-but-still-registered across the flush, adding
+       a window where a GC scans it while the flush mutates its minor tables. (That
+       is distinct from GH#15 "Bug B" -- a pre-existing terminating-domain root-scan
+       panic, 'cannot trace object', that fires during spawn/terminate independent of
+       this placement; fixing the lock cycle here UNMASKS it. Bug B is tracked in
+       GH#15 as the remaining blocker.) */
+    caml_mmtk_enter_blocking((uintnat) domain_state);
+
     /* Take the all_domains_lock to try and exit the STW participant set
        without racing with a STW section being triggered. */
     caml_plat_lock_blocking(&all_domains_lock);
