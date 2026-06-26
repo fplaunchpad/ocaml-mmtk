@@ -88,6 +88,10 @@ extern void caml_empty_minor_heap_no_major_slice_from_stw
     caml_domain_state** participating); /* in STW */
 extern int caml_try_empty_minor_heap_on_all_domains(void); /* out STW */
 extern void caml_empty_minor_heaps_once(void); /* out STW */
+/* Domain-local minor-cycle bookkeeping, re-homed off the all-domains minor STW
+   (excise Phase 1); called on the triggering domain's safepoint + terminate path. */
+extern void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain,
+                                             int bump_count);
 void caml_alloc_small_dispatch (caml_domain_state* domain,
                                 intnat wosize, int flags,
                                 int nallocs, unsigned char* encoded_alloc_lens);

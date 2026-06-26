@@ -376,6 +376,26 @@ void caml_empty_minor_heap_setup(caml_domain_state* domain_unused,
   caml_plat_barrier_reset(&minor_gc_end_barrier);
 }
 
+/* Domain-LOCAL minor-cycle bookkeeping, re-homed off the all-domains minor STW
+   (excise Phase 1). Runs on the TRIGGERING domain at its own safepoint
+   (caml_poll_gc_work, bytecode) and on the terminate flush path — NOT on a GC
+   worker (that would be caml_mmtk_uninterrupt, which holds the worker-monitor
+   lock; see the resume_mutators self-deadlock fix cd62bd47f9). Each piece touches
+   only `domain`'s own state, so it needs no cross-domain rendezvous; this is what
+   lets Phase 3 delete the minor STW. Order matches the old STW body
+   (stats -> memprof -> finalisers -> table-clear). `bump_count` is 1 only on the
+   bytecode minor path (native keeps caml_minor_collections_count at 0; terminate
+   passes 0). */
+void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain, int bump_count)
+{
+  caml_collect_gc_stats_sample_stw(domain);   /* writes this domain's own sample slot */
+  caml_memprof_after_minor_gc(domain);
+  caml_final_update_last_minor(domain);
+  caml_empty_minor_heap_domain_clear(domain); /* incl. caml_final_empty_young */
+  if (bump_count)
+    nonatomic_increment_counter(&caml_minor_collections_count);
+}
+
 /* must be called within a STW section */
 static void
 caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
