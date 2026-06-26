@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise Phase 3 design — MMTk `stop_all_mutators` the SOLE all-domains rendezvous (2026-06-26)
+
+The final phase. Agent-designed with upstream PR archaeology + sibling cross-check. Deletes OCaml's own
+all-domains STW; MMTk's `stop_all_mutators` becomes the sole rendezvous. Structurally eliminates the bug#3c
+dual-STW deadlock class (no second all-domains barrier for a terminating RUNNING domain to lead).
+
+**Upstream rationale (so we don't delete blind):** the all-domains STW (`caml_try_run_on_all_domains`) is the
+multicore replacement for the global runtime lock (PR #10831 merge; #14161 active/parked/stopped). The **backup
+thread** (KC, `ee56643a0a5`; PR #13679) exists so a domain blocked in a C section (released its domain lock, not
+polling) still answers an STW interrupt — its backup thread services the STW on its behalf. Spawn/terminate use
+`all_domains_lock` to mutate the participant set atomically; the process-exit `caml_stop_all_domains` (PR #12964)
+leads a *second* STW (`stw_terminate_domain`) — the dual-STW seam Phase 3 removes.
+
+**Caller inventory (3 live `caml_try_run_on_all_domains`):** (1) minor-empty (`caml_empty_minor_heaps_once`) →
+DELETE the whole chain (its only load-bearing residue is the per-domain young-region reset + the cycle-counter
+that only existed to terminate the driver loop); (2) process-exit `caml_stop_all_domains` → REWRITE to a
+lock-serialized cancel+deregister loop; (3) spawn / single-domain terminate → KEEP `all_domains_lock`+`stw_domains`
+as a PLAIN mutex (never a barrier; MMTk's RUNNING set is the authoritative "who must stop"). Validates the earlier
+ROADMAP verdict.
+
+**⚠ KEY REFINEMENT vs ROADMAP — backup thread is NOT deleted in Phase 3.** The call-site trace shows it is wired
+into the blocking-section default hooks (`signals.c:145-155`) and **systhreads** (`st_stubs.c:80-95`, the tick
+thread) INDEPENDENTLY of the STW. Deleting it in Phase 3 breaks `lib-systhreads`. So Phase 3 removes its
+*raison d'être* (the OCaml STW) and leaves it inert-but-present; its removal is the separate #20 "GC acquires the
+released domain lock" refactor, now decoupled from a live STW. Siblings (openjdk/ruby/julia) all let MMTk's
+`stop_all_mutators` be sole + a plain register/deregister lock + a thread-state flag; **none** has a backup thread
+— ours is the documented outlier (#20). Phase 3 also makes **GH#16 moot** (no OCaml STW left for the quiesce to
+deadlock against).
+
+**Phased plan (each independently buildable):**
+- **3a** — delete the minor-empty STW chain (`caml_empty_minor_heaps_once`/`caml_try_empty_minor_heap_on_all_domains`/
+  `caml_stw_empty_minor_heap*`/`..._from_stw`/`_setup`/`_promote`/`caml_do_opportunistic_major_slice`/the
+  cycle counters); rewire the bytecode safepoint (`domain.c:1950`) + terminate flush (`:2118`) to a direct
+  per-domain `caml_minor_gc_reset_young_region(d)` + the existing `caml_minor_gc_domain_bookkeeping`. Native
+  early-returns (TLAB) so never reached it. Validate: world.opt, par_binarytrees golden, Gc.minor exactly-once,
+  sanity small-heap, lib-systhreads/parallel.
+- **3b** — rewrite `caml_stop_all_domains` to: `domains_exiting=1`; under `all_domains_lock`, for each running
+  peer `pthread_cancel` + **`mmtk_ocaml_deregister_domain`** (removes from registry AND RUNNING set, in one op) +
+  `terminate_backup_thread`; then self-teardown. Delete `stw_terminate_domain`. **The deregister-on-cancel is
+  load-bearing** — else MMTk's sole rendezvous hangs awaiting a dead thread. Validate: NEW unjoined-domains-at-exit
+  test (main exits while N peers spin; no hang), on turing too (pthread_cancel platform diffs).
+- **3c** — delete the now-dead STW family (`caml_try_run_on_all_domains[_with_spin_work/_async]`, `stw_handler`,
+  `stw_request`, `stw_leader`/suspend machinery, the STW-only `caml_global_barrier*`); drop `domain.h` decls.
+  KEEP the participant-set helpers (`park_next_stopped_domain`/`activate_parked_domain`/`stop_active_domain`),
+  `all_domains_lock`, `caml_domain_alone`, `caml_send_interrupt`/`caml_handle_incoming_interrupts`. The clean
+  build is the test (dangling symbol = link error). This is where the ~400-500 line net reduction lands.
+- **3d** — record the backup-thread deferral (no code change); confirm no Phase-3 regression left it half-wired.
+
+**Risks:** the deregister-on-exit hang (3b — deregister in the same critical section as the cancel; the new exit
+test is the gate; verify on macOS+Linux); GH#15 (pre-existing multi-domain deadlock, A/B'd — must not be
+mis-attributed to Phase 3); the shared participant-set helpers (grep before deleting — keep membership, delete
+only the runner). Full agent report 2026-06-26.
+
+---
+
 ## Excise Phase 2 step 3 (frametables): DONE — GC-cycle RCU (Dolan's original, `3c55e9a6ab`); + a latent quiesce-primitive deadlock found (2026-06-26)
 
 **DONE + validated (`3c55e9a6ab`):** the cycle-RCU below is implemented. The frametable STW is gone; install
