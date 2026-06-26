@@ -31,6 +31,102 @@ with no hang; moving-GC stress (GenImmix + StickyImmix at 64/128 MiB fixed heaps
 a native d8 run [in flight]. **Remaining `caml_try_run_on_all_domains` callers (the *sync* runner) → Phases 1–3:**
 terminate (domain.c:2308), frametables (frame_descriptors.c:306/318), runtime_events (228/438). NB stale mentions
 of `stw_resize_minor_heaps_reservation` elsewhere in this file predate the deletion.
+## LXR integration — sibling references cloned + P2 port plan + usage recipe + P4 barrier reference (2026-06-26)
+
+Set up + validated the LXR integration against the actual sibling implementations (per the "validate against
+siblings" rule). **References now local in `_references/` (read-only/gitignored):** `mmtk-openjdk-lxr` (the
+`wenyuzhao/mmtk-openjdk` **`lxr`** branch — a real binding that USES LXR), `lxr-builds` (the build/usage recipe).
+The LXR **GC fork** is the `lxr` remote in the submodule (`gc/mmtk-core` → `wenyuzhao/mmtk-core` branch `lxr/lxr`).
+
+**`lxr/lxr` is a SIBLING FORK, not a superset of ours** (agent-verified): same 0.32.0 merge-base, but its
+`immixspace.rs` is a near-rewrite (+872/−263) interleaving RC with three *unrelated* upstream waves
+(page-resource rewrite, `generate_tasks_batched`/`Range<Chunk>`, 1-arg `attempt_mark`/cyclic-mark rework) that
+conflict with our deltas (no-zero, SpaceOverheadTrigger, 2-arg `attempt_mark`). **So P2 = hand-write ~10 gated
+overlays** behind `rc_enabled`/`crate::args` consts (struct fields, ctor, `side_metadata_specs(rc_enabled)`,
+read-side `is_live`/`is_reachable`, inert guards `post_copy`/`mark_lines`/straddle) — **NOT** lift LXR bodies —
+so all 8 existing plans stay byte-identical when off. Prereqs: `PlanConstraints.rc_enabled` + 5 RC side-metadata
+specs + a `Defrag` rc arg. **P2.5** (split out, heavy): the page-resource RC API + work-packet reshape. **P3:**
+port `plan/lxr/` + wire `MMTK_PLAN=LXR`. Full region-by-region plan in the ROADMAP LXR entry.
+
+**Usage recipe (validated vs mmtk-openjdk `lxr` + lxr-builds):** LXR is a pure **runtime plan selection** —
+OpenJDK `-XX:ThirdPartyHeapOptions=plan=LXR`; us `MMTK_PLAN=LXR` → `PlanSelector::LXR`. The binding needs **no
+LXR cargo feature** (mmtk-openjdk's `default=[]`); the `lxr_*` features are mmtk-core *build-time* tuning,
+default-on. **LXR requires a FIXED heap** (no variable sizing — OpenJDK mandates `-Xms==-Xmx`) → P3 must pin
+`MMTK_HEAP_SIZE_MB` for LXR and bypass our SpaceOverhead dynamic heap. mmtk-openjdk `lxr` pins mmtk-core
+`wenyuzhao @ 304ce69d`.
+
+**P4 barrier reference (mmtk-openjdk-lxr/mmtk/src/api.rs):** LXR's `FieldBarrier` (a coalescing per-slot
+field-logging write barrier, `BarrierSelector::FieldBarrier`) is driven by `mmtk_object_reference_write_pre`
+(:426) / `_post` (:441) / `_slow` (:456) → `mutator.barrier().object_reference_write_pre/post/slow(src, slot,
+target)`, plus `mmtk_object_probable_write` (:511). **Our P4** wires the equivalent into `caml_modify` — a
+pre/post slot-granular store barrier, mirroring our existing `caml_mmtk_satb_barrier` path (RQ1's bet: OCaml's
+immutable-by-default heap makes most stores initialising writes through `caml_initialize`, which take NO barrier,
+so the LXR field barrier is unusually cheap for OCaml).
+
+---
+
+## ROOT-CAUSED + FIXED: the ocamldoc/world.opt deadlock = `resume_mutators` allocating → self-deadlock on the worker-monitor lock (fix `cd62bd47f9`) (2026-06-26)
+
+Root-caused with **gdb on a turing core** (the deadlock reproduces deterministically on Linux too, not just
+macOS). It is a **SELF-DEADLOCK** in our binding — **our bug, not mmtk-core** — fixable on our side.
+
+**The chain (thread 17 in the core — the stuck GC worker):**
+`park_and_wait` (holds `WorkerMonitorSync` lock) → `on_last_parked` → `on_gc_finished` (scheduler.rs:623) →
+binding `resume_mutators` (collection.rs:280) → `caml_mmtk_uninterrupt` (mmtk.c:849) → **`caml_mmtk_refill_tlab`
+(allocates!)** → `BumpAllocator::alloc` → `Space::acquire` → `GCTrigger::poll` decides another GC is needed →
+`request_schedule_collection` → **`WorkerMonitor::make_request` re-takes the same lock** → the worker blocks on
+a lock it already holds. Core state: `GC_ACTIVE=1`, `GC_COUNT=0`, parker `{worker_count:28, parked_workers:28}`,
+`goals.current = Some(Gc)`, sync mutex `futex=2` (held). 27 workers wait on the condvar; the mutator waits on
+`gc_active` (never cleared). 
+
+**The bug:** `caml_mmtk_uninterrupt` eagerly refilled the TLAB at resume as an fft poll-trap micro-optimization,
+with the comment *"driving the allocator is safe here, all mutators are stopped."* That is safe w.r.t. mutators
+but NOT w.r.t. mmtk-core's scheduler lock: `resume_mutators` is a VM hook MMTk calls from `on_gc_finished` while
+holding `WorkerMonitorSync`, and the allocator's GC-request path re-takes it.
+
+**The fix (follow the siblings).** Verified in `_references/`: **mmtk-openjdk, mmtk-julia, mmtk-ruby all
+`resume_mutators` WITHOUT touching the allocator** — they only unblock mutators (+ stats/flags). The standard
+MMTk model resets each mutator's allocator in the GC's `Release` phase and the mutator re-acquires a block on
+its own next allocation (a normal safepoint, outside any GC lock). So we **removed the eager refill** from
+`caml_mmtk_uninterrupt`; the young region stays collapsed and the mutator refills itself. (`cd62bd47f9`.)
+
+**Validated on turing:** the ocamldoc man-gen now **COMPLETES** (was a 100% deterministic hang); par_binarytrees
+d1/d4/d8 GenImmix/StickyImmix checksums unchanged (682198264). This unblocks `make world.opt` on both platforms.
+**Follow-up:** the fft poll-trap perf the eager refill addressed must be re-homed to the mutator's OWN resume
+path (`caml_mmtk_become_running`, mutator context, no lock) — TODO (ROADMAP). The investigation that found it is
+below.
+
+---
+
+## `make world.opt` deadlocks at ocamldoc man-gen — a DETERMINISTIC single-domain MMTk deadlock (pre-existing on clean mainline; NOT the STW excision) (2026-06-25)
+
+A clean `make -j world.opt` on macOS (M4 Pro) **hangs** at the ocamldoc man-page generation step. The build
+target chain: `world.opt → opt.opt → (if build_libraries_manpages=true) make manpages → make -C api_docgen man`
+(Makefile:818-819 / 858-859 / 2158-2160). The hung process is `ocamldoc.opt -man -d build/man …` loading ~150
+`.odoc`, single-domain, **parked at 0% CPU**. `sample`d stack:
+- **mutator (main thread):** `caml_call_gc → caml_alloc_small_dispatch → caml_mmtk_refill_tlab →
+  Space::acquire → caml_mmtk_park → mmtk_ocaml_stw_park → _pthread_cond_wait` — i.e. an alloc-slow path
+  triggered a GC and the mutator parked waiting for it to finish.
+- **GC worker:** `WorkerMonitor::park_and_wait → _pthread_cond_wait` — **idle, no work scheduled.**
+
+Mutator parked waiting for a collection that never runs, GC worker idle = **the #5/#6/bug#3c single-domain
+GC-scheduling deadlock class** (a collection is requested but the work never reaches the worker pool).
+
+**PRE-EXISTING — not the Phase-0 STW excision.** Confirmed three ways, gold standard last: (1) the Phase-0
+(excise-ocaml-stw) world.opt hung here; (2) an A/B that reverted `domain.c`/`domain.h` to mainline, rebuilt
+`libasmrun.a`, relinked `ocamldoc.opt` → **still hung**; (3) a **clean full mainline build** (`5.5+mmtk`,
+`make clean` + `./configure` + `world.opt`, **2205 compile steps, domain.c = 0 edits**) → **still hung at the
+same step.** So the excision is exonerated.
+
+**Significance.** This is a **DETERMINISTIC** repro of the single-domain MMTk deadlock class — far more useful
+than the intermittent `par_binarytrees`/chameneos ones for debugging #5/#6. ocamldoc man-gen is a long-lived,
+heavy single-domain allocator that reliably wedges the alloc-slow→GC-schedule path. **Worth its own rr/core-dump
+investigation** (it deterministically reproduces what the deadlock-class fix must address).
+
+**Workaround for builds/testing:** `make world.opt` reaches it only when `build_libraries_manpages=true`. The
+testsuite does not need man pages, so configure/build with manpages disabled (or build the compiler core
+without `manpages`) to get a working world for `make -C testsuite parallel`. (macOS-observed; check whether
+Linux/CI hits it too — if CI builds docs, it would. Filed as the build blocker behind Phase-0's testsuite gate.)
 
 ---
 

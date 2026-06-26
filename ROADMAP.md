@@ -456,7 +456,24 @@ The active research/measurement threads behind the M8 milestone — the index; d
     2026-06-25** — the binding workspace builds green against `f0319fb5e6` (P1 is purely additive, so the
     binding API surface is unaffected); held on `0.32-ocaml-lxr` (not folded into `0.32-ocaml`). **P2** Immix-policy RC hooks +
     LOS RC (~1–2 wk, **highest risk** — moving-GC correctness; lean on the `sanity` feature at small heaps).
-    **P3** port `plan/lxr/`; wire `MMTK_PLAN=LXR` in `api.rs` (~1 wk). **P4** OCaml binding + runtime barrier —
+    **P2 port plan banked (agent, 2026-06-26):** ⚠ `lxr/lxr` is a **sibling fork, NOT a superset** — same 0.32.0
+    merge-base, but its `immixspace.rs` (+872/−263) interleaves RC with three *unrelated* upstream waves
+    (page-resource rewrite, `generate_tasks_batched`/`Range<Chunk>`, 1-arg `attempt_mark`/cyclic-mark rework)
+    that conflict with our deltas (no-zero, SpaceOverheadTrigger, 2-arg `attempt_mark`). So **do NOT lift LXR
+    function bodies — hand-write ~10 gated overlays** behind `rc_enabled`/`crate::args` consts (struct fields,
+    constructor, `side_metadata_specs(rc_enabled)`, read-side `is_live`/`is_reachable`, inert guards
+    `post_copy`/`mark_lines`/straddle), so all 8 existing plans stay byte-identical when off. **Prereqs:**
+    `PlanConstraints.rc_enabled`, 5 RC side-metadata specs (`IX_LINE_REUSE_COUNT`, `LOS_PAGE_REUSE_COUNT`,
+    `Block::{LOG_TABLE,NURSERY_PROMOTION_STATE_TABLE,PHASE_EPOCH}`), a `Defrag` rc arg. **P2.5 (split out, heavy):**
+    the page-resource RC API (`BlockPageResource::{rc,prepare_gc,reset,acquire_blocks,exhausted_reusable_space,…}`)
+    + the work-packet reshape — required before `prepare_rc`/`release_rc`/`get_next_available_lines`. (NOTES 2026-06-26.)
+    **P3** port `plan/lxr/`; wire `MMTK_PLAN=LXR` in `api.rs` (~1 wk). **Usage recipe (validated vs mmtk-openjdk
+    `lxr` + `wenyuzhao/lxr-builds`, 2026-06-26):** LXR is a pure **runtime plan selection** (OpenJDK:
+    `-XX:ThirdPartyHeapOptions=plan=LXR`; us: `MMTK_PLAN=LXR` → `PlanSelector::LXR`) — the binding needs **no LXR
+    cargo feature** (mmtk-openjdk's `default=[]`); the `lxr_*` features are mmtk-core *build-time* tuning,
+    default-on (`RC_NURSERY_EVACUATION = !cfg!("lxr_no_nursery_evac")`, etc.). **LXR requires a FIXED heap** (no
+    variable sizing — OpenJDK mandates `-Xms==-Xmx`), so P3 must require pinned `MMTK_HEAP_SIZE_MB` and skip our
+    default SpaceOverhead dynamic heap for `MMTK_PLAN=LXR`. mmtk-openjdk `lxr` pins mmtk-core `wenyuzhao @ 304ce69d`. **P4** OCaml binding + runtime barrier —
     `GLOBAL_FIELD_UNLOG_BIT_SPEC`, the new `ObjectModel`/`Scanning`/`Slot` methods, `mmtk_ocaml_field_barrier`
     wired into `caml_modify` (mirror the existing SATB path, also pre-store/slot-granular) (~1 wk happy path;
     **+1–2 wk** for ephemerons/finalisers-under-RC and the `caml_initialize`/RC-0 interaction). **P5** bring-up:
