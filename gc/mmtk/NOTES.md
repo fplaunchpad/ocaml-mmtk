@@ -5,6 +5,31 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Excise Phase 3a DONE (committed, NOT merged); GH#15 livelock now blocks multi-domain validation (2026-06-26)
+
+**3a committed `cdd3021a1c` on `excise-ocaml-stw`, deliberately NOT fast-forwarded to mainline.** Deleted the
+minor-empty all-domains STW chain; rewired the safepoint + terminate to a per-domain `caml_minor_gc_reset_young_region`.
+Validated on all DETERMINISTIC checks: clean world.opt, par_binarytrees native d1==d8==golden, Gc.minor
+exactly-once (100 bytecode / 0 native), lib-systhreads ALL pass (incl. multicore_lifecycle/testfork/backup_thread*),
+parallel ALL pass EXCEPT `domain_id` native.
+
+**⚠ `domain_id` native is GH#15 (pre-existing scheduler livelock), not a 3a bug — but it now BLOCKS clean
+multi-domain validation.** Under 8-way concurrent contention `domain_id.opt` intermittently hangs; multi-thread
+`sample` = the exact GH#15 signature (main in `mmtk_ocaml_stw_park`; all 11 GC workers idle in
+`WorkerMonitor::park_and_wait`; collection never resumes). Confirms GH#15 is NATIVE too (was filed bytecode) and
+that the MMTk-scheduler lost-progress livelock — NOT the OCaml STW the excision touches — is the gating bug. A
+rarer sibling symptom is a root-scan panic (`cannot trace 0x5e013`, an immediate int reaching the tracer). Both
+flaky; surface more under many-core contention. Updated GH#15.
+
+**Gate before merging 3a + finishing Phase 3 (3b/3c):** 3b (the `caml_stop_all_domains` deregister-on-cancel +
+the new unjoined-domains-at-exit test) directly exercises multi-domain exit — exactly where GH#15 + the
+deregister-hang risk live — so it can't be cleanly validated while GH#15 hangs under contention. **GH#15 is now
+the critical path.** Root-cause on turing (28 cores → reliable repro; `rr` to capture the missed
+"all-workers-parked ⇒ GC-done" wakeup in the scheduler), and A/B the contention rate parent(`d89dfdea0e`)-vs-3a
+there to confirm 3a doesn't worsen it. Hold the 3a→mainline ff until then.
+
+---
+
 ## Excise Phase 3 design — MMTk `stop_all_mutators` the SOLE all-domains rendezvous (2026-06-26)
 
 The final phase. Agent-designed with upstream PR archaeology + sibling cross-check. Deletes OCaml's own
