@@ -5,6 +5,52 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CORRECTION (2026-06-26): the GH#15 `plain_stress` "GenImmix lost-progress livelock" is a TIMEOUT FALSE POSITIVE — there is NO hang
+
+**Supersedes the "BUG (GH#15): multi-domain GenImmix deadlock under infinite-alloc domains" entry below
+and the "intermittent multidomain hang" residual.** Re-investigated on turing (28-core Linux, `rr` + gdb +
+source instrumentation). `plain_stress.byte` under `MMTK_PLAN=GenImmix` **does not hang — it completes in
+~57 s** and is throughput-comparable to vanilla.
+
+**The original "hangs (3/3, perl-alarm 25s)" was the bug.** The repro was killed by a **25 s alarm**
+(macOS) / a ~20 s sleep-then-check (turing). But the program legitimately needs **~57 s**: the main domain
+runs `for _ = 1 to 3_000_000` and calls `List.length` on an up-to-2000-element list **every** iteration
+(O(2000) × 3 000 000 ≈ 6×10⁹ list-node walks for the main domain alone), while 4 child domains allocate in
+tight `while true` loops (heavy GC contention). "Still alive after 25 s" was misread as "hung".
+
+**Decisive evidence (turing, clean mainline `44030a7a2`, submodule `ec2f5079f8`):**
+- **Timed to completion:** `plain_stress.byte` GenImmix — **15/15 runs EXITED in 56–79 s, zero hangs**
+  (incl. `MMTK_THREADS` ∈ {1, 2, 28}, all 56 s). Vanilla OCaml 5.5.0 bytecode on the **same** program: **54 s**
+  → MMTk is within ~5–45 % of vanilla here, i.e. normal, not pathological.
+- **It is progressing, not wedged:** `ps -L` is stable at exactly **5 threads RUNNING** (the 4 infinite
+  child loops + the slow-but-advancing main) and 33 idle; gdb PC snapshots show every mutator's interpreter
+  PC *moving* across samples (it is executing bytecode). Adding progress prints to the main loop shows it
+  pass 0.5 M → 1.5 M → 2.0 M → exit.
+- **The GC scheduler is healthy:** source-instrumenting the full request/schedule/STW lifecycle
+  (`request` swap + `request_schedule_collection` → `make_request`/`set_request` → `poll_next_goal` →
+  `stop_all_mutators` (`gc_active=true`) → `clear_request` → `resume_mutators`) shows it **cycle cleanly the
+  entire run** — no lost GC request, no stranded `request_flag`, no stuck `stop_all_mutators`, no missed
+  `on_last_parked` wakeup, no worker-count drift, no panic. The "all workers parked + no work ⇒ GC done"
+  condition fires every cycle.
+- **GC is correct:** mmtk `sanity` feature at `MMTK_HEAP_SIZE_MB=64` (frequent full GCs) over the
+  multi-domain stress → **0 dangling edges / 0 dropped roots** (no `Invalid reference`, no panic).
+
+**The macOS `sample` "13 threads parked in `stw_park`, all blocked" was a transient, not a deadlock.**
+A `sample` is a profile over a window; under GenImmix with 5 hot allocators a multi-domain STW pause fires
+constantly, and the 25 s alarm killed the process mid-pause before it could `resume_mutators`. The
+instrumented Linux run shows `stop_all_mutators`/`resume_mutators` pairing continuously — the pause always
+ends.
+
+**Net:** GH#15's *real* content (Bug A 4-way lock cycle + Bug B spawn/terminate root UAF) was genuine and
+is fixed on mainline. The separately-tracked "GenImmix lost-progress livelock / intermittent multidomain
+hang" that `plain_stress` was thought to trigger **does not exist** — no scheduler/binding change is needed.
+What remains is the already-known multi-domain *throughput* sublinearity (per-collection STW cost; see
+`SCALABILITY.md`), which is slowness, not a hang. Saved evidence: `~/gh15/` on turing
+(`gh15-livelock-progress.md`, instrumented logs, `wedged-bt.txt`, rr traces `~/gh15/traces*`).
+
+---
+
+
 ## GH#15 ROOT-CAUSED + FIXED — it was TWO bugs (lock-cycle deadlock + a global-root use-after-free), both rr-confirmed on turing (2026-06-26)
 
 **GH#15 ("mutators park, markers idle, GC never resumes") was never one bug.** Decisive A/B + rr on

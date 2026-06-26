@@ -87,8 +87,10 @@ The fork scales ≈ vanilla on `par_matmul`; the "anti-scaling" earlier reported
 regresses (bandwidth). Mechanism + RQ10: `SCALABILITY.md`.
 
 The scheduler-assert deadlock is fixed for all plans (GH#6/#14, mmtk-core `ec2f5079f8`). Open residuals:
-the intermittent multidomain hang above, and `chameneos_redux` under ConcurrentImmix. *Eyeball panel —
-the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
+the `hang†` entries above (re-check needed — at least one reported multidomain "hang" was a **timeout false
+positive**: the GH#15 `plain_stress` repro does **not** hang, it completes in ~57 s, vanilla-comparable, and
+was being killed by a 25 s alarm — see `gc/mmtk/NOTES.md`), and `chameneos_redux` under ConcurrentImmix.
+*Eyeball panel — the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
 
 ## Building
 
