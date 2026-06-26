@@ -5,6 +5,39 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## ROOT-CAUSED + FIXED: the ocamldoc/world.opt deadlock = `resume_mutators` allocating → self-deadlock on the worker-monitor lock (fix `cd62bd47f9`) (2026-06-26)
+
+Root-caused with **gdb on a turing core** (the deadlock reproduces deterministically on Linux too, not just
+macOS). It is a **SELF-DEADLOCK** in our binding — **our bug, not mmtk-core** — fixable on our side.
+
+**The chain (thread 17 in the core — the stuck GC worker):**
+`park_and_wait` (holds `WorkerMonitorSync` lock) → `on_last_parked` → `on_gc_finished` (scheduler.rs:623) →
+binding `resume_mutators` (collection.rs:280) → `caml_mmtk_uninterrupt` (mmtk.c:849) → **`caml_mmtk_refill_tlab`
+(allocates!)** → `BumpAllocator::alloc` → `Space::acquire` → `GCTrigger::poll` decides another GC is needed →
+`request_schedule_collection` → **`WorkerMonitor::make_request` re-takes the same lock** → the worker blocks on
+a lock it already holds. Core state: `GC_ACTIVE=1`, `GC_COUNT=0`, parker `{worker_count:28, parked_workers:28}`,
+`goals.current = Some(Gc)`, sync mutex `futex=2` (held). 27 workers wait on the condvar; the mutator waits on
+`gc_active` (never cleared). 
+
+**The bug:** `caml_mmtk_uninterrupt` eagerly refilled the TLAB at resume as an fft poll-trap micro-optimization,
+with the comment *"driving the allocator is safe here, all mutators are stopped."* That is safe w.r.t. mutators
+but NOT w.r.t. mmtk-core's scheduler lock: `resume_mutators` is a VM hook MMTk calls from `on_gc_finished` while
+holding `WorkerMonitorSync`, and the allocator's GC-request path re-takes it.
+
+**The fix (follow the siblings).** Verified in `_references/`: **mmtk-openjdk, mmtk-julia, mmtk-ruby all
+`resume_mutators` WITHOUT touching the allocator** — they only unblock mutators (+ stats/flags). The standard
+MMTk model resets each mutator's allocator in the GC's `Release` phase and the mutator re-acquires a block on
+its own next allocation (a normal safepoint, outside any GC lock). So we **removed the eager refill** from
+`caml_mmtk_uninterrupt`; the young region stays collapsed and the mutator refills itself. (`cd62bd47f9`.)
+
+**Validated on turing:** the ocamldoc man-gen now **COMPLETES** (was a 100% deterministic hang); par_binarytrees
+d1/d4/d8 GenImmix/StickyImmix checksums unchanged (682198264). This unblocks `make world.opt` on both platforms.
+**Follow-up:** the fft poll-trap perf the eager refill addressed must be re-homed to the mutator's OWN resume
+path (`caml_mmtk_become_running`, mutator context, no lock) — TODO (ROADMAP). The investigation that found it is
+below.
+
+---
+
 ## `make world.opt` deadlocks at ocamldoc man-gen — a DETERMINISTIC single-domain MMTk deadlock (pre-existing on clean mainline; NOT the STW excision) (2026-06-25)
 
 A clean `make -j world.opt` on macOS (M4 Pro) **hangs** at the ocamldoc man-page generation step. The build
