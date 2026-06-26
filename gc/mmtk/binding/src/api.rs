@@ -64,6 +64,31 @@ fn physical_memory_bytes() -> usize {
 /// is bound. `plan` is a GC plan name: "NoGC", "MarkSweep", "Immix", …
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
+    // GH#15 Bug B safeguard. A panic anywhere in MMTk/GC code is unrecoverable.
+    // Rust's default is to unwind only the *panicking thread*, so when a GC worker
+    // panics (e.g. trace_object mis-tracing a terminating domain's root -> "cannot
+    // trace object") that worker thread dies silently while WorkerMonitor.worker_count
+    // still counts it; on_last_parked then never reaches parked==worker_count, so the
+    // collection never finishes, gc_active stays true, and every mutator deadlocks in
+    // wait_collection_done -- a silent hang. Install a process-wide panic hook that
+    // prints the panic (via the chained default hook) then ABORTs, turning that hang
+    // into a loud SIGABRT + core. Installed once, before any GC worker is spawned.
+    {
+        use std::sync::Once;
+        static HOOK: Once = Once::new();
+        HOOK.call_once(|| {
+            let default_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                default_hook(info);
+                eprintln!(
+                    "[mmtk-ocaml] FATAL: panic in MMTk/GC code is unrecoverable; \
+                     aborting the process (GH#15 Bug B safeguard)."
+                );
+                std::process::abort();
+            }));
+        });
+    }
+
     let plan_str = unsafe { CStr::from_ptr(plan).to_str().expect("invalid plan string") };
 
     let mut builder = MMTKBuilder::new();
