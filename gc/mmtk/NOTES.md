@@ -5,9 +5,24 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## Excise Phase 3a DONE (committed, NOT merged); GH#15 livelock now blocks multi-domain validation (2026-06-26)
+## Excise Phase 3a+3b DONE (committed, NOT merged) — "one STW" functionally achieved; 3c = delete dead family; GH#15 gates merge (2026-06-26)
 
-**3a committed `cdd3021a1c` on `excise-ocaml-stw`, deliberately NOT fast-forwarded to mainline.** Deleted the
+**3a `cdd3021a1c` + 3b `0618509717` on `excise-ocaml-stw`, deliberately NOT fast-forwarded to mainline.**
+
+**MILESTONE: after 3b, OCaml's all-domains STW family is DEAD** — `grep caml_try_run_on_all_domains runtime/` shows
+zero external callers (only the family's internal calls + comments). So **MMTk's `stop_all_mutators` is already the
+SOLE all-domains rendezvous** and the bug#3c dual-STW deadlock class is structurally gone. The architectural goal
+is met; **3c is the dead-code DELETION** (the ~400-line reduction), in flight (agent producing exact edits).
+
+**3b (`0618509717`):** `caml_stop_all_domains` (process-exit-with-unjoined-peers) rewritten off its second STW —
+the main domain iterates the active peers under `all_domains_lock` and per peer: `caml_plat_thread_cancel` +
+`caml_mmtk_deregister_domain` (new deregister-only wrapper — load-bearing: a cancelled peer never reaches a
+safepoint, so it must leave MMTk's RUNNING set or a final `stop_all_mutators` hangs on a dead thread) +
+`terminate_backup_thread` + `domain_canceled=true`. `stw_terminate_domain` deleted (the LAST STW caller).
+Validated: clean world.opt; par_binarytrees golden; new `tests/parallel/unjoined_domains_at_exit` 15/15 clean exit
+(native+bytecode, no hang on cancelled peers).
+
+**3a (`cdd3021a1c`):** Deleted the
 minor-empty all-domains STW chain; rewired the safepoint + terminate to a per-domain `caml_minor_gc_reset_young_region`.
 Validated on all DETERMINISTIC checks: clean world.opt, par_binarytrees native d1==d8==golden, Gc.minor
 exactly-once (100 bytecode / 0 native), lib-systhreads ALL pass (incl. multicore_lifecycle/testfork/backup_thread*),
