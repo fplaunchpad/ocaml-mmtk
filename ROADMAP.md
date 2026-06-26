@@ -278,9 +278,14 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `caml_mmtk_quiesce_running_domains` primitive — NOT a second barrier, deadlock-class-neutral; `e06e717e51`
    runtime_events start=monotonic publish / stop=clear-enabled→quiesce→munmap, closing a munmap-vs-write_to_ring
    UAF; validated: native destroy+quiesce 10/10, lib-runtime-events A/B zero new failures, golden + counter
-   neutral). **Sub-step 3 (frametables RCU/epoch à la Julia world-age, also fixes the latent ConcurrentImmix
-   worker-vs-installer hazard) NEXT** — NOTES 2026-06-26. (Validation surfaced GH#15, a pre-existing multi-domain
-   GenImmix deadlock, unrelated to the excision.)
+   neutral). **Sub-step 3 (frametables) DONE 2026-06-26** (`3c55e9a6ab`): GC-cycle RCU —
+   Dolan's original 2018 frametable design (`e91cea84e30`), re-keyed off the dead `caml_major_cycles_completed`
+   onto `mmtk_ocaml_gc_count()` (the upstream multicore STW #11980 was a transitory perf fix that explicitly
+   invited this successor). Immutable {mask,descriptors} snapshot, atomic publish, lazy chain-retire after a
+   collection; closes the latent ConcurrentImmix worker-vs-installer hazard. Validated: world.opt + par_binarytrees
+   golden + lib-dynlink-domains/native/initializers (GenImmix) + sanity small-heap clean. **PHASE 2 COMPLETE.**
+   (Validation surfaced GH#15, a pre-existing multi-domain GenImmix deadlock, unrelated; and a latent
+   quiesce-primitive deadlock, #20.)
    3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
    barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos

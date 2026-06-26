@@ -5,7 +5,18 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## Excise Phase 2 step 3 (frametables): REDESIGN to GC-cycle RCU (Dolan's original); + a latent quiesce-primitive deadlock found (2026-06-26)
+## Excise Phase 2 step 3 (frametables): DONE — GC-cycle RCU (Dolan's original, `3c55e9a6ab`); + a latent quiesce-primitive deadlock found (2026-06-26)
+
+**DONE + validated (`3c55e9a6ab`):** the cycle-RCU below is implemented. The frametable STW is gone; install
+publishes a fresh immutable snapshot + retires the old `frametable_version` chain tagged with
+`mmtk_ocaml_gc_count()`, freed lazily in `caml_get_frame_descrs` once a collection elapses. Validated: clean
+world.opt; par_binarytrees native d1==d8==golden; lib-dynlink-domains/native/initializers all pass (GenImmix);
+lib-dynlink-domains under mmtk sanity small-heap (GenImmix+StickyImmix) clean — no premature-free Invalid
+reference. **Phase 2 is now COMPLETE** (steps 1 quiesce primitive + 2 runtime_events + 3 frametables). Only the
+GC/spawn/terminate participant-set `caml_try_run_on_all_domains` users remain — Phase 3's coordinated cut. The
+design + rationale follow.
+
+
 
 Studying the UPSTREAM design (per the new CLAUDE rule: `git blame` → PR → discussion) changed the step-3 plan
 and surfaced a bug in the step-1 primitive.
