@@ -86,18 +86,21 @@ final concurrent-mark), so it completes those at 1.2–1.3×. `Immix` lags on `b
 | bench | vanilla | GenImmix | Immix | ConcurrentImmix |
 |---|--:|--:|--:|--:|
 | par_matmul | 5.72 | 4.71 | 5.31 | **5.78** |
-| par_binarytrees | 3.49 | 1.36 | hang† | 0.91 |
-| par_spectralnorm | 2.44‡ | hang† | hang† | 2.90 |
+| par_binarytrees | 3.49 | 1.36 | 1.24§ | 0.91 |
+| par_spectralnorm | 2.44‡ | 1.62§ | 1.89§ | 2.90 |
 
 The fork scales ≈ vanilla on `par_matmul`; the "anti-scaling" earlier reported was mostly an
-`nproc`-worker oversubscription artifact (now controlled). †intermittent multidomain hang; ‡vanilla also
-regresses (bandwidth). Mechanism + RQ10: `SCALABILITY.md`.
+`nproc`-worker oversubscription artifact (now controlled). §re-measured on macOS (12-core) after the
+original turing "hang" proved a **too-short-timeout false positive** — the bench completes (cf. GH#15); a
+controlled S(8) re-measure on the 28-core host is pending. ‡vanilla also regresses (bandwidth). Mechanism +
+RQ10: `SCALABILITY.md`.
 
 The scheduler-assert abort (GH#6/#14, mmtk-core `ec2f5079f8`) **and** the follow-on ConcurrentImmix
 concurrent-marking **livelock** on high-allocation kernels (single-domain `spectralnorm`/`LU_decomposition`
 and `chameneos_redux`) are both **fixed** — the latter by mmtk-core `88ab2f5ea5` (an orphaned-SATB-packet
-lost-wakeup; GH#14). Open residual: the intermittent multidomain hang above (#31). *Eyeball panel — the M8
-macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
+lost-wakeup; GH#14). Open residual: the #31 `Domain.join` result-UAF under heavy multi-domain join (a
+SIGSEGV, not a hang — the table's earlier multidomain "hangs" were timeout false positives, cf. GH#15).
+*Eyeball panel — the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
 
 ## Building
 

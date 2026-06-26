@@ -5,6 +5,38 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## CORRECTION (2026-06-26): the GH#15 `plain_stress` "GenImmix lost-progress livelock" is a TIMEOUT FALSE POSITIVE — there is NO hang
+
+**Supersedes the earlier session claim that `plain_stress` revealed a residual GenImmix livelock.**
+Re-investigated on turing (28-core Linux, `rr` + gdb + source instrumentation). `plain_stress.byte` under
+`MMTK_PLAN=GenImmix` **does not hang — it completes in ~57 s** and is throughput-comparable to vanilla.
+
+**The original "hangs 5/5" was the measurement, not the program.** The repro was killed by a **~20–30 s
+watchdog**, but it legitimately needs **~57 s**: the main domain runs `for _ = 1 to 3_000_000` calling
+`List.length` on an up-to-2000-element list **every** iteration (O(2000) × 3M ≈ 6×10⁹ node-walks) while 4
+child domains allocate in tight `while true` loops (heavy GC contention). "Still alive after 25 s" was
+misread as "hung". The macOS `sample` showing "13 threads parked in `stw_park`" caught a **transient** STW
+pause mid-cycle (under GenImmix with 5 hot allocators, minor-GC STW fires constantly), not a deadlock.
+
+**Decisive evidence (turing, clean mainline `44030a7a2`, submodule `ec2f5079f8`):**
+- **28 timed runs EXITED in 56–79 s, zero hangs** (incl. `MMTK_THREADS` ∈ {1,2,28}); vanilla 5.5.0 bytecode
+  on the same program = 54 s → normal, not pathological.
+- `ps -L` stable at exactly **5 running threads**, never a full park; gdb PC snapshots show every mutator's
+  interpreter PC advancing; progress prints pass 0.5M→1.5M→2.0M→exit.
+- Source-instrumenting the full GC request/STW lifecycle (`request` swap → `stop_all_mutators`
+  (`gc_active=true`) → `clear_request` → `resume_mutators`) shows it **cycle cleanly the entire run** — no
+  lost request, no stranded flag, no stuck `stop_all_mutators`, no missed `on_last_parked`, no worker drift.
+- mmtk `sanity` at `MMTK_HEAP_SIZE_MB=64` over the multi-domain stress → **0 dangling edges / 0 dropped roots**.
+
+**Net:** GH#15's *real* content (Bug A 4-way lock cycle + Bug B spawn/terminate root UAF) was genuine and
+is fixed; #15 stays correctly closed. The "GenImmix lost-progress livelock / intermittent multidomain hang"
+`plain_stress` was thought to trigger **does not exist** — no scheduler/binding change needed. What remains
+is the known multi-domain *throughput* sublinearity (per-collection STW cost; `SCALABILITY.md`) — slowness,
+not a hang. **Lesson: use a generous watchdog (or check progress) before calling a multi-domain run a hang.**
+Saved evidence: `~/gh15/` on turing. (Diagnosed by the turing fix-agent; branch `fix/gh15-livelock-turing`.)
+
+---
+
 ## GH#14 ConcurrentImmix livelock FIXED — orphaned-SATB-packet lost-wakeup in mmtk-core (godel-diagnosed, integrated + validated locally, 2026-06-26)
 
 **Root cause (mmtk-core `scheduler.rs`, godel agent + the prior core dump — supersedes both the `cont_lock`
