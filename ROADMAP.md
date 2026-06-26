@@ -71,6 +71,9 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    `ec2f5079f8`; the earlier `d2e7f3493b` only gated it off for *concurrent* plans, so STW plans still
    tripped it). Validated: d8 pinned 100% HANG → 5/5 OK, checksums golden. The separate **bug #57**
    (`active_plan.rs:59` "cannot trace object") may still appear at threads=8. → NOTES (2026-06-25).
+   **GH#2 (the rare burn-pattern hang issue) CLOSED 2026-06-26** — Phase 3 structurally eliminated the
+   dual-STW deadlock class (no OCaml all-domains STW left); 196 burn/spawn runs across StickyImmix/GenImmix/Immix
+   clean, incl. 96 of the formerly ~50%-hang repro. → NOTES (2026-06-26).
 
 2. **#11 — weak-ref resurrection ordering + retire `MMTK_WEAK_REFS`.** Fix
    `process_weak_refs` resurrection ordering (`pr5233` — a value resurrected only for
@@ -537,7 +540,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
 - **#15 — non-Immix plans wired (bytecode)** — `SemiSpace`/`GenCopy`/`MarkCompact`/`PageProtect` added behind the generic forwarding-spec gate (taking the bytecode total to 9 at the time; ConcurrentImmix later via #8 → 10 wired, 1 deferred); CLBG byte-identical.
 - **#16 — native GenImmix + GenCopy** — generalized the TLAB refill to alias the copy-nursery `BumpPointer` (not just an in-place Immix block); the moving-root fixup was reused from the major/defrag path (no minor-vs-major root path → 2-file change). GenImmix = the stock-faithful generational default. old→young pointer A/B + `sanity` (3.05M copied, 0 Invalid) clean.
 - **linux-O0 debug runtime** — stale stock-GC asserts removed; a real domain-terminate lock-drop race fixed (`caml_mmtk_park_terminating` parks without dropping `domain_lock`).
-- **opam relocatability** — `libmmtk_ocaml.a` referenced as `-lmmtk_ocaml` (symlinked into `stdlib/`, installed into `$(LIBDIR)`); DWARF build-root stripped via `--remap-path-prefix`. `test-in-prefix` exit 0.
+- **opam relocatability** — `libmmtk_ocaml.a` referenced as `-lmmtk_ocaml` (symlinked into `stdlib/`, installed into `$(LIBDIR)`); DWARF build-root stripped via `--remap-path-prefix`. `test-in-prefix` exit 0. **(Superseded by GH#10's object-bundling fix `35bf263b3a`: the staticlib objects are now bundled into `lib{asm,caml}run*.a`, so there is no bare `-lmmtk_ocaml` in `*_c_libraries` — GH#10 closed 2026-06-26.)**
 - **CI hygiene** — x86-64 Build green; CLBG cross-plan correctness gate green; all-plans testsuite workflow (deliberately red — surfaces per-plan breakage).
 
 ---

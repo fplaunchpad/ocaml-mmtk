@@ -5,6 +5,36 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Issue-tracker sweep (2026-06-26): closed GH#2 / GH#10 / GH#16; GH#5 / GH#6 / GH#7 confirmed still open
+
+Swept every open GH issue against current HEAD (`397e0e0de4`), confirm-or-refute each via repro + code on the
+local M4 Pro build. **Closed three** (fixed/moot):
+
+- **GH#2 — multi-domain burn-pattern hang (bug#3c).** Structurally eliminated by the Phase-3 STW excision: the
+  whole OCaml all-domains STW family is gone (`caml_try_run_on_all_domains*`, `caml_empty_minor_heaps_once`, the
+  global-barrier API), `Gc.minor` does a per-domain young-region reset (no rendezvous), `Gc.major` →
+  `caml_mmtk_collect`, and `caml_domain_terminate` marks STOPPED **before** `all_domains_lock` (no
+  RUNNING-while-holding re-entry → no dual-STW seam). Empirically: 196 burn/spawn runs (StickyImmix/GenImmix/Immix,
+  12 domains) → 0 hangs, incl. 96 of the formerly ~50%-hang `fannkuchredux`/`mandelbrot` repro. (A 28-core turing
+  burn would further strengthen the empirical side; the structural deletion is the decisive argument.)
+- **GH#10 — bare `-lmmtk_ocaml` breaks dune-configurator.** Fixed `35bf263b3a` (bundle the staticlib objects into
+  the runtime archives + drop the bare flag from `*_c_libraries`). Verified: `-config` carries no `-lmmtk_ocaml`; a
+  dune-configurator-style probe links clean without `-L`; the old config still fails (control). The separate
+  Linux/rustc-1.92 self-contained-staticlib tail is internal item #56.
+- **GH#16 — latent quiesce-primitive deadlock.** Moot per its own body once Phase 3 landed: no OCaml all-domains
+  STW remains for `caml_mmtk_quiesce_running_domains` to deadlock against (verified: no `caml_try_run_on_all_domains`
+  definition/decl at HEAD).
+
+**Confirmed still open (fresh HEAD evidence, commented on each issue):** GH#5 `weaklifetime` clears too *late* —
+deterministic L53 assert on GenImmix/StickyImmix/GenCopy (the `2a05e10846` shim cured clear-too-early; the
+generational minor still runs no full weak-reachability pass); the `finaliser_handover` half **is** now fixed. GH#6
+copy-nursery dead-on-arrival: GenImmix copies 9–14M cells, 70–80× slower than non-copying Immix at the same fixed
+heap, and reproduces on the dynamic heap too — the 64 MiB nursery does **not** fix it. GH#7 narrowed to the
+merlin/lavyek macro-bench port — the speedup-vs-cores **data** gap itself is now filled (SCALABILITY.md + README
+parallel table + `benchmarks` `quick/`).
+
+---
+
 ## GH#15 ROOT-CAUSED + FIXED — it was TWO bugs (lock-cycle deadlock + a global-root use-after-free), both rr-confirmed on turing (2026-06-26)
 
 **GH#15 ("mutators park, markers idle, GC never resumes") was never one bug.** Decisive A/B + rr on
