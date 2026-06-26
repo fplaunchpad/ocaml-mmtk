@@ -48,8 +48,6 @@ struct generic_table CAML_TABLE_STRUCT(char);
 CAMLexport atomic_uintnat caml_minor_collections_count;
 CAMLexport atomic_uintnat caml_major_slice_epoch;
 
-static caml_plat_barrier minor_gc_end_barrier = CAML_PLAT_BARRIER_INITIALIZER;
-
 static atomic_uintnat caml_minor_cycles_started = 0;
 
 /* [sz] and [rsv] are numbers of entries */
@@ -197,8 +195,6 @@ void caml_empty_minor_heap_domain_clear(caml_domain_state* domain)
    [caml_try_run_on_all_domains_with_spin_work]. */
 int caml_do_opportunistic_major_slice
   (caml_domain_state* domain_unused, void* unused);
-static void minor_gc_leave_barrier
-  (caml_domain_state* domain, int participating_count);
 
 static promote_result
 caml_empty_minor_heap_promote(caml_domain_state* domain,
@@ -251,31 +247,16 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
   domain->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain->stat_promoted_words += domain->allocated_words - prev_alloc_words;
 
-  /* Must be called during the STW section -- before any mutators
-     start running, so before arriving at the barrier. */
-  caml_collect_gc_stats_sample_stw(domain);
-
-  /* The code above is synchronised with other domains by the barrier below,
-     which is split into two steps, "arriving" and "leaving". When the final
-     domain arrives at the barrier, all other domains are free to leave, after
-     which they finish running the STW callback and may, depending on the
-     specific STW section, begin executing mutator code.
-
-     Leaving the barrier synchronises (only) with the arrivals of other domains,
-     so that all writes performed by a domain before arrival "happen-before" any
-     domain leaves the barrier. However, any code after arrival, including the
-     code between the two steps, can potentially race with mutator code.
-  */
-
-  /* arrive at the barrier */
-  if( participating_count > 1 ) {
-    if (caml_plat_barrier_arrive(&minor_gc_end_barrier)
-        == participating_count) {
-      caml_plat_barrier_release(&minor_gc_end_barrier);
-    }
-  }
-  /* other domains may be executing mutator code from this point, but
-     not before */
+  /* The per-domain stats sample + the split minor_gc_end_barrier (arrive/leave)
+     have moved off this STW (excise Phase 1): the stats sample is re-homed to
+     caml_minor_gc_domain_bookkeeping on the triggering domain's safepoint, and
+     the barrier guarded nothing load-bearing once promote stopped oldifying (the
+     young-region reset above is purely per-domain; the all-domains spawn/terminate
+     rendezvous is the STW section's own barrier, not this one). promote survives
+     only as the young-region-reset rendezvous (caml_reset_young_limit re-arms the
+     safepoint poison). */
+  (void)participating_count;
+  (void)participating;
 
   call_timing_hook(&caml_minor_gc_end_hook);
   CAML_EV_COUNTER(EV_C_MINOR_PROMOTED,
@@ -299,12 +280,6 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
                  100.0 * (double)st.live_bytes / (double)minor_allocated_bytes,
                  (unsigned)(minor_allocated_bytes + 512)/1024);
 
-  /* leave the barrier */
-  if( participating_count > 1 ) {
-    CAML_EV_BEGIN(EV_MINOR_LEAVE_BARRIER);
-    minor_gc_leave_barrier(domain, participating_count);
-    CAML_EV_END(EV_MINOR_LEAVE_BARRIER);
-  }
   return result;
 }
 
@@ -312,34 +287,6 @@ caml_empty_minor_heap_promote(caml_domain_state* domain,
    thread is alone in trying to increment it. */
 static void nonatomic_increment_counter(atomic_uintnat* counter) {
   atomic_store_relaxed(counter, 1 + atomic_load_relaxed(counter));
-}
-
-static void minor_gc_leave_barrier
-  (caml_domain_state* domain, int participating_count)
-{
-  /* Spin while we have major work available */
-  SPIN_WAIT_BOUNDED {
-    if (caml_plat_barrier_is_released(&minor_gc_end_barrier)) {
-      return;
-    }
-
-    if (!caml_do_opportunistic_major_slice(domain, 0)) {
-      break;
-    }
-  }
-
-  /* Spin a bit longer, which is far less fruitful if we're waiting on
-     more than one thread */
-  unsigned spins =
-    participating_count == 2 ? Max_spins_long : Max_spins_medium;
-  SPIN_WAIT_NTIMES(spins) {
-    if (caml_plat_barrier_is_released(&minor_gc_end_barrier)) {
-      return;
-    }
-  }
-
-  /* If there's nothing to do, block */
-  caml_plat_barrier_wait(&minor_gc_end_barrier);
 }
 
 int caml_do_opportunistic_major_slice
@@ -356,24 +303,20 @@ int caml_do_opportunistic_major_slice
   return work_available;
 }
 
-/* Make sure the minor heap is empty by performing a minor collection
-   if needed.
-
-   This function also samples [caml_gc_mark_phase_requested] to see whether
-   [caml_mark_roots_stw] should be called. To guarantee that all domains
-   agree on whether the roots should be marked, this variable is sampled
-   only once, instead of having domains check it individually.
-*/
+/* Leader setup for the all-domains minor-empty STW. Under always-on MMTk this is
+   now a near-empty shell (excise Phase 1):
+     - the stock mark-phase sampling is gone: caml_gc_mark_phase_requested is never
+       set under MMTk (MMTk owns marking), so caml_mark_roots_stw never fired;
+     - caml_minor_collections_count is no longer bumped here — it is re-homed to
+       caml_minor_gc_domain_bookkeeping on the triggering domain's safepoint
+       (once per minor GC; native never reaches that path, terminate passes 0);
+     - the minor_gc_end_barrier is gone (promote no longer arrives/leaves it).
+   The mark_requested_p out-param is retained for ABI stability with the existing
+   STW dispatch (caml_try_run_on_all_domains_with_spin_work) and is always 0. */
 void caml_empty_minor_heap_setup(caml_domain_state* domain_unused,
                                  void *mark_requested_p) {
-  /* Check whether the mark phase has been requested */
-  *(uintnat*)mark_requested_p =
-    atomic_load_relaxed(&caml_gc_mark_phase_requested)
-    ? atomic_exchange(&caml_gc_mark_phase_requested, 0)
-    : 0;
-  /* Increment the total number of minor collections done in the program */
-  nonatomic_increment_counter (&caml_minor_collections_count);
-  caml_plat_barrier_reset(&minor_gc_end_barrier);
+  (void)domain_unused;
+  *(uintnat*)mark_requested_p = 0;
 }
 
 /* Domain-LOCAL minor-cycle bookkeeping, re-homed off the all-domains minor STW
@@ -407,47 +350,32 @@ caml_stw_empty_minor_heap_no_major_slice(caml_domain_state* domain,
   CAMLassert(caml_domain_is_in_stw());
 #endif
 
-  /* mark_requested_p must be read before minor GC barrier */
-  uintnat mark_requested = *(uintnat*)mark_requested_p;
+  /* excise Phase 1: this STW handler is now a bare shell. The DOMAIN-LOCAL
+     bookkeeping (stats sample, memprof, finalisers, table-clear) has moved off
+     the all-domains minor STW onto each triggering domain's own safepoint
+     (caml_minor_gc_domain_bookkeeping, wired in caml_poll_gc_work / the terminate
+     flush). It is safe to drop here because, for any domain dragged into this STW
+     that did NOT itself trigger: ephe_ref is never populated (Is_young==0),
+     caml_final_update_last_minor is vacuous (Is_young==0), the custom table is
+     never read under MMTk and is self-bounded by each domain's own
+     extra_heap_resources_minor minor-GC self-trigger, and the stats/memprof state
+     is per-domain and refreshed at that domain's own next safepoint. The stock
+     mark branch is dead (caml_gc_mark_phase_requested is never set under MMTk).
+
+     The only thing the handler still does besides the young-region reset is the
+     once-per-STW-pass caml_minor_cycles_started bump, gated on the deterministic
+     single participant participating[0]==domain. It must advance inside the STW
+     so the driver caml_empty_minor_heaps_once retry loop terminates; the driver
+     caller is not necessarily participating[0], so this cannot move to the driver. */
+  (void)mark_requested_p;
 
   if( participating[0] == domain ) {
     nonatomic_increment_counter(&caml_minor_cycles_started);
   }
 
   caml_gc_log("running stw empty_minor_heap_promote");
-  /* Under always-on MMTk, promote no longer oldifies, so it never locks
-     ephemerons (locked_ephemerons is always false); the stock minor ephemeron
-     clean is dead. */
   caml_empty_minor_heap_promote(domain, participating_count, participating);
 
-  CAML_EV_BEGIN(EV_MINOR_MEMPROF_CLEAN);
-  caml_gc_log("updating memprof");
-  caml_memprof_after_minor_gc(domain);
-  CAML_EV_END(EV_MINOR_MEMPROF_CLEAN);
-
-  /* while the minor heap is empty, allow the major GC to mark roots */
-  if (mark_requested)
-    caml_mark_roots_stw(participating_count, participating);
-
-  /* Stock minor custom-block finalization is gone: under always-on MMTk the stock
-     minor heap is empty, so it only ever skipped MMTk objects (Is_young false).
-     Custom finalization is MMTk's responsibility (currently parked). */
-
-  CAML_EV_BEGIN(EV_MINOR_FINALIZERS_ADMIN);
-  caml_gc_log("running finalizer data structure book-keeping");
-  caml_final_update_last_minor(domain);
-  CAML_EV_END(EV_MINOR_FINALIZERS_ADMIN);
-
-  CAML_EV_BEGIN(EV_MINOR_CLEAR);
-  caml_gc_log("running stw empty_minor_heap_domain_clear");
-  caml_empty_minor_heap_domain_clear(domain);
-
-  /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix nursery),
-     not the stock minor arena: after the clear, young_ptr stays mid-block rather
-     than being reset to young_end, so neither the stock empty-minor-heap poison
-     write nor the young_ptr==young_end invariant applies here. */
-
-  CAML_EV_END(EV_MINOR_CLEAR);
   caml_gc_log("finished stw empty_minor_heap");
 }
 
