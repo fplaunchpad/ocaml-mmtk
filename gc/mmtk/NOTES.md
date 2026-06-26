@@ -5,6 +5,40 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR integration — sibling references cloned + P2 port plan + usage recipe + P4 barrier reference (2026-06-26)
+
+Set up + validated the LXR integration against the actual sibling implementations (per the "validate against
+siblings" rule). **References now local in `_references/` (read-only/gitignored):** `mmtk-openjdk-lxr` (the
+`wenyuzhao/mmtk-openjdk` **`lxr`** branch — a real binding that USES LXR), `lxr-builds` (the build/usage recipe).
+The LXR **GC fork** is the `lxr` remote in the submodule (`gc/mmtk-core` → `wenyuzhao/mmtk-core` branch `lxr/lxr`).
+
+**`lxr/lxr` is a SIBLING FORK, not a superset of ours** (agent-verified): same 0.32.0 merge-base, but its
+`immixspace.rs` is a near-rewrite (+872/−263) interleaving RC with three *unrelated* upstream waves
+(page-resource rewrite, `generate_tasks_batched`/`Range<Chunk>`, 1-arg `attempt_mark`/cyclic-mark rework) that
+conflict with our deltas (no-zero, SpaceOverheadTrigger, 2-arg `attempt_mark`). **So P2 = hand-write ~10 gated
+overlays** behind `rc_enabled`/`crate::args` consts (struct fields, ctor, `side_metadata_specs(rc_enabled)`,
+read-side `is_live`/`is_reachable`, inert guards `post_copy`/`mark_lines`/straddle) — **NOT** lift LXR bodies —
+so all 8 existing plans stay byte-identical when off. Prereqs: `PlanConstraints.rc_enabled` + 5 RC side-metadata
+specs + a `Defrag` rc arg. **P2.5** (split out, heavy): the page-resource RC API + work-packet reshape. **P3:**
+port `plan/lxr/` + wire `MMTK_PLAN=LXR`. Full region-by-region plan in the ROADMAP LXR entry.
+
+**Usage recipe (validated vs mmtk-openjdk `lxr` + lxr-builds):** LXR is a pure **runtime plan selection** —
+OpenJDK `-XX:ThirdPartyHeapOptions=plan=LXR`; us `MMTK_PLAN=LXR` → `PlanSelector::LXR`. The binding needs **no
+LXR cargo feature** (mmtk-openjdk's `default=[]`); the `lxr_*` features are mmtk-core *build-time* tuning,
+default-on. **LXR requires a FIXED heap** (no variable sizing — OpenJDK mandates `-Xms==-Xmx`) → P3 must pin
+`MMTK_HEAP_SIZE_MB` for LXR and bypass our SpaceOverhead dynamic heap. mmtk-openjdk `lxr` pins mmtk-core
+`wenyuzhao @ 304ce69d`.
+
+**P4 barrier reference (mmtk-openjdk-lxr/mmtk/src/api.rs):** LXR's `FieldBarrier` (a coalescing per-slot
+field-logging write barrier, `BarrierSelector::FieldBarrier`) is driven by `mmtk_object_reference_write_pre`
+(:426) / `_post` (:441) / `_slow` (:456) → `mutator.barrier().object_reference_write_pre/post/slow(src, slot,
+target)`, plus `mmtk_object_probable_write` (:511). **Our P4** wires the equivalent into `caml_modify` — a
+pre/post slot-granular store barrier, mirroring our existing `caml_mmtk_satb_barrier` path (RQ1's bet: OCaml's
+immutable-by-default heap makes most stores initialising writes through `caml_initialize`, which take NO barrier,
+so the LXR field barrier is unusually cheap for OCaml).
+
+---
+
 ## ROOT-CAUSED + FIXED: the ocamldoc/world.opt deadlock = `resume_mutators` allocating → self-deadlock on the worker-monitor lock (fix `cd62bd47f9`) (2026-06-26)
 
 Root-caused with **gdb on a turing core** (the deadlock reproduces deterministically on Linux too, not just
