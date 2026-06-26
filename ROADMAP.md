@@ -284,8 +284,18 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    invited this successor). Immutable {mask,descriptors} snapshot, atomic publish, lazy chain-retire after a
    collection; closes the latent ConcurrentImmix worker-vs-installer hazard. Validated: world.opt + par_binarytrees
    golden + lib-dynlink-domains/native/initializers (GenImmix) + sanity small-heap clean. **PHASE 2 COMPLETE.**
-   (Validation surfaced GH#15, a pre-existing multi-domain GenImmix deadlock, unrelated; and a latent
-   quiesce-primitive deadlock, #20.)
+   (Validation surfaced GH#15, a pre-existing multi-domain GenImmix deadlock, now FIXED — see below.)
+   **PHASE 3 COMPLETE + MERGED to mainline `5.5+mmtk` @ `7b5ebf0934` (2026-06-26; net −478 lines).**
+   3a/3b/3c deleted the whole all-domains STW family (`caml_try_run_on_all_domains*`, `stw_request`/
+   `stw_leader`/the global-barrier impl, `stw_terminate_domain`, the minor-empty STW chain); MMTk's
+   `stop_all_mutators` is now the **sole all-domains rendezvous**. Kept (as plain spawn/terminate state, not
+   barriers): `all_domains_lock`, `stw_domains`, `young_limit`-poison, the backup thread (systhreads-entangled
+   — deletion deferred to #20). **GH#15 was the gating blocker and is FIXED** (it was 3 bugs: Bug A 4-way
+   lock-order deadlock `73f780c5`; Bug B root-scan UAF/TOCTOU `77ebfd3e` = B1 ml_values RCU-retire + B1′
+   `FieldSlot::load` re-validation; B2 panic→abort safeguard `55007a90`). turing: 0 trace panics (was ~11/12),
+   mmtk `sanity` 24/24 clean. Fixing Bug B unmasked the **pre-existing** #31/GH#3 `Domain.join` result-UAF
+   (~9% on 28-core joinstorm) — equally on mainline, so Phase 3 is a strict improvement; merge shipped, #31
+   tracked separately (GH#3 reopened; harden the result-handoff for high-core load). → NOTES 2026-06-26.
    3 (high) retire the rendezvous family together, MMTk STW sole, backup
    thread deleted (#20). Phase 3 **structurally eliminates the bug#3c/dual-STW deadlock class** (no second
    barrier for a terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos

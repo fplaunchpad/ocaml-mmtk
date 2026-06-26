@@ -98,12 +98,38 @@ Bug B is **pre-existing**: it reproduces on pre-excision mainline `a77290b6e` (�
 domains, GenImmix 48 MiB) **60/60 clean** across `MMTK_THREADS`∈{1,2,default} — was ~11% panic/segv with
 B1 alone (B1′ closes the immediate variant; `MMTK_DEBUG_ROOT_RACE` showed the skips were `info=0 →
 value=0x1`). par_bt d1/d8 checksums stable + correct (d8 == 8×d1) under GenImmix and StickyImmix (moving
-mature); bytecode GC sanity clean. **turing decisive before/after + mmtk `sanity` at a small heap pending**
-— the reliable 11/12 repro (the *even-garbage* variant-1 UAF, which only B1 fixes) is the authoritative
-check; also rr-pinpoint variant 2's exact interleaving there. Evidence on turing `~/gh15/`:
-`B1_rootcause.txt`, `bugB_panic_backtrace.txt`, replayable rr trace `~/gh15/rrtraces/ag`. **Merge gate:**
-once turing is green, fast-forward Phase 3 (3a/3b/3c + Bug A + B1 + B1′ + B2) to mainline — GH#15 was the
-last blocker.
+mature); bytecode GC sanity clean.
+
+**turing decisive validation — DONE, Bug B FIXED + sanity-clean.** On 28 cores: spawnstorm/joinstorm
+**0 `cannot trace object` panics** (B2-only was 14/14 abort; the ~11/12 baseline is gone), and mmtk
+**`sanity` clean across 24 runs** (0 dangling, 0 dropped root) — proving B1′'s immediate-skip drops no
+live root and the heap stays consistent. `MMTK_DEBUG_ROOT_RACE` confirmed B1′ actively skipping `→0x1`
+races at `0x7fff…` C-stack/CAMLlocal slots (the callback-release race), with B1 covering the freed-heap
+`ml_values` variant. Evidence on turing `~/gh15/`: `B1_validation.txt`, `bugB_panic_backtrace.txt`,
+`B1_join_segv.core`+`_bt.txt`, rr trace `~/gh15/rrtraces/ag`.
+
+**MERGED (2026-06-26).** Phase 3 fast-forwarded to mainline `5.5+mmtk` @ `7b5ebf0934` (9 commits:
+3a/3b/3c + Bug A + B1 + B1′ + B2 + a CLAUDE docs note; net −478 lines). GH#15 — the hang — is RESOLVED
+(closeable); MMTk's `stop_all_mutators` is now the sole all-domains rendezvous on mainline.
+
+**Caveat — fixing Bug B unmasked a SEPARATE pre-existing bug: the #31 / GH#3 `Domain.join` result-UAF
+(~9% segv on 28-core joinstorm).** The joiner reads a `Finished` result whose young block was
+relocated/reclaimed under it (`mov (%rdi),%rax`, `rdi=0x400`). PROVEN pre-existing — B1's diff does not
+touch `sync_and_terminate`/`make_finished`/`caml_mmtk_collect` (the #31 path); it was invisible only
+because Bug B killed the process before the join window. The existing #31 fix (force `caml_mmtk_collect`
+at terminate, `1d2504ab4f`) under-covers join-heavy high-core load — its own NOTES perf-followup already
+flagged this and proposed a lighter robust mechanism (promote/pin just the result, or retain the
+terminating domain's last block until the joiner consumes it). #31 is **equally present on mainline**, so
+Phase 3 is a strict improvement and does NOT introduce it (merge decision: ship Phase 3, track #31
+separately — reopened GH#3). Next: harden the result-handoff for high-core load.
+
+**The recurring thesis (Bug A → Bug B → #31).** Each is a pre-existing *root-lifetime* race that OCaml's
+all-domains STW was silently masking by stopping every domain (incl. a terminating one) during the GC.
+Retire that STW — so MMTk's is the sole rendezvous and terminating domains deregister and run concurrently
+— and each masked invariant surfaces in turn, each needing an explicit concurrency-safe replacement:
+frametable cycle-RCU (Phase 2), `ml_values` RCU-retire (B1), `FieldSlot::load` re-validation (B1′), and now
+the `Domain.join` result-handoff (#31). The chain is the empirical evidence: *"retiring the global STW
+exposes the root-lifetime invariants it was implicitly enforcing; each must be re-established explicitly."*
 
 ---
 

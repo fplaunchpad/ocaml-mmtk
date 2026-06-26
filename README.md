@@ -32,10 +32,13 @@ on a common substrate. The research agenda lives in
   multi-domain, native code, weak/ephemeron/finaliser support, the testsuite); **excising
   the stock GC** (no stock minor/major collector, shared heap, or minor-heap arena remains);
   advancing the base to **OCaml 5.5.0 final**; the MMTk-native multi-domain stop-the-world
-  handshake; and **`ConcurrentImmix`** (bytecode + native) — a concurrent marker with an SATB
-  write barrier, proven clean on `lazy` values and on effect-handler continuations.
-- **In progress:** the macro-benchmark performance campaign + analysis (M8); and three
-  rare-crash investigations tracked as GitHub issues.
+  handshake; **retiring OCaml's own all-domains STW** so MMTk's `stop_all_mutators` is the
+  *sole* all-domains rendezvous ("one STW" — the `caml_try_run_on_all_domains` family deleted,
+  −478 lines; GH#15 fixed); and **`ConcurrentImmix`** (bytecode + native) — a concurrent marker
+  with an SATB write barrier, proven clean on `lazy` values and on effect-handler continuations.
+- **In progress:** the macro-benchmark performance campaign + analysis (M8); and a few
+  rare-crash investigations tracked as GitHub issues (notably the pre-existing #31 `Domain.join`
+  result use-after-free under heavy multi-domain join, which the STW excision unmasked).
 - **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
   read, and `runtime_events` emission under MMTk (broken — see ROADMAP / FAQ).
 - **Testsuite triage** is ongoing: each failing test is either fixed or disabled with a single
