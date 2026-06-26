@@ -52,7 +52,9 @@ The milestone-by-milestone plan and current status are in
 ### Performance (quick panel)
 
 12 stdlib-only CLBG/sandmark/effects programs, native, dynamic heap (memory parity with vanilla),
-best-of-5 on an Apple M4 Pro. Single-domain uses `MMTK_THREADS=1`; the parallel sweep uses
+median of 5 reps on an Apple M4 Pro. Single-domain uses **one GC worker** (`MMTK_THREADS=1`) — the
+`nproc` default oversubscribes and inflates the many-small-collection benches (e.g. GenImmix
+`LU_decomposition` 1.09× → 2.19×, `kb` 1.27× → 1.72× at nproc=12). The parallel sweep below uses
 `MMTK_THREADS=domains`, core-pinned. Run: `uv run quick/quickbench.py …`.
 
 **Sequential** — wall vs vanilla 5.5.0 (lower is better):
@@ -61,16 +63,21 @@ best-of-5 on an Apple M4 Pro. Single-domain uses `MMTK_THREADS=1`; the parallel 
 
 | bench | GenImmix *(default)* | Immix | ConcurrentImmix |
 |---|--:|--:|--:|
-| binarytrees | 1.07× | 2.14× | **0.55×** |
-| nbody | 1.01× | 1.01× | 1.02× |
-| fannkuchredux | 0.99× | 1.00× | 1.00× |
-| spectralnorm | **0.96×** | 1.20× | 1.19× |
-| mandelbrot | 1.00× | 1.00× | 1.01× |
-| matrix_multiplication | **0.90×** | 0.87× | 0.88× |
-| LU_decomposition | **1.05×** | 1.25× | 1.31× |
-| kb | 1.30× | 1.10× | **0.96×** |
+| binarytrees | 1.02× | 2.12× | **0.56×** |
+| nbody | 0.99× | 1.00× | 1.00× |
+| fannkuchredux | 1.00× | 1.00× | 1.00× |
+| spectralnorm | **0.95×** | 1.15× | hang† |
+| mandelbrot | 0.99× | 1.00× | 1.00× |
+| matrix_multiplication | **0.91×** | 0.91× | **0.91×** |
+| LU_decomposition | 1.09× | 1.27× | hang† |
+| kb | 1.27× | 1.03× | **0.89×** |
 
-GenImmix is parity-or-better on 7/8 benches; `kb` is the lone outlier, where ConcurrentImmix wins.
+GenImmix (default) is parity-or-better on 6 of 8 benches at one GC worker; `kb` (1.27×) is the lone
+outlier, where ConcurrentImmix wins (0.89×). ConcurrentImmix is fastest on alloc-heavy `binarytrees`
+(**0.56×**) but is **not yet general-purpose**: it †**intermittently livelocks** on the high-allocation
+float kernels `spectralnorm` / `LU_decomposition` at perf sizes — GH#14, a marker-vs-mutator
+concurrent-marking livelock the scheduler-assert removal did not cover (it fixed only the deterministic
+abort). `Immix` lags on `binarytrees` at one worker (2.12×); parallel marking closes most of that gap (0.90× at nproc=12).
 
 **Parallel** — speedup at 8 domains, controlled (pinned, `MMTK_THREADS=domains`; ideal = 8):
 
@@ -86,9 +93,10 @@ The fork scales ≈ vanilla on `par_matmul`; the "anti-scaling" earlier reported
 `nproc`-worker oversubscription artifact (now controlled). †intermittent multidomain hang; ‡vanilla also
 regresses (bandwidth). Mechanism + RQ10: `SCALABILITY.md`.
 
-The scheduler-assert deadlock is fixed for all plans (GH#6/#14, mmtk-core `ec2f5079f8`). Open residuals:
-the intermittent multidomain hang above, and `chameneos_redux` under ConcurrentImmix. *Eyeball panel —
-the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
+The scheduler-assert *abort* is fixed for all plans (GH#6/#14, mmtk-core `ec2f5079f8`). Open residuals:
+the intermittent multidomain hang above, and a ConcurrentImmix concurrent-marking **livelock** on
+high-allocation kernels — single-domain `spectralnorm`/`LU_decomposition` (seq table) and `chameneos_redux`
+(GH#14). *Eyeball panel — the M8 macro-bench campaign (`PERFORMANCE.md`) is authoritative.*
 
 ## Building
 
