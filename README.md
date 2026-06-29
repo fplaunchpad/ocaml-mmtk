@@ -44,10 +44,12 @@ on a common substrate. The research agenda lives in
 - **Known tails:** a flagged memprof colour read and `runtime_events` emission under MMTk
   (broken — see ROADMAP / FAQ). (Weak-clear timing under the generational plans — GH#5 — is
   fixed: full GC under mature pressure + `Gc.major_collections` counts full GCs only.)
-- **Testsuite triage** is ongoing: each failing test is either fixed or disabled with a single
-  greppable marker as its first line, `(* MMTk DISABLED: <reason> *)`, replacing the `(* TEST *)`
-  block. `grep -rn 'MMTk DISABLED' testsuite/tests` lists every intentionally-disabled test and why
-  (see ROADMAP item #19).
+- **Testsuite triage** is complete (item #19): every failure is triaged with evidence — **0 non-flaky
+  failures** under GenImmix/Immix, with 58 known-unsupported/timing tests disabled via a single greppable
+  first-line marker, `(* MMTk DISABLED: <reason> [category] *)`, replacing the `(* TEST *)` block
+  (`grep -rn 'MMTk DISABLED' testsuite/tests` enumerates them; per-test evidence in
+  [`gc/mmtk/TESTSUITE_TRIAGE.md`](gc/mmtk/TESTSUITE_TRIAGE.md)). The only genuine MMTk semantic gaps are
+  two deterministic signal-delivery poll-point diffs (a signal lands at a later safepoint, not lost).
 
 The milestone-by-milestone plan and current status are in
 [`ROADMAP.md`](ROADMAP.md).

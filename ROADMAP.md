@@ -355,7 +355,19 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    **church `fix/bug3c-cross-stw` build artifact** — clean mainline on local + turing gives 114 GCs; check before
    merging that branch, but it is not a mainline bug.) → see item below.
 
-10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (ongoing).** Work
+10. **#19 — Testsuite triage: fix every failure, or disable it with a greppable marker (DONE — 0 untriaged).**
+    **Complete (2026-06-29):** a full-clone GenImmix run (1700 pass) triaged every failure with evidence
+    (isolated re-run + actual-vs-reference diff). **58 markers** total now (30 baseline + 28 new); final
+    **GenImmix/Immix = 0 non-flaky failures** (2 left enabled as load-timing-flaky, pass in isolation). The 28
+    categorize as: 11 `runtime_events` `[unsupported]`, 9 finaliser/weak/ephemeron deferral `[semantic-timing]`,
+    3 `Gc.stat`/minor-counter `[stock-counter]`, 2 signal-poll `[behavioral-diff]`, 1 alignment, 1
+    gdb-worker-threads infra, 1 slow-timeout. **The only genuine MMTk semantic gaps** are the **2 deterministic
+    signal-delivery poll-point diffs** (`callback/signals_alloc.ml`, `lib-unix/kill/unix_kill.ml` — a signal
+    lands at a later safepoint, not lost; no correctness gap, `sanity` unaffected) → one low-priority follow-up
+    (align signal poll/safepoint with stock). Per-test evidence + categories in **`gc/mmtk/TESTSUITE_TRIAGE.md`**.
+    Original triage protocol below.
+
+    Work
     through the remaining testsuite non-pass (M7: ~1450/1547 pass under Immix/StickyImmix; the ~97 non-pass
     are not yet individually triaged). For **each** failing test: either **fix** it, or **disable** it with a
     single canonical marker as the file's first line, replacing the `(* TEST *)` block (so ocamltest skips
