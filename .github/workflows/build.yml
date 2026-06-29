@@ -265,6 +265,20 @@ jobs:
           # Select latest supported version
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           lldb --version
+      # mmtk-ocaml: the runtime archives bundle the always-on MMTk staticlib's
+      # Rust objects, emitted by the LLVM shipped with the runner's Rust toolchain
+      # (currently rust 1.96 / LLVM 22). Xcode's `nm` (Apple LLVM 17) cannot read
+      # them and aborts tools/check-symbol-names with "Unknown attribute kind".
+      # Install the version-matched llvm-nm (matches the toolchain that built the
+      # objects) and export $NM so check-symbol-names uses it (see that script).
+      - name: Install version-matched llvm-nm (for check-symbol-names)
+        if: startsWith(matrix.os, 'macos-')
+        run: |
+          rustup component add llvm-tools
+          LLVM_NM="$(find "$(rustc --print sysroot)/lib/rustlib" -name llvm-nm -type f | head -n 1)"
+          test -x "$LLVM_NM" || { echo "llvm-nm not found after installing llvm-tools" >&2; exit 1; }
+          echo "NM=$LLVM_NM" >> "$GITHUB_ENV"
+          "$LLVM_NM" --version
       - name: configure tree
         run: |
           CONFIG_ARG='--enable-codegen-invariants ${{ matrix.config_arg }}' MAKE_ARG=-j bash -xe tools/ci/actions/runner.sh configure
