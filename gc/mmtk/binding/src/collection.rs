@@ -85,12 +85,75 @@ static STW_COND: Condvar = Condvar::new();
 /// (the span from stop_all_mutators to resume_mutators). Lets the runtime report
 /// GC time separately from mutator/allocation time — e.g. to see whether parallel
 /// marking actually scales. Reported at exit under MMTK_VERBOSE.
+///
+/// `GC_COUNT` counts EVERY collection (nursery + full). `FULL_GC_COUNT` counts only
+/// FULL (major) collections — for a generational plan a nursery (minor) GC is NOT a
+/// full collection, so it must not bump the count `Gc.major_collections` reports
+/// (GH#5: the test's `while major_collections < N` window, and stock OCaml's own
+/// `major_collections` semantics, count only full cycles — a nursery GC is the
+/// MMTk analogue of a stock minor collection). For non-generational plans every GC
+/// is full, so the two stay equal there. Both are bumped together in
+/// `resume_mutators`, keyed on `last_collection_full_heap()`.
 static GC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FULL_GC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GC_NANOS: AtomicU64 = AtomicU64::new(0);
 static GC_PAUSE_START: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Mature (major-heap) reserved pages right after the last FULL collection — the
+/// baseline for the mature-space-pressure full-GC trigger (GH#5). After a full GC
+/// reclaims the mature heap, a generational plan otherwise runs ONLY nursery GCs
+/// until the mature space is nearly exhausted, so mature-DEAD weaks/ephemerons/
+/// finalisable values are never reclaimed (their referents never get re-traced).
+/// Mirroring stock OCaml's `space_overhead` pacing, once mature reserved pages
+/// have grown past this baseline by `MATURE_PRESSURE_OVERHEAD_PCT`% we force the
+/// next collection to be a full heap GC (see `resume_mutators`). 0 = no full GC
+/// has happened yet (every collection so far has been a nursery GC).
+static LAST_FULL_GC_MATURE_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of nursery (minor) GCs since the last FULL collection. A pure
+/// mature-size trigger starves on a steady-state-live-set program that churns the
+/// nursery heavily (weaklifetime: a near-constant live set, so mature barely grows
+/// past the baseline → full GCs become arbitrarily rare → `Gc.major_collections`
+/// stalls and dead mature weaks never clear). A bounded nursery-GC cadence
+/// guarantees a full collection runs at least every N nursery GCs regardless, the
+/// way stock OCaml's pacing bounds the minor GCs between full major cycles.
+static NURSERY_GCS_SINCE_FULL: AtomicUsize = AtomicUsize::new(0);
+
+/// Mature-space growth (over the post-full-GC baseline) that forces the next
+/// collection to be a full heap GC, as a percentage. 120% ≈ stock OCaml's default
+/// `space_overhead` (a full major cycle's worth of mature growth between full GCs).
+const MATURE_PRESSURE_OVERHEAD_PCT: usize = 120;
+
+/// Cadence backstop: force a full heap GC after at most this many nursery (minor)
+/// GCs since the last full GC, even if the mature heap has not grown enough to trip
+/// the space-overhead trigger. Guarantees `Gc.major_collections` keeps advancing and
+/// mature-dead weaks/ephemerons/finalisers are reclaimed on a bounded schedule for
+/// steady-state-live-set programs (GH#5). 8 mirrors the order of magnitude of minor
+/// GCs between full major cycles in stock OCaml's default pacing; measured to leave
+/// GenImmix throughput on a mature-growing workload (binarytrees) at parity with
+/// Immix, since a full GC at this cadence is cheap whenever the mature heap is small.
+const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE: usize = 8;
+
+/// Floor (in pages) below which the mature-pressure trigger never fires, so tiny /
+/// short-lived programs (whose mature heap is a handful of pages) don't thrash on
+/// full GCs. 4 MiB / page_size; computed lazily from the runtime page size.
+fn mature_pressure_floor_pages() -> usize {
+    const FLOOR_BYTES: usize = 4 * 1024 * 1024;
+    let pg = mmtk::util::constants::BYTES_IN_PAGE;
+    FLOOR_BYTES / pg
+}
+
+/// Number of collections reported as `Gc.major_collections` (and the field tests
+/// poll to confirm a *major* cycle ran). Full GCs only — see `FULL_GC_COUNT`.
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_gc_count() -> usize {
+    FULL_GC_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total number of collections — nursery + full. For MMTK_VERBOSE reporting (so the
+/// pause/throughput readout still reflects EVERY stop-the-world, not just full GCs).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_total_gc_count() -> usize {
     GC_COUNT.load(Ordering::Relaxed)
 }
 
@@ -311,6 +374,59 @@ impl Collection<OCamlVM> for VMCollection {
 
     /// GC worker: collection finished — un-poison every domain and wake them.
     fn resume_mutators(_tls: VMWorkerThread) {
+        // Collection accounting + the GH#5 mature-space-pressure full-GC trigger.
+        // This runs on the GC worker AFTER `Scheduler::end_of_gc` (which set
+        // `next_gc_full_heap`) and BEFORE any mutator resumes, so reading plan state
+        // and calling `force_full_heap_collection` here is race-free, and our
+        // force-store is sequenced after end_of_gc's so it is not clobbered.
+        //
+        // `last_collection_full_heap()` reflects the GC that just ran (`end_of_gc`
+        // touches only `next_gc_full_heap`, not `gc_full_heap`). For a
+        // non-generational plan `.generational()` is None, so EVERY GC counts as a
+        // full GC and the trigger is inert — behaviour is unchanged there.
+        let plan = crate::mmtk().get_plan();
+        let was_full = match plan.generational() {
+            None => true,
+            Some(g) => g.last_collection_full_heap(),
+        };
+        if was_full {
+            FULL_GC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(g) = plan.generational() {
+            let mature = g.get_mature_reserved_pages();
+            if was_full {
+                // A full GC just (re)traced + reclaimed the mature heap. Reset both
+                // the mature-pressure baseline and the nursery-GC cadence counter.
+                LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
+                NURSERY_GCS_SINCE_FULL.store(0, Ordering::Relaxed);
+            } else {
+                // Nursery (minor) GC. Force the NEXT collection to be a full heap GC
+                // if EITHER trigger fires:
+                //   - mature pressure: the mature heap has grown past the post-full-GC
+                //     baseline by the space-overhead margin (catches mature-growing
+                //     workloads — e.g. binarytrees — promptly), OR
+                //   - cadence: at least MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE nursery
+                //     GCs have run since the last full GC. This is the backstop for a
+                //     steady-state-live-set program that churns the nursery without
+                //     growing mature (weaklifetime), where the mature trigger never
+                //     fires; without it `Gc.major_collections` would stall and dead
+                //     mature weaks/ephemerons/finalisers would never clear (GH#5).
+                //     A full GC here is cheap precisely when this is the firing
+                //     trigger (small mature heap), so it does not hurt throughput.
+                let n = NURSERY_GCS_SINCE_FULL.fetch_add(1, Ordering::Relaxed) + 1;
+                let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
+                let floor = mature_pressure_floor_pages();
+                let threshold = baseline.saturating_add(
+                    baseline.saturating_mul(MATURE_PRESSURE_OVERHEAD_PCT) / 100,
+                );
+                let by_mature = mature > floor && mature > threshold;
+                let by_cadence = n >= MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE;
+                if by_mature || by_cadence {
+                    g.force_full_heap_collection();
+                }
+            }
+        }
+
         for domain in crate::active_plan::domain_addrs() {
             unsafe { caml_mmtk_uninterrupt(domain) };
         }

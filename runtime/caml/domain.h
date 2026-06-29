@@ -60,13 +60,9 @@ Caml_inline int caml_check_gc_interrupt(caml_domain_state * dom_st)
 asize_t caml_norm_minor_heap_size (intnat);
 void caml_update_minor_heap_max(uintnat minor_heap_wsz);
 
-/* is there a STW interrupt queued that needs servicing */
-int caml_incoming_interrupts_queued(void);
-
 void caml_poll_gc_work(void);
 void caml_handle_gc_interrupt(void);
 void caml_process_external_interrupt(void);
-void caml_handle_incoming_interrupts(void);
 
 CAMLextern void caml_interrupt_self(void);
 void caml_interrupt_all_signal_safe(void);
@@ -74,11 +70,7 @@ void caml_reset_young_limit(caml_domain_state *);
 void caml_update_young_limit_after_c_call(caml_domain_state *);
 
 CAMLextern void caml_reset_domain_lock(void);
-CAMLextern int caml_bt_is_in_blocking_section(void);
-CAMLextern int caml_bt_is_self(void);
 CAMLextern intnat caml_domain_is_multicore (void);
-CAMLextern void caml_bt_enter_ocaml(void);
-CAMLextern void caml_bt_exit_ocaml(void);
 CAMLextern void caml_acquire_domain_lock(void);
 CAMLextern void caml_release_domain_lock(void);
 

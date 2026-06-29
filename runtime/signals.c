@@ -144,13 +144,11 @@ CAMLexport void caml_record_signal(int signal_number)
 
 static void caml_enter_blocking_section_default(void)
 {
-  caml_bt_exit_ocaml();
   caml_release_domain_lock();
 }
 
 static void caml_leave_blocking_section_default(void)
 {
-  caml_bt_enter_ocaml();
   caml_acquire_domain_lock();
 }
 

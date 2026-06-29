@@ -107,14 +107,37 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     let trigger = if heap_size != 0 {
         Some(format!("FixedHeapSize:{}", heap_size))
     } else if std::env::var_os("MMTK_GC_TRIGGER").is_none() {
-        const MIN_HEAP: usize = 16 * 1024 * 1024;
+        // Dynamic-heap floor (GH#6). The floor is the smallest the `live × 2.2` target
+        // is allowed to shrink the heap to; for a LOW-LIVE, HIGH-ALLOCATION-RATE program
+        // the target collapses to the floor, so the floor decides how often we collect
+        // while the program is still allocating. 16 MiB was too low: it let a nursery GC
+        // fire during e.g. matmul's matrix-BUILD phase, which PROMOTES the half-built
+        // result matrix into mature space; the O(n^3) compute loop that follows then pays
+        // the generational WRITE BARRIER on every `res.(i).(j) <- _` write into the now-old
+        // matrix (matmul-768: a single such GC inflated instruction count 5.8x → 19.6 s vs
+        // 3.1 s; perf-stat confirmed it is instruction inflation, not cache locality).
+        // Raising the floor to 32 MiB keeps the canonical quick-panel workloads' transient
+        // build footprint in the nursery (0 GCs, full speed) at negligible RSS cost
+        // (genuinely tiny programs never commit the floor — it is a LIMIT, not a
+        // reservation: nbody/fannkuch/mandelbrot stay at 8 MiB RSS). NOTE: this only moves
+        // the cliff to a larger live set (size-1024 matmul still trips one promoting GC);
+        // the structural fix (survival/age-driven promotion so an actively-built object is
+        // not promoted) is tracked under RQ2. Tunable via MMTK_MIN_HEAP_MB for measurement.
+        const DEFAULT_MIN_HEAP_MB: usize = 32;
+        let min_heap = std::env::var("MMTK_MIN_HEAP_MB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&mb| mb > 0)
+            .unwrap_or(DEFAULT_MIN_HEAP_MB)
+            * 1024
+            * 1024;
         // heap = live × (1 + overhead/100); 120% ≈ stock OCaml's default space_overhead.
         const OVERHEAD_PCT: usize = 120;
         let ram = physical_memory_bytes();
-        let max_heap = if ram > MIN_HEAP { ram } else { 64usize << 30 }; // RAM, or 64 GiB if unknown
+        let max_heap = if ram > min_heap { ram } else { 64usize << 30 }; // RAM, or 64 GiB if unknown
         Some(format!(
             "SpaceOverheadSize:{},{},{}",
-            MIN_HEAP, max_heap, OVERHEAD_PCT
+            min_heap, max_heap, OVERHEAD_PCT
         ))
     } else {
         None // respect the user's MMTK_GC_TRIGGER

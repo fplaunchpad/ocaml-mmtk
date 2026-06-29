@@ -72,31 +72,19 @@ SetThreadDescription(HANDLE hThread, PCWSTR lpThreadDescription);
 
 typedef int st_retcode;
 
+/* Under always-on MMTk the per-domain backup thread has been retired (MMTk's
+   stop_all_mutators is the sole all-domains rendezvous; a thread that releases
+   the domain lock is removed from the RUNNING set and not awaited), so acquiring
+   and releasing the domain lock is all these need to do. The
+   other_threads_waiting argument is unused now but kept for the masterlock ABI. */
 static void st_bt_lock_acquire(void) {
-
-  /* We do not want to signal the backup thread if it is not "working"
-     as it may very well not be, because we could have just resumed
-     execution from another thread right away. */
-  if (caml_bt_is_in_blocking_section()) {
-    caml_bt_enter_ocaml();
-  }
-
   caml_acquire_domain_lock();
-
   return;
 }
 
 static void st_bt_lock_release(bool other_threads_waiting) {
-
-  /* Here we do want to signal the backup thread iff there's
-     no thread waiting to be scheduled, and the backup thread is currently
-     idle. */
-  if (other_threads_waiting && caml_bt_is_in_blocking_section() == 0) {
-    caml_bt_exit_ocaml();
-  }
-
+  (void)other_threads_waiting;
   caml_release_domain_lock();
-
   return;
 }
 
@@ -589,9 +577,6 @@ static void thread_yield(void);
 
 void caml_thread_interrupt_hook(void)
 {
-  /* Do not attempt to yield from the backup thread */
-  if (caml_bt_is_self()) return;
-
   uintnat is_on = 1;
   atomic_uintnat* req_external_interrupt =
     &Caml_state->requested_external_interrupt;

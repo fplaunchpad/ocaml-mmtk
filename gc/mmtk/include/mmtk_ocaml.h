@@ -161,8 +161,12 @@ bool mmtk_ocaml_pin_object(const void* addr);
 /** Objects relocated by copying collection so far (Immix defrag, etc.). */
 size_t mmtk_ocaml_objects_copied(void);
 
-/** Number of collections performed so far. */
+/** Number of FULL (major) collections performed so far. For a generational plan a
+ *  nursery (minor) GC is excluded; this is what Gc.major_collections reports. */
 size_t mmtk_ocaml_gc_count(void);
+
+/** Total number of collections performed so far (nursery + full). MMTK_VERBOSE. */
+size_t mmtk_ocaml_total_gc_count(void);
 
 /** Total stop-the-world GC time so far, in milliseconds. */
 uint64_t mmtk_ocaml_gc_time_ms(void);

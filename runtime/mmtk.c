@@ -195,7 +195,8 @@ void caml_mmtk_init(void)
 static void caml_mmtk_report_copied(void)
 {
   fprintf(stderr,
-          "[mmtk] GCs: %zu, GC time: %llu ms, objects copied: %zu\n",
+          "[mmtk] GCs: %zu (full: %zu), GC time: %llu ms, objects copied: %zu\n",
+          mmtk_ocaml_total_gc_count(),
           mmtk_ocaml_gc_count(),
           (unsigned long long) mmtk_ocaml_gc_time_ms(),
           mmtk_ocaml_objects_copied());
@@ -757,40 +758,30 @@ void caml_mmtk_quiesce_ack(caml_domain_state *d)
                        atomic_load_acquire(&caml_mmtk_quiesce_epoch));
 }
 
-/* Park this domain for an MMTk collection, cooperating with OCaml's own
-   stop-the-world.
-
-   OCaml has its OWN multi-domain STW (caml_try_run_on_all_domains), used at
-   domain spawn/terminate. If a domain froze in MMTk's park while OCaml tried to
-   run a STW, the two barriers would deadlock: OCaml waits for this domain to
-   join its barrier while MMTk waits for every domain to park. We avoid that by
-   handing this domain's OCaml-STW participation to its backup thread for the
-   duration of the park — exactly what a C blocking section does
-   (caml_enter/leave_blocking_section_default). The backup thread answers
-   caml_try_run_on_all_domains on our behalf while we wait. */
-/* Cooperatively wait out an in-progress collection: hand this domain's OCaml-STW
-   participation to its backup thread, drop the domain lock, mark STOPPED and wait
-   for the MMTk resume epoch, then re-enter OCaml. Does NOT re-mark RUNNING — the
+/* Cooperatively wait out an in-progress collection: drop the domain lock (which
+   removes this domain from MMTk's RUNNING set, so the collector no longer awaits
+   it — exactly what a C blocking section does), mark STOPPED and wait for the
+   MMTk resume epoch, then re-acquire the lock. Does NOT re-mark RUNNING — the
    caller does that via caml_mmtk_become_running (so the RUNNING transition and the
-   GC-active check stay atomic w.r.t. the next collection). */
+   GC-active check stay atomic w.r.t. the next collection).
+
+   (Under always-on MMTk, stop_all_mutators is the sole all-domains rendezvous.
+   OCaml's own STW was retired, so there is no second barrier to deadlock against
+   and no backup thread to hand participation to — releasing the lock suffices.) */
 static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 {
-  caml_bt_exit_ocaml();
   caml_release_domain_lock();
   mmtk_ocaml_stw_park(domain_state_addr);   /* mark STOPPED, wait for resume */
-  caml_bt_enter_ocaml();
   caml_acquire_domain_lock();
 }
 
 /* Transition this domain to RUNNING (a must-stop STW participant). If a
    collection is active, mmtk_ocaml_try_mark_running refuses and we park
-   cooperatively (above) so the backup thread keeps servicing OCaml's own STW
-   while we wait — then retry. We must NOT just spin on "GC active" while holding
-   the domain lock: a running domain may be leading OCaml's minor-heap STW
-   (caml_empty_minor_heaps_once), and freezing here without releasing the lock /
-   handing off to the backup deadlocks that STW against MMTk's (see the burn
-   deadlock in gc/mmtk/NOTES.md). Used on every STOPPED->RUNNING edge: resume from
-   park, leave a blocking section, and a child starting to run OCaml. */
+   cooperatively (above) — releasing the domain lock so the collector does not
+   wait on us — then retry. We must NOT just spin on "GC active" while holding the
+   domain lock: that would keep this domain in the RUNNING set, wedging
+   stop_all_mutators on running.is_empty() forever. Used on every STOPPED->RUNNING
+   edge: resume from park, leave a blocking section, and a child starting OCaml. */
 void caml_mmtk_become_running(uintnat domain_state_addr)
 {
   while (!mmtk_ocaml_try_mark_running(domain_state_addr))
