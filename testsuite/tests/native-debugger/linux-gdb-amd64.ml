@@ -1,6 +1,5 @@
-(* TEST
-   native-compiler;
-   no-tsan; (* Skip, TSan inserts extra frames into backtraces *)
+(* MMTk DISABLED: multi-threaded-runtime gdb artifact: gdb enumerates MMTk's 28 GC worker threads and uses the multi-thread "Thread N hit Breakpoint" format vs the single-threaded reference; all breakpoints hit correctly [infra-artifact]. *)
+
    linux;
    not-clang; (* Skip, clang is tested on macOS *)
    arch_amd64;

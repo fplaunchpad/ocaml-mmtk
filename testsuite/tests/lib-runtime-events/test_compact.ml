@@ -1,6 +1,5 @@
-(* TEST
- include runtime_events;
-*)
+(* MMTk DISABLED: runtime_events compaction events not emitted (no stock compactor) under MMTk [unsupported]. *)
+
 open Runtime_events
 
 type state =

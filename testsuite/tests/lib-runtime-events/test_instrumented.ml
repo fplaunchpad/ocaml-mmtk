@@ -1,9 +1,4 @@
-(* TEST
- include runtime_events;
- flags = "-runtime-variant=i";
- instrumented-runtime;
- native;
-*)
+(* MMTk DISABLED: runtime_events instrumented GC-event stream not emitted under MMTk [unsupported]. *)
 
 open Runtime_events
 

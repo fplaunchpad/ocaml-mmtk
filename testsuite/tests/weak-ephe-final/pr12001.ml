@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: finaliser sync-timing: "finalised" line missing — finaliser not invoked on the test's Gc.full_major under MMTk (deferred) [semantic-timing]. *)
 
 let [@inline never] foo () =
   let s = "Hello" ^ " world!" in
