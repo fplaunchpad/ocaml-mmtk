@@ -1468,8 +1468,17 @@ runtime/libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrunpic_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
-runtime/libcamlrun_shared.$(SO): $(libcamlrunpic_OBJECTS)
-	$(V_MKDLL)$(MKDLL) -o $@ $^ $(BYTECCLIBS)
+# MMTk (GH#18): the shared runtime libraries reference mmtk_ocaml_* just like the
+# static archives, but unlike the .a rules above they were built from the *pic
+# objects ALONE — so libcamlrun_shared/libasmrun_shared shipped with undefined
+# mmtk_ocaml_* symbols, which broke any executable that links the shared runtime
+# (the opam/dune install path: `ld: undefined reference to mmtk_ocaml_*`). Bundle
+# the same staged MMTk objects into the .so (order-only $(MMTK_OBJS_STAMP) keeps
+# them staged), and add $(MMTK_LINK) so the .so resolves MMTk's transitive system
+# deps at link time (a .so resolves its own deps; a .a defers them to the final
+# link, which is why the archive rules don't need it).
+runtime/libcamlrun_shared.$(SO): $(libcamlrunpic_OBJECTS) | $(MMTK_OBJS_STAMP)
+	$(V_MKDLL)$(MKDLL) -o $@ $^ $(MMTK_OBJS_DIR)/*.o $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/libasmrun.$(A): $(libasmrun_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libasmrun_OBJECTS))
@@ -1487,8 +1496,12 @@ runtime/libasmrun_pic.$(A): $(libasmrunpic_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libasmrunpic_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
-runtime/libasmrun_shared.$(SO): $(libasmrunpic_OBJECTS)
-	$(V_MKDLL)$(MKDLL) -o $@ $^ $(NATIVECCLIBS)
+# MMTk (GH#18): bundle the staged MMTk objects + system deps into the shared
+# native runtime too (see libcamlrun_shared above). Without this, an installed
+# libasmrun_shared.so has undefined mmtk_ocaml_* and the opam `test-in-prefix`
+# native link fails.
+runtime/libasmrun_shared.$(SO): $(libasmrunpic_OBJECTS) | $(MMTK_OBJS_STAMP)
+	$(V_MKDLL)$(MKDLL) -o $@ $^ $(MMTK_OBJS_DIR)/*.o $(MMTK_LINK) $(NATIVECCLIBS)
 
 runtime/libcomprmarsh.$(A): $(libcomprmarsh_OBJECTS)
 	$(V_MKLIB)$(call MKLIB,$@, $^)
