@@ -34,6 +34,11 @@ extern int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize);
  * under MMTk). No-op for NoGC and when MMTk is disabled. */
 extern void caml_mmtk_collect(void);
 
+/* True (1) iff value `v` is a heap block currently in the generational nursery.
+ * 0 for immediates, mature blocks, non-generational plans, and NoGC. Used by the
+ * domain-termination result handoff to confirm promotion (issue #31). */
+extern int caml_mmtk_is_young(value v);
+
 /* Initialise MMTk once for the process. Reads the plan from the MMTK_PLAN
  * environment variable (default "NoGC") and the heap size from
  * MMTK_HEAP_SIZE_MB (default 1024 MiB). Idempotent. */

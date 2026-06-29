@@ -154,6 +154,12 @@ void mmtk_ocaml_set_alloc_zeroed(bool zeroed);
 
 bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
 
+/** True iff `addr` is an object currently in the generational nursery (young
+ * space). False for mature objects and every non-generational plan. Used by the
+ * domain-termination result handoff (issue #31) to confirm the result was
+ * promoted before publishing it to the joiner. */
+bool mmtk_ocaml_is_in_nursery(const void* addr);
+
 /** Pin a block so a moving collection won't relocate it (interim weak/ephemeron
  * support). Returns false for non-MMTk addresses / inert under non-moving plans. */
 bool mmtk_ocaml_pin_object(const void* addr);
