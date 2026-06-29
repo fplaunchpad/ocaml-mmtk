@@ -91,6 +91,11 @@ static int caml_mmtk_generational = 0;
    needs the SATB (snapshot-at-the-beginning) deletion write barrier. Read on
    every mutable pointer write, so keep it a plain int. */
 static int caml_mmtk_concurrent = 0;
+/* Whether the active plan (LXR) uses the coalescing field-logging write barrier for
+   reference counting. Like the SATB barrier, the per-slot pre-store hook in caml_modify
+   routes to the mutator's installed barrier (a FieldBarrier for LXR) via
+   mmtk_ocaml_satb_barrier, which logs the field + buffers the RC inc/dec. */
+static int caml_mmtk_field_log = 0;
 static int caml_mmtk_collection_started = 0;
 
 /* M6: MMTk-native weak-reference / ephemeron / finaliser processing via the
@@ -149,6 +154,7 @@ void caml_mmtk_init(void)
                            || strcmp(plan, "StickyImmix") == 0
                            || strcmp(plan, "GenCopy") == 0);
   caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0);
+  caml_mmtk_field_log = (strcmp(plan, "LXR") == 0);
 
   /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
      plan including ConcurrentImmix. OCaml fully initializes every block before the
@@ -670,7 +676,12 @@ void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
    the array-fill paths (before the fill loop). */
 void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
 {
-  if (caml_mmtk_concurrent)
+  /* Fires for ConcurrentImmix (SATB delete barrier) AND LXR (field-logging RC barrier):
+     both route the pre-store slot to the mutator's installed Barrier (SATBBarrier vs
+     FieldBarrier), which dispatches the correct slow path. Only called on MUTATIONS
+     (caml_modify / atomic exchange/cas) where the old value is valid — never on
+     caml_initialize, so LXR never logs an initialising write as a mutation. */
+  if (caml_mmtk_concurrent || caml_mmtk_field_log)
     mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                             (size_t) count);
 }

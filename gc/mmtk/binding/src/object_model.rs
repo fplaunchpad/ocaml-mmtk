@@ -2,8 +2,9 @@ use mmtk::util::copy::{CopySemantics, GCWorkerCopyContext};
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::ObjectModel;
 use mmtk::vm::{
-    VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, VMLocalForwardingPointerSpec,
-    VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec, VMLocalPinningBitSpec,
+    VMGlobalFieldUnlogBitSpec, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec,
+    VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec,
+    VMLocalPinningBitSpec,
 };
 
 use mmtk_ocaml_common::header::WORD_SIZE;
@@ -16,6 +17,13 @@ pub struct VMObjectModel;
 impl ObjectModel<OCamlVM> for VMObjectModel {
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec =
         VMGlobalLogBitSpec::side_first();
+
+    // P4 (LXR): the per-field unlog bit the coalescing field-logging write barrier uses.
+    // Laid out `side_after` the per-object log bit so the two occupy disjoint side-metadata
+    // regions (the trait default `side_first()` would collide with GLOBAL_LOG_BIT_SPEC).
+    // Inert for every non-LXR plan (only the FieldBarrier reads/writes it).
+    const GLOBAL_FIELD_UNLOG_BIT_SPEC: VMGlobalFieldUnlogBitSpec =
+        VMGlobalFieldUnlogBitSpec::side_after(Self::GLOBAL_LOG_BIT_SPEC.as_spec());
 
     const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec =
         VMLocalForwardingPointerSpec::in_header(0);
