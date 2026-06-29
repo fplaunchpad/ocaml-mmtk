@@ -39,8 +39,9 @@ on a common substrate. The research agenda lives in
 - **In progress:** the macro-benchmark performance campaign + analysis (M8); and a few
   rare-crash investigations tracked as GitHub issues (notably the pre-existing #31 `Domain.join`
   result use-after-free under heavy multi-domain join, which the STW excision unmasked).
-- **Known tails:** weak-clear semantics under generational plans, a flagged memprof colour
-  read, and `runtime_events` emission under MMTk (broken — see ROADMAP / FAQ).
+- **Known tails:** a flagged memprof colour read and `runtime_events` emission under MMTk
+  (broken — see ROADMAP / FAQ). (Weak-clear timing under the generational plans — GH#5 — is
+  fixed: full GC under mature pressure + `Gc.major_collections` counts full GCs only.)
 - **Testsuite triage** is ongoing: each failing test is either fixed or disabled with a single
   greppable marker as its first line, `(* MMTk DISABLED: <reason> *)`, replacing the `(* TEST *)`
   block. `grep -rn 'MMTk DISABLED' testsuite/tests` lists every intentionally-disabled test and why
@@ -65,13 +66,12 @@ median of 5 reps on an Apple M4 Pro. GC workers = domains. Run: `uv run quick/qu
 | fannkuchredux | 1.00× | 1.00× | 1.01× |
 | spectralnorm | **0.96×** | 1.24× | 1.23× |
 | mandelbrot | 1.00× | 0.99× | 1.00× |
-| matrix_multiplication | 5.38× | **0.92×** | 5.38× |
+| matrix_multiplication | **0.86×** | 0.87× | **0.87×** |
 | LU_decomposition | 1.09× | 1.32× | 1.33× |
 | kb | 1.23× | 1.10× | **0.98×** |
 
-GenImmix (the default) is parity-or-better on 5 of 8 benches. Its outlier is `matrix_multiplication`
-(5.38×): at the dynamic heap the mature live set is under-provisioned, so the copy nursery re-evacuates it
-each minor GC (#6) — Immix, with no copy nursery, handles it at **0.92×**. ConcurrentImmix leads on the
+GenImmix (the default) is parity-or-better on 6 of 8 benches — including `matrix_multiplication`
+(**0.86×**); `kb` (1.23×) and `LU_decomposition` (1.09×) are the exceptions. ConcurrentImmix leads on the
 allocation-heavy `binarytrees` (**0.53×**) and `kb` (0.98×); Immix trails on `binarytrees` (2.11×).
 
 **Parallel** — speedup at 8 domains (ideal = 8):
@@ -119,7 +119,8 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
-| `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand, like stock OCaml. |
+| `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand (`heap = live × 2.2`, clamped 32 MiB..RAM), like stock OCaml. |
+| `MMTK_MIN_HEAP_MB` | `32` | Dynamic-heap floor (MiB). The smallest the `live × 2.2` target may shrink to; a too-low floor lets a nursery GC fire mid-build for a low-live/high-alloc program, promoting the half-built object → the generational write barrier then dominates (GH#6; matmul-768 was 19.6s at 16 MiB, 3.2s at 32 MiB). Only applies to the default dynamic heap. |
 | `MMTK_NURSERY` | `Bounded:2097152,67108864` (2–64 MiB) | Generational-plan nursery (GenImmix/GenCopy/StickyImmix), bounded/absolute and commit-on-demand (adapts down to fit small heaps). The 64 MiB max keeps GenImmix competitive single-domain on allocation-heavy workloads. **Value must be raw BYTES** — e.g. `Fixed:33554432`, `Bounded:2097152,134217728`; the `2m,128m` suffix form does **not** parse (silently falls back to the default). |
 | `MMTK_THREADS` | _nproc_ | GC worker threads. **Set `MMTK_THREADS=1` for single-/few-domain runs** — the `nproc` default oversubscribes and slows high-collection workloads (a domain-aware pool is the open fix). |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |

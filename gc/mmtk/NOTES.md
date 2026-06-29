@@ -5,6 +5,100 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#20 — per-domain backup thread + interruptor RETIRED (2026-06-29)
+
+The backup thread (`backup_thread_func`) + the interruptor STW-answering path are deleted (−416 lines across
+`domain.c`/`domain.h`/`signals.c`/`mmtk.c`/`st_stubs.c`). Under always-on MMTk the binding's RUNNING set is
+already the thread-state flag `stop_all_mutators` honours (a domain that released its lock is STOPPED, not
+awaited), and Phase 3 made MMTk's STW the sole all-domains rendezvous — so the backup thread's only job
+(answer an all-domains STW for a lock-released domain) is redundant. Blocking sections now do a plain
+domain-lock release/acquire; `st_bt_lock_*` → plain domain-lock; the `caml_bt_is_self` guard dropped.
+Validated (turing A/B vs baseline): clean `world.opt`; testsuite lib-systhreads/parallel/lib-threads/lib-unix
+clean (only the pre-existing `sigwait` MMTk signal flake, worse on baseline); spawn/join + systhreads +
+blocking burst stress 0 hangs across `MMTK_THREADS`∈{1,2,28}, deterministic checksums. Re-validated in a
+fresh clone alongside #5/#6 (weaklifetime + matmul + par_binarytrees all clean). → ROADMAP #20.
+
+---
+
+## GH#6 — GenImmix dynamic-heap "copy-nursery" pathology = a write-barrier CLIFF; floor raised 16→32 MiB (2026-06-29)
+
+**The issue title ("copy nursery re-copies a live set") names the wrong cost.** Characterized on turing
+(`~/ocaml-mmtk-gh6`, branch `fix/gh6-copynursery`) using `matrix_multiplication 768` (the quick-panel handle)
+and a synthetic surviving-prefix repro (`~/gh6/copychurn.ml`).
+
+**Mechanism — a bimodal cliff, not proportional to GC count.** At the default dynamic heap (space-overhead
+`live × 2.2`, clamped to a 16 MiB floor), matmul-768's ~14 MiB mature live set makes the target collapse to
+the 16 MiB floor, so a nursery GC fires *during the matrix-build phase*. Floor sweep (GenImmix, matmul-768):
+16 MiB→3 GCs/19.6s, 20→2/18.8s, 24→1/18.9s, 28→1/19.1s, **32→0 GCs/3.1s**. A *single* GC is enough to lock in
+the ~16s penalty. `perf stat`: 0-GC = **1.40e12** instructions / 3.2s; 1-GC = **8.19e12** / 18.8s — **5.8×
+more instructions** for identical work; L1 cache-misses ~EQUAL (91.5G vs 91.8G) => NOT locality. The one nursery
+GC **promotes the half-built result matrix** out of the copy-nursery into mature Immix space; the O(n³) compute
+loop then pays the **generational write barrier** on every `res.(i).(j) <- _` write into the now-old object
+(`caml_modify`/`mmtk_ocaml_region_barrier` → `GenObjectBarrier` remembered-set churn re-entering `caml_call_gc`,
+~30% of samples). With 0 GCs the matrices stay young, the barrier is a no-op, full speed.
+
+**Fix (shipped, gated): raise the dynamic-heap floor 16→32 MiB** (`gc/mmtk/binding/src/api.rs`, tunable via
+`MMTK_MIN_HEAP_MB`; `MMTK_MIN_HEAP_MB=16` reverts exactly). Panel (GenImmix dynamic, OLD 16 vs NEW 32 MiB,
+wall / RSS-MB): matmul **21.2s/34 → 3.7s/23**, LU_decomposition 6.1/28 → 4.8/35, spectralnorm 740→364 GCs
+3.4/18 → 3.2/25, copychurn 0.60/37 → 0.39/43, binarytrees 7.3/141 → 7.2/177; nbody/fannkuch/mandelbrot flat
+(0 GC, 8 MB — a floor is a LIMIT, not a reservation). No wall regression anywhere; all 7 panel outputs match
+golden; binarytrees-21 stress (630 GCs / 30.5M copied) correct. Strict wall improvement at modest RSS cost.
+
+**Residual = RQ2 (NOT fixed by any floor).** A fixed floor only *moves* the cliff: size-1024 matmul still trips
+one promoting GC even at 48 MiB → 51s (live set scales O(size²)). The structural fix is **survival/age-driven
+promotion** (keep an actively-mutated young object in the nursery) or a **write-barrier fast path for
+freshly-promoted objects** — not a higher floor. An **adaptive churn-escalating floor** was prototyped in
+mmtk-core (`SpaceOverheadTrigger`, env `MMTK_ADAPTIVE_FLOOR`) and **rejected**: it cannot fix the cliff (the
+penalty is locked in by the *first* GC, before any churn signal exists to escalate from — measured: only cut
+matmul 3→2 GCs, wall unchanged 18.7s) and it overshot RSS 2–5× (binarytrees 147→325 MB). Reverted; full data in
+`~/gh6-progress.md` on turing.
+
+---
+
+## GH#5 CLOSED: full GC under mature pressure + Gc.major_collections = full-only (2026-06-29)
+
+The `weaklifetime.ml` residual (clear-too-LATE, OPEN since the `2a05e10846` soundness half)
+is fixed. Both coupled halves landed together (either alone fails, as predicted):
+
+1. **`Gc.major_collections` counts only FULL (major) GCs.** It was counting every MMTk
+   collection, including nursery (minor) GCs. `mmtk_ocaml_gc_count()` now returns a new
+   `FULL_GC_COUNT`, bumped in `resume_mutators` only when `last_collection_full_heap()` (for a
+   non-generational plan every GC is full → value unchanged there). Added
+   `mmtk_ocaml_total_gc_count()` (the nursery+full total) so MMTK_VERBOSE still reports every STW
+   (`[mmtk] GCs: N (full: M)`).
+2. **Full GC under mature-space pressure.** At the test heap the generational plans ran ~zero full
+   GCs, so mature-DEAD weaks never cleared. `resume_mutators` now forces the next collection full
+   (`GenerationalPlan::force_full_heap_collection`) when, since the last full GC, EITHER mature
+   reserved pages grew past 1.2× the post-full-GC baseline (above a 4 MiB floor) OR a bounded
+   nursery-GC cadence (8) elapsed. **The cadence backstop is load-bearing:** weaklifetime has a
+   near-constant live set, so the mature-pressure trigger never fires (instrumented: `by_mature`
+   always false) and `Gc.major_collections` would otherwise stall → `while major_collections < 20`
+   hang. A full GC at that cadence is cheap precisely when it is the firing trigger (small mature
+   heap), so throughput is unaffected.
+
+**Binding-only — no mmtk-core/submodule change.** `GenerationalPlan` (`last_collection_full_heap`
+/ `get_mature_reserved_pages` / `force_full_heap_collection`) is already a public trait, reached
+via `plan.generational()` exactly as `scanning.rs` does for the nursery query. Files:
+`gc/mmtk/binding/src/collection.rs`, `gc/mmtk/include/mmtk_ocaml.h`, `runtime/mmtk.c`.
+
+**Validation (turing, fix/gh5-weakclear).** `weaklifetime.ml` passes **bytecode AND native** under
+GenImmix/StickyImmix/GenCopy (was assert/hang); still passes on Immix (fixed heap) + SemiSpace.
+`weak-ephe-final` via ocamltest at 512 MB: **all four of GenImmix/Immix/StickyImmix/GenCopy = 10/14**
+(GenImmix was 8/14); the 4 residual failures (`ephetest{,2,3}`, `pr12001`) are pre-existing and fail
+on Immix too (out of scope). Throughput: binarytrees d18 native GenImmix 2.06 s (193 GCs, 27 full)
+vs Immix 2.08 s → parity, no regression.
+
+**Timeout note.** `weaklifetime` demands 20 FULL GCs (`while major_collections < 20`); with the fix
+it reaches them deterministically (`[mmtk] GCs: 173 (full: 20)`), but those 20 whole-heap traces cost
+real time, scaling with heap size: on turing **under heavy contention (load ~48 on 28 cores)** it took
+~78 s at the default dynamic heap and ~162 s pinned at `MMTK_HEAP_SIZE_MB=512` (GC time dominates,
+~120 s of it — the load tax). On an unloaded host it is far faster. Passes ocamltest at `TIMEOUT>=200`;
+the default 90 s can flake on a *loaded* box at the 512 MB CI heap (the multi-domain par tests in the
+same dir are the other load-sensitive entries). A timeout-tuning tail, not a correctness issue (the
+full-GC count is deterministic and heap-independent). Not addressed here.
+
+---
+
 ## #G1 (narrow the minor-GC global-root scan to young-only): prototype FAILED as wired — PARKED with the corrected approach (2026-06-26)
 
 **Goal.** On a generational *nursery* (minor) GC the binding still scans every global root (`scan_vm_specific_roots`

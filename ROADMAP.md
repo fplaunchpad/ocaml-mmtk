@@ -22,8 +22,11 @@ plan whose Default allocator is a bump/Immix region (the seven:
 `Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
-clamped 16 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
-3.5× → 1.27× slower than stock), `MMTK_NURSERY` (default bounded 2–64 MiB), `MMTK_VERBOSE`;
+clamped 32 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
+3.5× → 1.27× slower than stock. Floor raised 16→32 MiB (GH#6): a 16 MiB floor let a nursery GC fire during
+matmul's matrix-build phase, promoting the half-built result matrix → the O(n³) compute loop then paid the
+generational write barrier on every write (matmul-768 19.6s → 3.1s once the build stays in-nursery);
+tunable via `MMTK_MIN_HEAP_MB`), `MMTK_NURSERY` (default bounded 2–64 MiB), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
@@ -81,8 +84,8 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    orphaned-ephemeron handover gap; **then** make `process_weak_refs` unconditional and
    delete the transitional `MMTK_WEAK_REFS` flag (like `caml_mmtk_enabled` was). Until
    then `MMTK_WEAK_REFS=0` (conservative never-clear) stays as the safety fallback.
-   (Latent: `weak-ephe-final/weaklifetime.ml` asserts under StickyImmix — weak-clear
-   timing tied to stock generational pacing.) → NOTES M6 entries.
+   (`weak-ephe-final/weaklifetime.ml` weak-clear timing under the generational plans
+   is FIXED — GH#5, NOTES 2026-06-29.) → NOTES M6 entries.
 
 3. **#12 — evacuation-time OOM.** Convert the `copy_object` assert (fires if
    `alloc_copy` fails mid-defrag; Immix reserves headroom to avoid it) to a graceful
@@ -358,8 +361,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     untriaged — that is the work: run `make -C testsuite parallel` under a plan (per `CLAUDE.md`), classify
     each failure (real MMTk gap vs known-unsupported vs flaky), fix or mark. → M7; item #4 (#12c).
 
-11. **#20 — retire the per-domain backup-thread machinery (replace STW participation with lock
-    acquisition). May be tricky.** Vanilla OCaml gives every domain a **backup thread**
+11. **#20 — retire the per-domain backup-thread machinery — DONE 2026-06-29.** The backup thread +
+    interruptor STW-answering path are deleted (−416 lines); blocking sections do a plain domain-lock
+    release/acquire, the binding's RUNNING set being the thread-state flag MMTk's `stop_all_mutators`
+    already honours. Validated (turing A/B): clean `world.opt`, testsuite + spawn/join/systhreads burst
+    stress clean (0 hangs at `MMTK_THREADS`∈{1,2,28}); the lone `sigwait` native flake is pre-existing
+    (worse on baseline). → NOTES 2026-06-29. *(Original design notes below.)*
+    Vanilla OCaml gives every domain a **backup thread**
     (`runtime/domain.c` `backup_thread_func`, `interruptor`) whose *sole* job is: when a mutator
     **releases its domain lock** (blocking C section, park, idle), someone must still be able to answer an
     all-domains STW request on that domain's behalf. Under always-on MMTk this is largely **redundant
@@ -401,15 +409,23 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       will be used"*) → falls back to mmtk-core's default; only raw bytes (`Bounded:2097152,67108864`) parse.
       Reproduced on clean local mainline. Fix the parser to accept `k/m/g` suffixes, **or** correct the docs to
       raw-byte syntax (cheap, do this).
-    - **(c) The REAL default-condition lever (open, now QUANTIFIED): the dynamic-heap floor under-provisions
-      low-live/high-alloc workloads.** The space-overhead heap (live×2.2) is sized to the *live set*, so a
-      low-live workload gets a tiny heap → tiny nursery → constant collection. Measured (spectralnorm-3500,
-      GenImmix, local): **default dynamic heap = 7926 minor GCs / 3378 ms GC time / 25.83 s wall** vs **fixed
-      4 GiB = 152 GCs / 81 ms / 22.62 s** — i.e. the dynamic heap does **52× more GCs** and adds **~13% GC
-      overhead / ~12% wall** (no vanilla needed — the fixed-heap A/B isolates it; spectralnorm is otherwise
-      compute-bound). The fix is a **nursery floor / minimum dynamic-heap size decoupled from the (tiny) live
-      set** for high-alloc-rate workloads — NOT the nursery cap (which is heap-limited here). Real but modest;
-      the clean default-relevant nursery work.
+    - **(c) The dynamic-heap floor under-provisions low-live/high-alloc workloads — PARTIALLY FIXED (GH#6),
+      floor raised 16→32 MiB; structural residual is RQ2.** The space-overhead heap (live×2.2) is sized to the
+      *live set*, so a low-live workload gets a tiny heap → tiny nursery → constant collection (spectralnorm-3500
+      did 52× more GCs at the dynamic heap than a fixed 4 GiB). For GenImmix the cost is worse than the GC count:
+      the dominant pathology (GH#6 / matmul) is a **bimodal cliff** — perf-stat (matmul-768) shows a *single*
+      nursery GC during the matrix-build phase PROMOTES the half-built result matrix into mature space, after
+      which the O(n³) compute loop pays the generational **write barrier** on every `res.(i).(j) <- _` write
+      (instruction count **5.8×**: 1.40e12 → 8.19e12; 3.1s → 19.6s; cache-misses ~equal, so it is NOT locality).
+      Raising the floor to **32 MiB** (api.rs, gated by `MMTK_MIN_HEAP_MB`) keeps the canonical panel workloads'
+      transient build footprint in the nursery (matmul-768: 0 GCs, **18.6s → 3.2s**; LU 6.1→4.8s; spectralnorm
+      740→364 GCs) at negligible RSS cost (+5–7 MB; tiny programs never commit the floor — it is a LIMIT not a
+      reservation, nbody/fannkuch/mandelbrot stay 8 MB). **Residual (RQ2):** a fixed floor only *moves* the cliff
+      to a larger live set — size-1024 matmul still trips one promoting GC at 48 MiB → 51s. The structural fix is
+      survival/age-driven promotion (don't promote an actively-mutated young object) OR a write-barrier fast path
+      for freshly-promoted objects, NOT a higher floor. (An adaptive churn-escalating floor was prototyped and
+      rejected: it cannot fix the cliff — the penalty is locked in by the first GC, before any churn signal — and
+      it overshot RSS 2–5×; see ~/gh6-progress.md on turing.)
     - **NOT a mainline bug: "degenerate default install / 913 GCs"** was a **church `fix/bug3c-cross-stw` build
       artifact** — clean mainline (local + turing) gives 114 GCs (correct 64 MiB). Check before merging that
       branch; not a mainline issue.
@@ -443,11 +459,15 @@ The active research/measurement threads behind the M8 milestone — the index; d
   (`ephe_is_reachable` treats non-nursery referents as live during a nursery GC) is
   **correct-but-doesn't-close-the-test** — **LANDED 2026-06-25 (`2a05e10846`)** as the sound soundness
   half (prevents mis-clearing a LIVE mature weak on a minor GC; weak-ephe-final finaliser/weaktest
-  byte-match, Immix unchanged). **STILL OPEN** (the test's clear-too-LATE half): schedule a **full GC
-  under mature pressure** + make **`Gc.major_collections` count only full GCs** — but counting-only-full
-  ALONE would *hang* `weaklifetime`'s `while major_collections < 20` loop, so it is held until the
-  companion full-GC trigger is designed. `finaliser_handover` SIGSEGV is the separate #55 sub-bug.
-  → FAQ Q11; NOTES 2026-06-25, 2026-06-24; GitHub #5.
+  byte-match, Immix unchanged). **FIXED 2026-06-29** (the test's clear-too-LATE half): `resume_mutators`
+  schedules a **full GC under mature pressure** (mature grew past 1.2x the post-full-GC baseline, OR a
+  bounded 8-nursery-GC cadence backstop — the cadence is load-bearing for steady-state-live programs
+  where mature never grows) and **`Gc.major_collections` now counts only full GCs** (new `FULL_GC_COUNT`).
+  Both shipped together (counting-only-full ALONE *hangs* `weaklifetime`'s `while major_collections < 20`
+  loop). Binding-only via the public `GenerationalPlan` trait. `weaklifetime.ml` passes byte+native on
+  GenImmix/StickyImmix/GenCopy; weak-ephe-final 10/14 on all four of GenImmix/Immix/StickyImmix/GenCopy
+  (GenImmix was 8/14); binarytrees throughput at Immix parity. `finaliser_handover` SIGSEGV was the
+  separate #55 sub-bug (now passing). → FAQ Q11; NOTES 2026-06-29; GitHub #5.
 - **RQ7 — `Bactrian` hybrid (flagship research direction).** The faithful MMTk realization of
   OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
   (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
