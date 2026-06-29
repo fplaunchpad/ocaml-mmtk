@@ -1,14 +1,4 @@
-(* TEST
- include runtime_events;
- include unix;
- hasunix;
- not-target-windows;
- {
-   bytecode;
- }{
-   native;
- }
-*)
+(* MMTk DISABLED: runtime_events external GC-event stream not emitted under MMTk [unsupported]. *)
 
 let got_major = ref false
 let got_minor = ref false

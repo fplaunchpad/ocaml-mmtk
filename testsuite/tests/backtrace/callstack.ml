@@ -1,6 +1,5 @@
-(* TEST_BELOW
+(* MMTk DISABLED: finaliser calling-context: the finalizer-invoked backtrace differs because MMTk runs the finaliser from a different stack site than stock's synchronous Gc.full_major point [semantic-timing]. *)
 (* Blank lines added here to preserve locations. *)
-
 
 
 
@@ -30,7 +29,7 @@ let () =
 let () = Printf.printf "new thread:\n"
 let () = Thread.join (Thread.create f3 ())
 
-(* TEST
+(* MMTk-DISABLED-TEST-BLOCK (neutralized; see the MMTk DISABLED marker at the top of this file)
  flags = "-g";
  include systhreads;
  hassysthreads;

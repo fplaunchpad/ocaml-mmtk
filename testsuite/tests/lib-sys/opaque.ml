@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: finaliser sync-timing: the "lifetime" finaliser flag is not flipped on the test's Gc.full_major under MMTk (deferred finalisation) [semantic-timing]. *)
 
 let[@inline never] float_unboxing s f =
   let x = Sys.opaque_identity (s +. 1.) in

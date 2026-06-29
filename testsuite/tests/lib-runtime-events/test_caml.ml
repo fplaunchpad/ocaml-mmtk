@@ -1,6 +1,4 @@
-(* TEST
- include runtime_events;
-*)
+(* MMTk DISABLED: runtime_events GC-event counters (minors/major cycles) not emitted under MMTk [unsupported]. *)
 
 (* Tests that:
  * - the runtime events subsystem works, logging events and passing

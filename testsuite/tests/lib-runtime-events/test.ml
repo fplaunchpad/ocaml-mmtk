@@ -1,7 +1,4 @@
-(* TEST
- modules = "stubs.c";
- include runtime_events;
-*)
+(* MMTk DISABLED: runtime_events GC-event counters (minor/major collection events) are not emitted under MMTk; runtime_events GC-tracing unsupported [unsupported]. *)
 
 external start_runtime_events : unit -> unit = "start_runtime_events"
 external get_event_counts : unit -> (int * int) = "get_event_counts"

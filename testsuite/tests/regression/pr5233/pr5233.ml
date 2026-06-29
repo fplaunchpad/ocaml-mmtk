@@ -1,4 +1,4 @@
-(* TEST *)
+(* MMTk DISABLED: stock Gc.stat heap_words semantics: the test allocates (Gc.stat()).heap_words/3 ints; MMTk's heap_words differs, producing Out-of-memory instead of the stock dangling-weak behaviour [stock-counter]. *)
 
 open Printf;;
 

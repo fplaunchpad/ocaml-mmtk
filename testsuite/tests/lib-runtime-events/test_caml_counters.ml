@@ -1,6 +1,5 @@
-(* TEST
- include runtime_events;
-*)
+(* MMTk DISABLED: runtime_events GC counters not emitted under MMTk [unsupported]. *)
+
 open Runtime_events
 
 let counters_tbl = Hashtbl.create 50

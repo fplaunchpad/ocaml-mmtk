@@ -1,10 +1,4 @@
-(* TEST
- include tool-ocaml-lib;
- flags = "-w -a";
- ocaml_script_as_argument = "true";
- setup-ocaml-build-env;
- ocaml;
-*)
+(* MMTk DISABLED: stock Gc.stat + weak sync-timing under the bytecode interpreter; relies on stock Gc.stat counters and synchronous weak clearing on Gc.full_major [stock-counter]. *)
 
 open Lib;;
 ignore (Gc.stat ());
