@@ -719,6 +719,15 @@ enum domain_status { Dom_starting, Dom_started, Dom_failed };
 struct domain_ml_values {
   value callback;
   value term_sync;
+  /* The domain's `Finished(...)` result, kept alive as a generational global root
+     from the moment it is built (sync_and_terminate) until ml_values is freed
+     (after the joiner has consumed it). Global roots are scanned by EVERY MMTk
+     collection in scan_vm_specific_roots -- unconditionally, independent of which
+     domain triggered the GC and of mutator-park timing -- so this both keeps the
+     result alive across the terminating domain's nursery teardown AND lets the
+     coalescing-prone caml_mmtk_collect() promote it reliably (issue #31 / GH#3).
+     Val_unit until set in sync_and_terminate. */
+  value result;
 };
 
 /* stdlib/domain.ml */
@@ -731,8 +740,10 @@ static void init_domain_ml_values(struct domain_ml_values* ml_values,
 {
   ml_values->callback = callback;
   ml_values->term_sync = term_sync;
+  ml_values->result = Val_unit;
   caml_register_generational_global_root(&ml_values->callback);
   caml_register_generational_global_root(&ml_values->term_sync);
+  caml_register_generational_global_root(&ml_values->result);
 }
 
 /* [retire_after_gc] must be true on the terminating path (domain_thread_func) and
@@ -743,6 +754,7 @@ static void free_domain_ml_values(struct domain_ml_values* ml_values,
 {
   caml_remove_generational_global_root(&ml_values->callback);
   caml_remove_generational_global_root(&ml_values->term_sync);
+  caml_remove_generational_global_root(&ml_values->result);
   /* GH#15 Bug B (use-after-free of a global root racing the GC root scan).
      On the terminating path this domain has ALREADY been MMTk-deregistered by
      caml_domain_terminate, so it now runs concurrently with collections. A GC
@@ -896,15 +908,54 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      which then dereferences a corrupted `Finished` chain -> SIGSEGV in
      Domain.join (issue #31; intermittent, all moving Immix-family plans).
 
-     Forcing a collection here, while the result is rooted (CAMLlocal1) and this
-     domain is still a registered, running STW participant, traces the result into
-     stable space (and, for the generational plans, promotes it out of the
-     nursery). After this the result survives the deregister/teardown edge. A
-     whole-heap collection per domain-terminate is acceptable: termination is
-     infrequent and heavyweight, and stock OCaml likewise did non-trivial GC work
-     here. Self-gated: caml_mmtk_collect is a no-op for NoGC / when MMTk cannot
-     collect. */
+     Forcing a collection here, while the result is rooted and this domain is
+     still a registered, running STW participant, traces the result into stable
+     space (and, for the generational plans, promotes it out of the nursery).
+     After this the result survives the deregister/teardown edge. A whole-heap
+     collection per domain-terminate is acceptable: termination is infrequent and
+     heavyweight, and stock OCaml likewise did non-trivial GC work here. Self-
+     gated: caml_mmtk_collect is a no-op for NoGC / when MMTk cannot collect.
+
+     ROOT THE RESULT AS A GLOBAL ROOT FIRST (issue #31 / GH#3). A single
+     caml_mmtk_collect() against a CAMLlocal-only `v` does NOT reliably promote it
+     under heavy multi-domain join: the user collection request COALESCES onto a
+     peer domain's in-flight GC (gc_trigger request_flag), and per-domain
+     (mutator-local) root scanning is subject to park timing -- an in-flight GC can
+     have already scanned this domain before we park into it, so caml_mmtk_collect()
+     returns without having promoted `v` (the ~9% SIGSEGV in Domain.join on a
+     28-core spawn/terminate+join storm). Publishing it into ml_values->result --
+     a *generational global root* -- changes that: global roots are scanned by
+     EVERY collection in scan_vm_specific_roots, unconditionally and independent of
+     park timing, so the collection that caml_mmtk_collect() waits out promotes the
+     result via that path. The global root is also kept registered until ml_values
+     is freed (after the joiner has consumed the result), so even in the residual
+     edge where the awaited collection had already passed its global-root scan
+     before we stored `v`, the result is never reclaimed by the nursery teardown:
+     it stays live until the next collection promotes it, and thereafter survives
+     reachably via term_sync->state. A naive collect-retry loop instead livelocks
+     here (every collect coalesces under sustained contention); the global root is
+     the correct, livelock-free fix. */
+  caml_modify_generational_global_root(&ml_values->result, v);
   caml_mmtk_collect();
+  /* Confirm the result is actually out of the nursery before publishing. The
+     first caml_mmtk_collect() can coalesce onto a peer GC that had already run
+     its global-root scan before we stored `v`, returning without promoting it.
+     Because `v` is now a GLOBAL root it is kept alive regardless (so this can
+     never livelock the way a CAMLlocal-only retry does -- every collection scans
+     global roots, so each iteration converges), but it may still be young; loop a
+     bounded number of fresh collects until it is promoted. After the first collect
+     returns the GC request flag is clear, so the next caml_mmtk_collect() schedules
+     a FRESH collection whose global-root scan sees `v`. The bound is a safety
+     valve only; in practice this exits in 0-1 extra iterations. caml_mmtk_is_young
+     is false for non-generational plans / NoGC, so the loop is a no-op there (the
+     Immix-family result is made live in place by the collect + global root). */
+  {
+    int tries = 0;
+    while (caml_mmtk_is_young(ml_values->result) && tries++ < 1000)
+      caml_mmtk_collect();
+  }
+  /* re-read through the (now-forwarded, promoted) global root */
+  v = ml_values->result;
   sync_result(ml_values->term_sync, v);
   /* This domain currently holds a lock for [mut], which is kept alive
      by a global root inside ml_values. */

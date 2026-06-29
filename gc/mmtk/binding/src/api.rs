@@ -583,6 +583,24 @@ pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> boo
     })
 }
 
+/// True iff `addr` is an object currently residing in the generational NURSERY
+/// (young space). False for mature objects and for every non-generational plan
+/// (which has no nursery). Used by the domain-termination path (issue #31) to
+/// confirm the just-allocated `Finished(...)` result has actually been PROMOTED
+/// out of the nursery by caml_mmtk_collect() before it is published to the joiner
+/// -- the user collection request can coalesce onto an in-flight GC that already
+/// passed its root scan of this domain, returning without promoting the result;
+/// the C side loops collect-then-recheck until this returns false.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_is_in_nursery(addr: *const libc::c_void) -> bool {
+    let object =
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(addr)) };
+    crate::mmtk()
+        .get_plan()
+        .generational()
+        .map_or(false, |g| g.is_object_in_nursery(object))
+}
+
 // ── Finalizers (custom-block Custom_operations.finalize) ───────────────────
 // OCaml custom blocks (Bigarray, Int64, channels, marshalled blocks…) carry a C
 // `finalize` op that the stock GC runs on sweep. Under MMTk we register each such

@@ -651,6 +651,16 @@ void caml_mmtk_collect(void)
     mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
 }
 
+/* True iff `v` is a heap block currently residing in the generational nursery
+   (young space). False for immediates, mature blocks, non-generational plans, and
+   NoGC. Used by sync_and_terminate (issue #31) to verify the domain result was
+   promoted out of the nursery before it is published to the joiner. */
+int caml_mmtk_is_young(value v)
+{
+  if (!caml_mmtk_collects || !Is_block(v)) return 0;
+  return mmtk_ocaml_is_in_nursery((const void *) v) ? 1 : 0;
+}
+
 /* Generational write barrier. Records that `count` value-sized slots starting
    at `start` may now hold pointers into the nursery, so a young collection
    scans them. Called from caml_modify/write_barrier (count 1, slot-based —
