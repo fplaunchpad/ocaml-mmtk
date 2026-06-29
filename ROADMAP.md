@@ -315,6 +315,15 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    mmtk `sanity` 24/24 clean. Fixing Bug B unmasked the **pre-existing** #31/GH#3 `Domain.join` result-UAF
    (~9% on 28-core joinstorm) — equally on mainline, so Phase 3 is a strict improvement; merge shipped, #31
    tracked separately (GH#3 reopened; harden the result-handoff for high-core load). → NOTES 2026-06-26.
+   **#31/GH#3 UPDATE (2026-06-29, partial fix MERGED):** the `Finished(...)` result is now published into a
+   `ml_values->result` *generational global root* (scanned by every collection, park-timing-immune) + a bounded
+   promote-retry — making promotion reliable where the prior coalescing `caml_mmtk_collect()` could return
+   un-promoted (~9%→~4% on the 28-core storm, 0 hang; 40/40 local clean, goldens + weaklifetime green). **But
+   instrumentation proved the residual is a SEPARATE, deeper bug:** the result is provably promoted+published
+   (mature `v` written, `state_before=0x1`) yet the joiner still reads `term_sync->state==0x400` — a post-publish
+   corruption of the correctly-published mature slot (cross-domain `caml_modify` + GC mis-forward/remembered-set).
+   Promotion fixes only move the rate; **GH#3 stays OPEN** for the residual (next: rr the deterministic `0x400`
+   write). → NOTES 2026-06-29 (newest entry).
    Phase 3 **structurally eliminated the bug#3c/dual-STW deadlock class** (no second barrier for a
    terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
    continuation-scan hang. Kept (as plain spawn/terminate state, not barriers): `all_domains_lock` +

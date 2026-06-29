@@ -38,7 +38,9 @@ on a common substrate. The research agenda lives in
   with an SATB write barrier, proven clean on `lazy` values and on effect-handler continuations.
 - **In progress:** the macro-benchmark performance campaign + analysis (M8); and a few
   rare-crash investigations tracked as GitHub issues (notably the pre-existing #31 `Domain.join`
-  result use-after-free under heavy multi-domain join, which the STW excision unmasked).
+  result use-after-free under heavy multi-domain join, which the STW excision unmasked — a
+  global-rooted-promote fix has since roughly halved its rate, and instrumentation reframed the
+  residual as a *separate* post-publish `term_sync` corruption, so GH#3 stays open).
 - **Known tails:** a flagged memprof colour read and `runtime_events` emission under MMTk
   (broken — see ROADMAP / FAQ). (Weak-clear timing under the generational plans — GH#5 — is
   fixed: full GC under mature pressure + `Gc.major_collections` counts full GCs only.)
