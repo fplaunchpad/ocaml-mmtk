@@ -90,9 +90,6 @@ extern "C" {
         retain: extern "C" fn(*mut c_void, usize) -> usize,
         ctx: *mut c_void,
     );
-    /// DEBUG (moving-GC bug hunt): a domain's bytecode value-stack live range
-    /// [*lo, *hi). Used by the post-GC stale-root check.
-    fn caml_mmtk_debug_stack_range(domain: usize, lo: *mut *mut usize, hi: *mut *mut usize);
     /// Scan finalisers orphaned by terminated domains as roots (runtime/major_gc.c).
     /// Mirrors caml_final_do_roots over every orphaned final_info still awaiting
     /// adoption, so their fun/val slots are reported here too — otherwise the

@@ -67,11 +67,6 @@ static void alloc_generic_table (struct generic_table *tbl, asize_t sz,
   tbl->end = tbl->base + (tbl->size + tbl->reserve) * element_size;
 }
 
-void caml_alloc_table (struct caml_ref_table *tbl, asize_t sz, asize_t rsv)
-{
-  alloc_generic_table ((struct generic_table *) tbl, sz, rsv, sizeof (value *));
-}
-
 static void reset_table (struct generic_table *tbl)
 {
   tbl->size = 0;
@@ -134,13 +129,6 @@ void caml_set_minor_heap_size (asize_t wsize)
 
 /*****************************************************************************/
 
-struct oldify_state {
-  value todo_list;
-  uintnat live_bytes;
-  caml_domain_state* domain;
-};
-
-
 /* in progress updates are zeros except for the lowest color bit set to 1
    that is, reserved == wosize == tag == 0, color == 1 */
 #define In_progress_update_val Make_header(0, 0, 1 << HEADER_COLOR_SHIFT)
@@ -168,11 +156,6 @@ header_t caml_get_header_val(value v) {
 }
 
 
-
-
-typedef struct {
-  bool locked_ephemerons;
-} promote_result;
 
 
 void caml_empty_minor_heap_domain_clear(caml_domain_state* domain)
@@ -366,16 +349,6 @@ static void realloc_generic_table
     tbl->ptr = tbl->base + cur_ptr;
     tbl->limit = tbl->end;
   }
-}
-
-void caml_realloc_ref_table (struct caml_ref_table *tbl)
-{
-  realloc_generic_table
-    ((struct generic_table *) tbl, sizeof (value *),
-     EV_C_REQUEST_MINOR_REALLOC_REF_TABLE,
-     "ref_table threshold crossed\n",
-     "Growing ref_table to %" CAML_PRIdNAT "k bytes\n",
-     "ref_table overflow");
 }
 
 void caml_realloc_ephe_ref_table (struct caml_ephe_ref_table *tbl)

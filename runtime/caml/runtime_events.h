@@ -30,14 +30,6 @@
 
 #include "mlvalues.h"
 
-#ifdef CAML_INSTR
-#define CAML_EV_ALLOC(s) caml_ev_alloc(s)
-#define CAML_EV_ALLOC_FLUSH() caml_ev_alloc_flush()
-#else
-#define CAML_EV_ALLOC(s)      /**/
-#define CAML_EV_ALLOC_FLUSH() /**/
-#endif
-
 #define CAML_EV_BEGIN(p) caml_ev_begin(p)
 #define CAML_EV_END(p) caml_ev_end(p)
 #define CAML_EV_COUNTER(c,v) caml_ev_counter(c,v)
@@ -329,15 +321,6 @@ void caml_ev_begin(ev_runtime_phase phase);
 void caml_ev_end(ev_runtime_phase phase);
 void caml_ev_counter(ev_runtime_counter counter, uint64_t val);
 CAMLextern void caml_ev_lifecycle(ev_lifecycle lifecycle, int64_t data);
-
-/* caml_ev_alloc records the (bucketed) size of allocations into the major heap.
-   It appears only in alloc_shr and caml_shared_try_alloc. These buckets are
-   meant to be flushed explicitly by the caller through the caml_ev_alloc_flush
-   function. Until then the buckets are just updated until flushed.
-*/
-void caml_ev_alloc(uint64_t sz);
-void caml_ev_alloc_flush(void);
-
 
 /* Allocate a unique ID for the event and construct its value: there are at
    most RUNTIME_EVENTS_MAX_CUSTOM_EVENTS of them. */

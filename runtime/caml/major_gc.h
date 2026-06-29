@@ -36,8 +36,6 @@ Caml_inline int caml_marking_started(void)
 }
 
 extern atomic_uintnat caml_gc_mark_phase_requested;
-intnat caml_opportunistic_major_work_available (caml_domain_state*);
-void caml_opportunistic_major_collection_slice (intnat);
 /* auto-triggered slice from within the GC */
 #define AUTO_TRIGGERED_MAJOR_SLICE -1
 /* external triggered slice, but GC will compute the amount of work */
@@ -49,30 +47,14 @@ int caml_init_major_gc(caml_domain_state*);
 void caml_teardown_major_gc(void);
 void caml_darken(void*, value, volatile value* ignored);
 void caml_darken_cont(value);
-void caml_mark_roots_stw(int, caml_domain_state **);
 void caml_finish_major_cycle(int force_compaction);
 void caml_init_major_pacing (void);
-#ifdef DEBUG
-int caml_mark_stack_is_empty(void);
-#endif
 void caml_orphan_ephemerons(caml_domain_state*);
 void caml_orphan_finalisers(caml_domain_state*);
 
 /* This variable is only written with the world stopped,
    so it need not be atomic */
 extern uintnat caml_major_cycles_completed;
-
-Caml_inline void caml_update_major_allocated_words(
-  caml_domain_state *self, intnat words, int direct
-) {
-  self->allocated_words += words;
-  if (direct) {
-    self->allocated_words_direct += words;
-  }
-  if (self->gc_policy & CAML_GC_RAMP_UP) {
-    self->allocated_words_suspended += words;
-  }
-}
 
 /* ── Mark-status colours ─────────────────────────────────────────────────
    These header-colour helpers and the global colour-cycle state used to live
@@ -99,14 +81,6 @@ Caml_inline int Has_status_val(value v, status s) {
   return Has_status_hd(Hd_val(v), s);
 }
 
-Caml_inline header_t With_status_hd(header_t hd, status s) {
-  return Hd_with_color(hd, s);
-}
-
-Caml_inline int is_garbage(value v) {
-  return Has_status_val(v, caml_global_heap_state.GARBAGE);
-}
-
 Caml_inline int is_unmarked(value v) {
   return Has_status_val(v, caml_global_heap_state.UNMARKED);
 }
@@ -117,13 +91,6 @@ Caml_inline int is_marked(value v) {
 
 Caml_inline int is_not_markable(value v) {
   return Has_status_val(v, NOT_MARKABLE);
-}
-
-Caml_inline status caml_allocation_status(void) {
-  return
-    caml_marking_started()
-    ? caml_global_heap_state.MARKED
-    : caml_global_heap_state.UNMARKED;
 }
 
 #endif /* CAML_INTERNALS */
