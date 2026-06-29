@@ -29,9 +29,16 @@ grep -rn 'MMTk DISABLED' testsuite/tests
 
 **30** unique failing tests were classified with evidence (re-run in isolation,
 diffed actual-vs-reference, minimal repros for the weak/finaliser root cause).
-**28** were disabled with markers; **2** (`lib-unix/common/sigwait`,
+**28** were disabled with markers; a further **2** (`lib-unix/common/sigwait`,
 `weak-ephe-final/finaliser_handover`) are timing-flaky-under-load and PASS in
-isolation, so they were left enabled and documented as flaky. (29 were found in the
+isolation. They were initially left enabled and documented as flaky, but since
+the CI runs `make -C testsuite parallel` (under load) they flaked there, so they
+are now **also disabled** with a `[flaky]` marker to keep GenImmix CI reliably
+green. The `normal` CI job (ubuntu-latest, the only one that runs the **lldb**
+debugger test) also surfaced `native-debugger/linux-lldb-amd64` — the lldb
+sibling of the already-disabled `linux-gdb-amd64` (same GC-worker-threads
+infra-artifact), a triage miss — now disabled too. **31 disabled in this triage**
+(28 + 2 flaky + 1 lldb). (29 were found in the
 first run; `lib-unix/kill/unix_kill` surfaced in the clean verify run — masked by
 timeouts under concurrent load in the first pass.)
 
@@ -80,7 +87,8 @@ Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 (deferred finaliser/weak/ephemeron clearing) · **stock-counter** (depends on stock
 `Gc.stat`/minor_collections values) · **unsupported-12c** (alignment-aware alloc) ·
 **behavioral-diff** (real but minor) · **infra-artifact** · **timeout-slow** ·
-**flaky** (passes in isolation; NOT disabled).
+**flaky** (passes in isolation; now DISABLED with a `[flaky]` marker because it
+flakes under the parallel CI load).
 
 | test | variants | category | one-line reason | action |
 |---|---|---|---|---|
@@ -111,9 +119,10 @@ Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 | callback/signals_alloc | byte | behavioral-diff | bytecode signal/alloc poll order 01243 vs 01234 (deterministic) | DISABLED |
 | lib-unix/kill/unix_kill | byte+nat | behavioral-diff | SIGINT after sigprocmask UNBLOCK delivered at a later safepoint (deterministic) | DISABLED |
 | native-debugger/linux-gdb-amd64 | nat | infra-artifact | gdb sees 28 MMTk worker threads; multi-thread bp format | DISABLED |
+| native-debugger/linux-lldb-amd64 | nat | infra-artifact | lldb `bt all` enumerates MMTk GC worker threads (triage miss; only the ubuntu-latest `normal` CI job runs lldb) | DISABLED |
 | lib-marshal/fuzzy | byte+nat | timeout-slow | -n 10000 marshalling too slow under MMTk (n<=100 pass) | DISABLED |
-| lib-unix/common/sigwait | nat | flaky | passes in isolation; sigwait flake under parallel load | left enabled |
-| weak-ephe-final/finaliser_handover | byte | flaky | passes 3/3 in isolation; flakes under concurrent load | left enabled |
+| lib-unix/common/sigwait | nat | flaky | passes in isolation; sigwait flake under parallel load | DISABLED |
+| weak-ephe-final/finaliser_handover | byte | flaky | passes 3/3 in isolation; flakes under concurrent load | DISABLED |
 
 ## Counts per category (the 28 disabled)
 
@@ -124,11 +133,12 @@ Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 | stock-counter (Gc.stat / minor_collections) | 3 | polling_insertion, pr5233, t350-heapcheck |
 | unsupported-12c (alignment) | 1 | aligned_alloc |
 | behavioral-diff (REAL, minor signal-poll) | 2 | signals_alloc, unix_kill |
-| infra-artifact (gdb worker threads) | 1 | linux-gdb-amd64 |
+| infra-artifact (gdb/lldb worker threads) | 2 | linux-gdb-amd64, linux-lldb-amd64 |
 | timeout-slow | 1 | fuzzy |
 
 Plus the **30 baseline** `MMTk DISABLED` markers already present (22 statmemprof +
-8 others), for **58 total** disabled.
+8 others), for **61 total** disabled (58 + the 2 `[flaky]` tests + the lldb
+sibling, all now disabled).
 
 ## Final clean verification (quiet box)
 
