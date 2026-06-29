@@ -244,7 +244,11 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      repro — `spectralnorm 3000`/`LU 900` under ConcurrentImmix, which **reliably HUNG** at both worker counts
      — now runs **48/48 clean**. Evidence in NOTES (2026-06-26).
 
-9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** Audit (2026-06-24)
+9. **#18 — stock-GC dead-code tail (M9 cleanup; mostly load-bearing).** A second, adversarially-verified
+   audit (2026-06-29, 118 agents) found **~650 removable lines** (zero-caller remembered-set machinery,
+   dead major-GC/opportunistic-slice fns, runtime_events phantom spans, the dune subsystem); full
+   item-by-item report + the load-bearing keep-list in [`gc/mmtk/STOCK_REMOVAL_AUDIT.md`](gc/mmtk/STOCK_REMOVAL_AUDIT.md);
+   the low-risk clusters are being deleted on branch `remove-dead-stock`. The earlier audit (2026-06-24)
    confirms the M9 excision is structurally complete: the deletable residue is **small**, and most
    inert-looking stock-GC code is **load-bearing** — link symbols the weak/ephemeron/finaliser/
    teardown paths call, the `*_done` teardown flags (`domain.c:2127,2136`), the major-slice
