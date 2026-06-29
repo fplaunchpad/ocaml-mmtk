@@ -519,7 +519,18 @@ The active research/measurement threads behind the M8 milestone — the index; d
     cargo-green + 470/470 mmtk-core tests; API-adaptation bridges noted in NOTES). **OCaml-build-VALIDATED
     2026-06-25** — the binding workspace builds green against `f0319fb5e6` (P1 is purely additive, so the
     binding API surface is unaffected); held on `0.32-ocaml-lxr` (not folded into `0.32-ocaml`). **P2** Immix-policy RC hooks +
-    LOS RC (~1–2 wk, **highest risk** — moving-GC correctness; lean on the `sanity` feature at small heaps).
+    LOS RC (~1–2 wk, **highest risk** — moving-GC correctness; lean on the `sanity` feature at small heaps). **MERGED
+    into `0.32-ocaml` mainline 2026-06-29** (`3998611893`; binding submodule bumped on `5.5+mmtk` @ `657c9117d2`) as
+    **9 gated commits P2.0–P2.I** (`PlanConstraints.rc_enabled` gate default-false; RC per-block/per-line/per-page
+    side-metadata specs registered only in the `rc_enabled` arm; gated `is_live`/`is_reachable` overrides; inert
+    `trace_object_without_moving`/`mark_lines`/`post_copy` guards; `Defrag::decide_whether_to_defrag` rc threading; LOS
+    read-side overlays). **Byte-identical-VALIDATED**: a fresh-clone `world.opt` builds green against the bumped
+    submodule, and `par_binarytrees` (355319636), `weaklifetime` (PASS), `matmul-768` reproduce identical golden output
+    under GenImmix/Immix/StickyImmix — because no plan sets `rc_enabled`, all 10 wired plans stay byte-identical. **The
+    P2 write-SIDE (`RC-travels-with-copy` in `post_copy`/forwarding + the LOS write path) is deferred to P3** — it is
+    non-additive (needs the `&'static LXR` plan back-pointer, `Pause`-typed dispatch, and a 1-arg→2-arg SFT
+    `attempt_mark`/`initialize_object_metadata` change that breaks the trait for *every* space), so it cannot land
+    byte-identically and is the real stopping point for further LXR work.
     **P2 port plan banked (agent, 2026-06-26):** ⚠ `lxr/lxr` is a **sibling fork, NOT a superset** — same 0.32.0
     merge-base, but its `immixspace.rs` (+872/−263) interleaves RC with three *unrelated* upstream waves
     (page-resource rewrite, `generate_tasks_batched`/`Range<Chunk>`, 1-arg `attempt_mark`/cyclic-mark rework)

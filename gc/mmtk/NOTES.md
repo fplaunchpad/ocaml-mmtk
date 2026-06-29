@@ -5,6 +5,30 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR P2 — gated immixspace RC overlays MERGED into mainline (2026-06-29)
+
+LXR P2 (the read-side RC overlays in `policy/immix/immixspace.rs` + LOS) landed on the mmtk-core mainline
+`0.32-ocaml` (FF to `3998611893`) and the binding submodule was bumped on `5.5+mmtk` (`657c9117d2`). Nine gated
+commits **P2.0–P2.I**: the master gate `PlanConstraints.rc_enabled` (default false; no plan sets it until P3);
+`side_metadata_specs(rc_enabled)` registers `RC_STRADDLE_LINES` + the 4 Block/Line RC tables *only* in the
+`rc_enabled` arm (append-only — global side-metadata budget untouched when off); gated `is_live` (`rc.count>0 ||
+forwarded`, end-of-SATB branch via `is_marked`+`is_defrag_source`+`read_forwarding_pointer`) and `is_reachable`;
+inert RC guards in `trace_object_without_moving`/`mark_lines`/`post_copy`; `debug_assert(!rc_enabled)` in
+`prepare`/`release`; `Defrag::decide_whether_to_defrag` rc threading; LOS read-side overlays.
+
+**Why it can merge inert:** every overlay is behind `rc_enabled`, so with no plan setting it the 10 wired plans
+are **byte-identical**. Validated: fresh-clone `world.opt` green against the bumped submodule, and
+`par_binarytrees`=355319636 / `weaklifetime` PASS / `matmul-768` reproduce identical golden output under
+GenImmix/Immix/StickyImmix.
+
+**The genuine blocker (P2 write-side → P3):** RC-travels-with-copy (`post_copy`/forwarding) + the LOS write path
+are **non-additive** — they need the `&'static LXR` plan back-pointer, `Pause`-typed dispatch, and a 1-arg→2-arg
+SFT `attempt_mark`/`initialize_object_metadata` signature change that breaks the trait for *every* space. That
+cannot land byte-identically, so it is folded into P3 (the actual `plan/lxr/` port + `MMTK_PLAN=LXR`) and is the
+stopping point: P3 onward is multi-week, non-additive work that needs an explicit go-ahead. → ROADMAP LXR entry (P2 MERGED).
+
+---
+
 ## GH#20 — per-domain backup thread + interruptor RETIRED (2026-06-29)
 
 The backup thread (`backup_thread_func`) + the interruptor STW-answering path are deleted (−416 lines across
