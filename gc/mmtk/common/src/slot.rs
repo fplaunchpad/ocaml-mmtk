@@ -226,6 +226,13 @@ impl Slot for FieldSlot {
         Some(unsafe { ObjectReference::from_raw_address_unchecked(start) })
     }
 
+    /// The address of the slot itself (the field location). Used by the LXR field-logging
+    /// write barrier + RC trace to index the per-field unlog-bit side metadata. Overrides
+    /// the trait default (which panics for slot reprs the LXR plan doesn't use).
+    fn to_address(&self) -> Address {
+        self.as_address()
+    }
+
     /// Overwrite the slot with a (possibly relocated) object reference,
     /// re-applying the infix offset so an interior pointer keeps pointing into
     /// the relocated parent at the same word offset.
