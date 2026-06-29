@@ -25,26 +25,32 @@ grep -rn 'MMTk DISABLED' testsuite/tests
 |---|---|---|
 | passed | 1700 | 1700 |
 | failed (unique test files) | **29** | **0** (all marked or flaky) |
-| skipped/disabled (`MMTk DISABLED`) | 30 (baseline) | **57** (30 + 27 new) |
+| skipped/disabled (`MMTk DISABLED`) | 30 (baseline) | **58** (30 + 28 new) |
 
-All 29 unique failing tests were classified with evidence (re-run in isolation,
+**30** unique failing tests were classified with evidence (re-run in isolation,
 diffed actual-vs-reference, minimal repros for the weak/finaliser root cause).
-**27** were disabled with markers; **2** (`lib-unix/.../sigwait`,
+**28** were disabled with markers; **2** (`lib-unix/common/sigwait`,
 `weak-ephe-final/finaliser_handover`) are timing-flaky-under-load and PASS in
-isolation, so they were left enabled and documented as flaky.
+isolation, so they were left enabled and documented as flaky. (29 were found in the
+first run; `lib-unix/kill/unix_kill` surfaced in the clean verify run — masked by
+timeouts under concurrent load in the first pass.)
 
-## The one REAL behavioural finding worth tracking
+## The REAL behavioural findings worth tracking
 
-A single **deterministic** behavioural difference (not timing, not unsupported):
+Two **deterministic** behavioural differences (not timing-flaky, not unsupported) —
+both about **signal-delivery poll-point placement** under MMTk, the only genuine
+MMTk-attributable semantic diffs in the whole suite. Candidates for one follow-up
+issue (low priority): align MMTk's signal poll/safepoint placement with stock's.
 
-- `tests/callback/signals_alloc.ml` (bytecode only; native passes): the program
-  prints `01243` under MMTk vs stock's `01234`, every run. A SIGUSR1 handler's
-  state transitions interleave with an allocation at a different poll point in the
-  **bytecode interpreter** under MMTk. The signal IS delivered and the value IS
-  seen — only the interleaving order differs. Minor, but a genuine semantic diff in
-  bytecode signal-vs-allocation-poll placement. **Candidate for a follow-up issue**
-  (low priority): align the bytecode allocation poll/safepoint placement so a signal
-  raised mid-allocation is observed in the stock order.
+- `tests/callback/signals_alloc.ml` (bytecode only; native passes): prints `01243`
+  under MMTk vs stock's `01234`, every run. A SIGUSR1 handler's state transitions
+  interleave with an allocation at a different poll point in the **bytecode
+  interpreter**. The signal IS delivered and the value IS seen — only the order differs.
+- `tests/lib-unix/kill/unix_kill.ml` (bytecode + native): a SIGINT unblocked via
+  `Unix.sigprocmask SIG_UNBLOCK` is not delivered at the unblock point. Stock prints
+  `false true true`; MMTk native `false false false` (not delivered within the test),
+  bytecode `false false true` (delivered one statement late). The pending signal is
+  **not lost** — it lands at a later safepoint; deterministic.
 
 Everything else is a **known MMTk semantic difference** (finaliser/weak deferral,
 stock `Gc.stat` counters, runtime_events, #12c) or a test-infra/timing artifact —
@@ -68,7 +74,7 @@ work, not by the `full_major` call site). Reachability is correct; only the timi
 of the observable side-effects differs. Many testsuite tests assert stock's
 synchronous-on-`full_major` semantics, hence the cluster below.
 
-## Triage table (all 29 unique GenImmix failures)
+## Triage table (all 30 unique GenImmix failures)
 
 Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 (deferred finaliser/weak/ephemeron clearing) · **stock-counter** (depends on stock
@@ -103,12 +109,13 @@ Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 | tool-ocaml/t350-heapcheck | byte (ocaml) | stock-counter | stock Gc.stat + synchronous weak clearing | DISABLED |
 | c-api/aligned_alloc | byte+nat | unsupported-12c | asserts NOT all Atomic.t aligned; MMTk aligns all | DISABLED |
 | callback/signals_alloc | byte | behavioral-diff | bytecode signal/alloc poll order 01243 vs 01234 (deterministic) | DISABLED |
+| lib-unix/kill/unix_kill | byte+nat | behavioral-diff | SIGINT after sigprocmask UNBLOCK delivered at a later safepoint (deterministic) | DISABLED |
 | native-debugger/linux-gdb-amd64 | nat | infra-artifact | gdb sees 28 MMTk worker threads; multi-thread bp format | DISABLED |
 | lib-marshal/fuzzy | byte+nat | timeout-slow | -n 10000 marshalling too slow under MMTk (n<=100 pass) | DISABLED |
 | lib-unix/common/sigwait | nat | flaky | passes in isolation; sigwait flake under parallel load | left enabled |
 | weak-ephe-final/finaliser_handover | byte | flaky | passes 3/3 in isolation; flakes under concurrent load | left enabled |
 
-## Counts per category (the 27 disabled)
+## Counts per category (the 28 disabled)
 
 | category | count | tests |
 |---|---|---|
@@ -116,12 +123,21 @@ Categories: **unsupported** (feature absent under MMTk) · **semantic-timing**
 | semantic-timing (finaliser/weak/ephemeron deferral) | 9 | ephetest, ephetest2, ephetest3, pr12001, opaque, callstack, pr3612, alloc_async, t340-weak |
 | stock-counter (Gc.stat / minor_collections) | 3 | polling_insertion, pr5233, t350-heapcheck |
 | unsupported-12c (alignment) | 1 | aligned_alloc |
-| behavioral-diff (REAL, minor) | 1 | signals_alloc |
+| behavioral-diff (REAL, minor signal-poll) | 2 | signals_alloc, unix_kill |
 | infra-artifact (gdb worker threads) | 1 | linux-gdb-amd64 |
 | timeout-slow | 1 | fuzzy |
 
 Plus the **30 baseline** `MMTk DISABLED` markers already present (22 statmemprof +
-8 others), for **57 total** disabled.
+8 others), for **58 total** disabled.
+
+## Final clean verification (quiet box)
+
+`make -C testsuite parallel` GenImmix on a quiet turing after the markers:
+**1475 listed tests passed / 0 non-flaky failures / 54 skipped**. The only reds were
+the 2 flaky tests (`finaliser_handover`, and `sigwait` under load) which pass in
+isolation. (The "passed" count is lower than the 1700 of the pre-triage run because
+disabled tests are excluded from `-list-tests` entirely — they are not run, not
+counted.)
 
 ## Notes
 
