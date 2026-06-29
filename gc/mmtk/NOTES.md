@@ -5,6 +5,50 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## GH#3 / #31 Domain.join result-UAF — promotion made reliable (global root), BUT residual is a SEPARATE post-publish term_sync->state corruption (2026-06-29)
+
+**The prior diagnosis was half right.** `1d2504ab4f` fixed #31 by forcing `caml_mmtk_collect()` in
+`sync_and_terminate` to promote the young `Finished(...)` result before publishing it to the joiner. That
+collect is unreliable on a 28-core spawn/terminate+join storm (~9% residual SIGSEGV in `Domain.join`,
+`loop_840` domain.ml:298 reading `term_sync->state` = `0x400`, a garbage even value): the user collection
+request COALESCES onto a peer domain's in-flight GC (mmtk-core `gc_trigger.request_flag`) and
+`park_until_resumed` returns on the `gc_active` flag alone, so the collect can return having waited out a
+collection that already passed its *per-domain* (mutator-local, park-timing-sensitive) root scan of this
+domain — leaving the result young; the terminate then discards the nursery and the joiner reads a reclaimed
+slot.
+
+**Fix shipped (branch fix/gh3-joinuaf, commit 61409fce5):** publish the result into a new
+`ml_values->result` field registered as a *generational global root*. Global roots are scanned by EVERY
+collection in `scan_vm_specific_roots` → `caml_scan_global_roots`, unconditionally and independent of park
+timing, so the coalescing-prone collect now promotes the result via that path; the root also keeps it live
+across the nursery teardown until the joiner consumes it (removed in `free_domain_ml_values`). A bounded
+`mmtk_ocaml_is_in_nursery`/`caml_mmtk_is_young` retry backstops the edge where the awaited GC had already
+scanned global roots before the store; the global root makes it converge in 0-1 iters (a CAMLlocal-only
+`is_young` retry instead LIVELOCKS under sustained contention — 34/40 hang, do not do that).
+
+**KEY NEW FINDING (instrumentation, GH3_DEBUG in sync_and_terminate): the result IS now correctly promoted
+and published.** Logging at publish shows `v young=0` (mature), `term_sync young=0`, `state_before=0x1`
+(Running) for every terminate — i.e. a valid mature `v` is written into `term_sync->state`. **Yet the joiner
+still occasionally reads `term_sync->state == 0x400`.** So the residual SIGSEGV is NOT an un-promoted result:
+it is a **post-publish corruption of the (correctly-published, mature) `term_sync->state` slot** — a distinct,
+deeper bug (cross-domain `caml_modify` of a shared `term_sync` + a GC mis-forward / stale remembered-set /
+write-barrier interaction on that slot). The promotion-based fixes (both `1d2504ab4f` and this one) only move
+the *rate* by perturbing timing; they cannot close this residual because the value they promote is already
+correct by the time the joiner sees garbage.
+
+**Validation (GenImmix h64):** baseline 4/48 SIGSEGV; with the fix the join-result is provably promoted
+(instrumented) and cont_stress3 is 6/6 clean, but heavy joinstorm_heap still shows a low residual
+(timing/load-variable) from the post-publish corruption above. parallel/join, unjoined_domains_at_exit,
+domain_dls, domain_id regression-clean. StickyImmix/Immix under multi-domain parallel hit a SEPARATE
+pre-existing `immix/defrag.rs:160 'Block Unmarked'` panic (baseline 15/24 abort too) — orthogonal to #3.
+
+**Next (deferred):** rr the post-publish `term_sync->state` corruption (it's deterministic — always `0x400`).
+Likely a write-barrier/remembered-set or GC-forwarding bug on a cross-domain-modified shared slot, not the
+result lifetime. A separate baseline core also showed a spawn-side callback-closure corruption
+(`body_830` domain.ml:279, code ptr `0x1`) — another distinct root-lifetime race in this area.
+
+---
+
 ## #G1 (narrow the minor-GC global-root scan to young-only): prototype FAILED as wired — PARKED with the corrected approach (2026-06-26)
 
 **Goal.** On a generational *nursery* (minor) GC the binding still scans every global root (`scan_vm_specific_roots`
