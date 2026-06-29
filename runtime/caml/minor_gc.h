@@ -50,8 +50,6 @@ CAMLextern atomic_uintnat caml_minor_collections_count;
    Always, [caml_major_slice_epoch <= caml_minor_collections_count] */
 CAMLextern atomic_uintnat caml_major_slice_epoch;
 
-struct caml_ref_table CAML_TABLE_STRUCT(value *);
-
 struct caml_ephe_ref_elt {
   value ephe;      /* an ephemeron in major heap */
   mlsize_t offset; /* the offset that points in the minor heap  */
@@ -95,8 +93,6 @@ void caml_alloc_small_dispatch (caml_domain_state* domain,
                                 intnat wosize, int flags,
                                 int nallocs, unsigned char* encoded_alloc_lens);
 header_t caml_get_header_val(value v);
-void caml_alloc_table (struct caml_ref_table *tbl, asize_t sz, asize_t rsv);
-extern void caml_realloc_ref_table (struct caml_ref_table *);
 extern void caml_realloc_ephe_ref_table (struct caml_ephe_ref_table *);
 extern void caml_realloc_custom_table (struct caml_custom_table *);
 struct caml_minor_tables* caml_alloc_minor_tables(void);
@@ -106,15 +102,6 @@ void caml_free_minor_tables(struct caml_minor_tables*);
 extern int caml_debug_is_minor(value val);
 extern int caml_debug_is_major(value val);
 #endif
-
-#define Ref_table_add(ref_table, x) do {                                \
-    struct caml_ref_table* ref = (ref_table);                           \
-    if (ref->ptr >= ref->limit) {                                       \
-      CAMLassert (ref->ptr == ref->limit);                              \
-      caml_realloc_ref_table (ref);                                     \
-    }                                                                   \
-    *ref->ptr++ = (value*)(x);                                          \
-  } while (0)
 
 Caml_inline void add_to_ephe_ref_table (struct caml_ephe_ref_table *tbl,
                                         value ar, mlsize_t offset)

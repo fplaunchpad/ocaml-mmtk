@@ -392,18 +392,6 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
   }
 }
 
-/* DEBUG (moving-GC bug hunt, MMTK_DEBUG_STACK_CHECK): expose a domain's current
- * bytecode value-stack live range [sp, Stack_high) so the binding can re-walk it
- * after a GC's root scan and flag any slot still pointing to a forwarded object —
- * i.e. a stack root the scan failed to update. Returns NULLs if no stack. */
-void caml_mmtk_debug_stack_range(caml_domain_state *domain, value **lo, value **hi)
-{
-  struct stack_info *s = domain->current_stack;
-  if (s == NULL) { *lo = NULL; *hi = NULL; return; }
-  *lo = s->sp;
-  *hi = Stack_high(s);
-}
-
 /* ── M6: MMTk-native weak reference / ephemeron processing (experimental) ──────
    Driven by the binding's Scanning::process_weak_refs when MMTK_WEAK_REFS=1.
    Mirrors the stock major GC's two-phase scheme — ephe_mark (major_gc.c) then
@@ -744,7 +732,7 @@ void caml_mmtk_cont_snapshot(value cont)
    hot path. The writer waits until every domain RUNNING at call time has acked
    an epoch >= its bump (or left RUNNING), which proves each in-flight lock-free
    reader has passed a safepoint and dropped any pre-bump transient pointer.
-   DORMANT: no callers yet (excise Phase 2 step 1 adds only the primitive). */
+   LIVE: caml_mmtk_quiesce_ack is called from caml_poll_gc_work (domain.c). */
 static atomic_uintnat caml_mmtk_quiesce_epoch;
 
 /* Max domains the quiesce snapshot buffer holds. Domains are capped by
@@ -891,7 +879,8 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
    the RUNNING set (parked / blocked / terminated). No global STW barrier, no GC.
    The two future callers (frametables RCU retire; runtime_events ring teardown)
    publish new state, then call this to drain all in-flight lock-free readers of
-   the OLD state before freeing it. DORMANT: defined here, no callers yet.
+   the OLD state before freeing it. LIVE: the runtime_events ring teardown
+   (runtime_events.c) is the current caller.
 
    Protocol:
      1. epoch = ++caml_mmtk_quiesce_epoch (release). Domains store this into

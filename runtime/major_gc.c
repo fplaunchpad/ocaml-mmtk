@@ -757,6 +757,11 @@ update_major_slice_work(intnat howmuch,
   uintnat heap_words, heap_size, heap_sweep_words, total_cycle_work;
   uintnat percent_free;
 
+  /* The per-slice runtime_events counters this block gated have been removed (the
+     phantom CAML_EV_C_MAJOR_* writes); the parameter is retained for the
+     call-site ABI and intentionally ignored. */
+  (void)log_events;
+
   my_alloc_count = dom_st->allocated_words;
   my_alloc_direct_count = dom_st->allocated_words_direct;
   my_alloc_suspended_count = dom_st->allocated_words_suspended;
@@ -927,18 +932,6 @@ update_major_slice_work(intnat howmuch,
               dom_st->slice_target, dom_st->slice_budget
               );
 
-  if (log_events) {
-    CAML_EV_COUNTER(EV_C_MAJOR_HEAP_WORDS, (uintnat)heap_words);
-    CAML_EV_COUNTER(EV_C_MAJOR_ALLOCATED_WORDS, my_alloc_count);
-    /* TODO: add counters for direct, suspended, resumed allocs. */
-    CAML_EV_COUNTER(EV_C_MAJOR_ALLOCATED_WORK, alloc_work);
-    CAML_EV_COUNTER(EV_C_MAJOR_DEPENDENT_WORK, dependent_work);
-    CAML_EV_COUNTER(EV_C_MAJOR_EXTRA_WORK, extra_work);
-    CAML_EV_COUNTER(EV_C_MAJOR_WORK_COUNTER, atomic_load (&work_counter));
-    CAML_EV_COUNTER(EV_C_MAJOR_ALLOC_COUNTER, atomic_load (&alloc_counter));
-    CAML_EV_COUNTER(EV_C_MAJOR_SLICE_TARGET, dom_st->slice_target);
-    CAML_EV_COUNTER(EV_C_MAJOR_SLICE_BUDGET, dom_st->slice_budget);
-  }
 }
 
 /*******************************************************************************
@@ -986,31 +979,9 @@ void caml_darken(void* state, value v, volatile value* ignored) {
 /* True when some domain wants to enter Phase_sweep_and_mark_main */
 atomic_uintnat caml_gc_mark_phase_requested;
 
-void caml_mark_roots_stw (int participant_count,
-                          caml_domain_state** barrier_participants)
-{
-  /* Inert under always-on MMTk: MMTk owns root scanning and tracing. This is
-     still called from the minor GC (minor_gc.c) when the stock mark phase is
-     requested, but under MMTk caml_gc_mark_phase_requested is never set, so the
-     call site never fires. No-op. */
-  (void)participant_count; (void)barrier_participants;
-}
-
 /*******************************************************************************
  * Major GC slices
  ******************************************************************************/
-
-intnat caml_opportunistic_major_work_available (caml_domain_state* domain_state)
-{
-  return !domain_state->sweeping_done ||
-    (caml_marking_started() && !domain_state->marking_done);
-}
-
-void caml_opportunistic_major_collection_slice(intnat howmuch)
-{
-  /* Inert under always-on MMTk: MMTk owns collection. No-op. */
-  (void)howmuch;
-}
 
 void caml_major_collection_slice(intnat howmuch)
 {
@@ -1034,13 +1005,6 @@ void caml_finish_major_cycle (int force_compaction)
   /* Inert under always-on MMTk: there is no stock major cycle. No-op. */
   (void)force_compaction;
 }
-
-#ifdef DEBUG
-int caml_mark_stack_is_empty(void)
-{
-  return Caml_state->mark_stack->count == 0;
-}
-#endif
 
 void caml_finish_marking (void)
 {

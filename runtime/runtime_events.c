@@ -651,34 +651,6 @@ void caml_ev_lifecycle(ev_lifecycle lifecycle, int64_t data) {
   }
 }
 
-static uint64_t alloc_buckets[RUNTIME_EVENTS_NUM_ALLOC_BUCKETS] = { 0, };
-
-void caml_ev_alloc(uint64_t sz) {
-  if ( !ring_is_active() )
-    return;
-
-  if (sz < 10 * RUNTIME_EVENTS_NUM_ALLOC_BUCKETS_SINGLE) {
-    ++alloc_buckets[sz];
-  } else if (sz - 10 * RUNTIME_EVENTS_NUM_ALLOC_BUCKETS_SINGLE
-             < 10 * RUNTIME_EVENTS_NUM_ALLOC_BUCKETS_DECADE){
-    ++alloc_buckets[sz / 10 + 9 * RUNTIME_EVENTS_NUM_ALLOC_BUCKETS_SINGLE];
-  } else {
-    ++alloc_buckets[RUNTIME_EVENTS_NUM_ALLOC_BUCKETS - 1];
-  }
-}
-
-void caml_ev_alloc_flush(void) {
-  if ( !ring_is_active() )
-    return;
-
-  write_to_ring(EV_RUNTIME, (ev_message_type){.runtime=EV_ALLOC}, 0,
-                  RUNTIME_EVENTS_NUM_ALLOC_BUCKETS, alloc_buckets, 0);
-
-  for (int i = 1; i < RUNTIME_EVENTS_NUM_ALLOC_BUCKETS; i++) {
-    alloc_buckets[i] = 0;
-  }
-}
-
 /* Registers the [index] -> [event_name] mapping in the dedicated space in the
    ring buffer */
 void events_register_write_buffer(int idx, value event_name) {

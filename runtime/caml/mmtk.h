@@ -80,11 +80,6 @@ extern void caml_mmtk_become_running(uintnat domain_state_addr);
 extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
                                       caml_domain_state *domain);
 
-/* DEBUG (moving-GC bug hunt): a domain's current bytecode value-stack live range
- * [*lo, *hi) (sp .. Stack_high). Used by the binding's post-GC stale-root check. */
-extern void caml_mmtk_debug_stack_range(caml_domain_state *domain,
-                                        value **lo, value **hi);
-
 /* M6 (experimental, MMTK_WEAK_REFS=1): MMTk-native weak/ephemeron processing,
  * driven by the binding's Scanning::process_weak_refs in place of the conservative
  * caml_mmtk_scan_ephe_roots scheme above. caml_mmtk_weak_refs is the gate flag.
@@ -190,7 +185,8 @@ extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
  * every domain RUNNING OCaml at call time has either acked a safepoint or left
  * the RUNNING set, WITHOUT a global STW barrier and WITHOUT a GC — so a writer
  * that just published new state can drain all in-flight lock-free readers of the
- * OLD state before freeing it. DORMANT: no callers yet. See runtime/mmtk.c. */
+ * OLD state before freeing it. LIVE: called by the runtime_events ring
+ * teardown (runtime_events.c); ack runs from caml_poll_gc_work. See runtime/mmtk.c. */
 extern void caml_mmtk_quiesce_ack(caml_domain_state *d);
 extern void caml_mmtk_quiesce_running_domains(void);
 

@@ -33,7 +33,6 @@ value caml_gc_major(value);
    query the stock shared heap (caml_top_heap_words / caml_heap_size /
    caml_heap_blocks). The shared heap is gone under always-on MMTk and these
    macros had no remaining expansions, so they were removed. */
-#define caml_stat_compactions 0
 #define caml_stat_major_collections caml_major_cycles_completed
 #define caml_stat_promoted_words Caml_state->stat_promoted_words
 #define caml_allocated_words Caml_state->allocated_words
