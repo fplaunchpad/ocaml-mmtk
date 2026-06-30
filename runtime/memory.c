@@ -216,6 +216,8 @@ CAMLexport CAMLweakdef void caml_modify (volatile value *fp, value val)
   caml_tsan_func_entry(__builtin_return_address(0));
 #endif
 
+  extern unsigned long caml_e1_modify;  /* E1: pointer-mutation counter (runtime/mmtk.c) */
+  caml_e1_modify++;
   write_barrier((value)fp, 0, *fp, val);
 
   /* See Note [MM] above */
@@ -316,6 +318,8 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
              || *fp == Debug_uninit_minor
              || *fp == 0);
 #endif
+  extern unsigned long caml_e1_init;  /* E1: mature-init-write counter (runtime/mmtk.c) */
+  caml_e1_init++;
   *fp = val;
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
      generational plans (no-op otherwise). Replaces the stock minor remembered-set
