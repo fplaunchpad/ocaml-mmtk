@@ -223,7 +223,30 @@ impl Slot for FieldSlot {
         }
         // raw - infix_offset is the object start (== raw for ordinary slots).
         let start = unsafe { Address::from_usize(raw) } - self.info;
-        Some(unsafe { ObjectReference::from_raw_address_unchecked(start) })
+        let obj = unsafe { ObjectReference::from_raw_address_unchecked(start) };
+        // GH#15 (cont.): re-check is_in_mmtk_spaces too, not only immediate/null. `info` was
+        // classified when the slot held an in-heap object, but a spawning/terminating domain can
+        // re-point it to a NON-heap pointer (e.g. a `.data` Stdlib.Domain static — rr-confirmed
+        // origin of the LXR multidomain crash) that is non-null and non-immediate, so it passes
+        // the bit-check above. The tracing plans survive it (trace_object is SFT-dispatched and
+        // bounds-aware), but LXR's RC consumer indexes RC_TABLE side-metadata at the raw address
+        // with no mapped-address check -> SIGSEGV. This re-check is exactly the filter `classify`
+        // already applies (line ~146); it must hold at LOAD time too since the value can change
+        // after classification. Sound for all consumers: a non-MMTk value is never a heap object
+        // to trace or refcount. SFT lookup, no dereference of `obj`.
+        if !memory_manager::is_in_mmtk_spaces(obj) {
+            if debug_root_race() {
+                eprintln!(
+                    "[ROOT-RACE] slot {:#x}: classified info={:#x} but current value={:#x} \
+                     is not in any MMTk space — skipping",
+                    self.as_address().as_usize(),
+                    self.info,
+                    raw
+                );
+            }
+            return None;
+        }
+        Some(obj)
     }
 
     /// The address of the slot itself (the field location). Used by the LXR field-logging
