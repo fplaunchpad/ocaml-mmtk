@@ -5,6 +5,43 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR reference-counting plan: single-domain VALIDATED + RQ1 answered; multidomain primary crash fixed, residual open (2026-06-30)
+
+LXR (reference counting on Immix; Zhao/Blackburn/McKinley PLDI'22) is now a selectable plan
+(`MMTK_PLAN=LXR`, experimental, requires a pinned `MMTK_HEAP_SIZE_MB`) and is merged to mainline as the
+flagship of **RQ1** (RC barrier cost + tail latency vs GenImmix at memory parity). Built up from the base
+Immix plan (not down from the reference's 1268-line global.rs). Submodule branch `lxr-p3-activate`.
+
+**Validated single-domain:** correct checksums vs Immix (binarytrees d14–d20); sanity-clean (54 full-GC
+re-traces, 0 dangling-edge/premature-free violations; `objects copied: 0` — true in-place); nursery +
+mature reclamation both work; **memory parity** with Immix (par_binarytrees d20 floor h64, d21 h128). A
+**cycle-collecting backup trace** closes pure-RC's cyclic-garbage leak (kb: OOM→runs at h32), and its
+trigger is **RC-effectiveness-based** (fires only when an RC pause under-reclaims, measured post-sweep —
+NOT pause-start occupancy, which is always ~full), so it is near-free on acyclic code (binarytrees 0
+backups, throughput == pure RC).
+
+**RQ1 findings:** (1) the coalescing field barrier is essentially free — `MMTK_BARRIER_COUNT` shows 6/8
+quick-panel benches do ≤2497 pointer mutations over the whole run (4 do literally 2), and the one
+mutation-heavy bench (matmul, 1.18M fires) costs 1.02×; confirms OCaml is init-write-dominated (why
+`caml_modify` is out-of-line in C). (2) In-place RC wins on acyclic high-churn alloc and is memory-robust:
+binarytrees fastest at every heap, 5.7× faster than Immix at iso-RSS (0 copies vs GenImmix's 6.09M
+nursery-survivor copies; RC pause 681ms vs Immix full-mark 2902ms). (3) RC's fixed metadata tax ≈48 MB
+(RC_TABLE whole-heap). Knobs: `MMTK_RC_DEBUG`, `MMTK_RC_NO_CM`/`NO_BACKUP_TRACE`, `MMTK_RC_BACKUP_LO_PCT`,
+`MMTK_BARRIER_COUNT`. Harness + data: scratch `rq1-design.md`.
+
+**Multidomain (WIP):** GenImmix/Immix/StickyImmix run par_binarytrees N-domain fine; LXR did not. TWO
+crashes, both rr-traced on turing. PRIMARY (D≥4) — **FIXED**: a field-barrier-logged slot re-pointed by
+Domain spawn/join teardown to a `.data` `Stdlib.Domain` static (outside any MMTk space) passed
+`FieldSlot::load`'s GH#15 immediate/null re-check and reached `rc.inc` → unmapped RC_TABLE metadata →
+SIGSEGV (tracing plans survive via SFT-bounds-aware `trace_object`; RC indexes raw). Fix = re-check
+`is_in_mmtk_spaces` in `FieldSlot::load` + `process_inc`/`process_slot` guards. Item #1 (non-atomic
+decrement kill → atomic CAS) also merged. RESIDUAL (D≥12) — **OPEN**: the SAME `term_sync->state` premature
+free as the #31 entry below; the terminating domain's buffered RC `+1` on the published `Finished` result
+is not applied, so the result (kept only by the deferred `ml_values->result` root) is swept before
+`Domain.join` reads it. Wiring `flush_terminating_mutator` at terminate did not fix it (the drain runs but
+the result still reaches RC=0; block-promotion found 0 `Unallocated` blocks among the drained incs) —
+under diagnosis. LXR is correct at D≤4, partial at D=8.
+
 ## GH#3 / #31 Domain.join result-UAF — promotion made reliable (global root), BUT residual is a SEPARATE post-publish term_sync->state corruption (2026-06-29)
 
 **The prior diagnosis was half right.** `1d2504ab4f` fixed #31 by forcing `caml_mmtk_collect()` in

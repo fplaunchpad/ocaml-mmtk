@@ -18,8 +18,12 @@ there**), [`fork-handoff.md`](fork-handoff.md) (original rationale).
 MMTk is **always-on and the only collector** — no opt-out; the stock minor *and*
 major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix`).
 Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it requires a
-plan whose Default allocator is a bump/Immix region (the seven:
-`Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
+plan whose Default allocator is a bump/Immix region (the eight:
+`Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan.
+**`LXR`** is our reference-counting **research plan** (PLDI'22 RC-on-Immix): single-domain validated
+(correct, sanity-clean, at memory parity with Immix; the field barrier is near-free on OCaml's
+init-write-dominated code; a backup trace reclaims cycles) — **experimental, multidomain WIP**; requires a
+pinned `MMTK_HEAP_SIZE_MB` and is **not** in the CI plan matrix. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
 clamped 32 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees

@@ -135,7 +135,8 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 
 `MMTK_PLAN` selects the collector at startup (default **`GenImmix`** — generational, copying nursery over
 an Immix mature, the stock-OCaml-faithful fit for OCaml's short-lived allocation). **10** of 0.32's 11
-plans are wired in bytecode; **7** run native (those whose allocator the inlined TLAB can alias).
+stock plans are wired in bytecode, **plus our own `LXR`** reference-counting research plan (see below);
+**8** run native (those whose allocator the inlined TLAB can alias, now incl. LXR).
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
@@ -149,15 +150,25 @@ plans are wired in bytecode; **7** run native (those whose allocator the inlined
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
 | `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
+| `LXR` | reference counting (in-place, on Immix) + concurrent backup trace for cycles | bytecode + native — **experimental: single-domain validated, multidomain WIP. Requires a pinned `MMTK_HEAP_SIZE_MB`.** |
 
 `ConcurrentImmix` is the low-latency **research** plan: concurrent marking + SATB write barrier
 (bytecode + native), clean on `lazy` and effect-handler continuations (subtle cases in
 [`FAQ.md`](gc/mmtk/FAQ.md)); remaining work is performance-only. Its *allocate-black* marker (never scans
 fresh objects) is also what lets the runtime skip zeroing new memory.
 
-The one **unwired** plan is **`Compressor`** (needs a unified object-reference model incompatible with
-OCaml's layout). `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only (their allocators can't back
-the inlined native TLAB).
+`LXR` is our **reference-counting** research plan (Zhao/Blackburn/McKinley, PLDI'22): a coalescing
+field-logging write barrier feeds in-place reference counting on an Immix heap, with a periodic
+stop-the-world backup mark/sweep to reclaim cycles (triggered only when RC under-reclaims, so it is
+nearly free on acyclic code). It is **experimental** — single-domain validated (correct + sanity-clean +
+at memory parity with Immix; the field barrier is essentially free on OCaml's init-write-dominated code),
+multidomain still in progress. It **requires a pinned `MMTK_HEAP_SIZE_MB`**. Extra knobs: `MMTK_RC_DEBUG`
+(per-pause RC stats), `MMTK_RC_NO_CM` (disable the cycle-collecting backup trace), `MMTK_BARRIER_COUNT`
+(count write-barrier fires). LXR is **not** in the CI plan matrix yet.
+
+The one **unwired** stock plan is **`Compressor`** (needs a unified object-reference model incompatible
+with OCaml's layout). `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only (their allocators can't
+back the inlined native TLAB).
 
 ## Repository layout
 
