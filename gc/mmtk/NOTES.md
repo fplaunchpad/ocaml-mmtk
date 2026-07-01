@@ -5,6 +5,25 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Parallel-scaling gap ROOT CAUSE: STW mature/full-GC FREQUENCY scales with domain count (2026-07-01)
+
+Analysed WHY every MMTk plan scales far worse than stock OCaml on alloc-heavy parallel workloads (binarytrees:
+vanilla 3.68× vs GenImmix 0.90× / ConcurrentImmix 1.11× / LXR 1.26× at 8 domains). Full write-up: **SCALABILITY.md
+UPDATE 3**. Root cause (code-verified): the fork **deleted stock's mostly-concurrent major GC in M9** (`dcb35ef00`,
+`shared_heap.c` gone) so ALL mature reclamation runs inside MMTk's global STW. With N domains, ~N trees are
+concurrently live at each STW minor GC → promotion scales ~N → the Immix mature space fills ~N× faster → the
+mature-pressure full-GC trigger (`binding/src/collection.rs` `MATURE_PRESSURE_OVERHEAD_PCT=120`, `stop_all_mutators`)
+fires ~N× more → ~N× more whole-mature-heap STW traces. Decomposition (d1→d8, fixed total alloc): **full-GCs ×2.4–5.0,
+total-GCs only ×1.48, GC-time tracks full-GC count.** Stock absorbs the same promotion as CONCURRENT major work
+(off-STW), so it doesn't grow the pause. Corroboration: ConcurrentImmix (off-STW trace, copied=0) & LXR (incremental
+RC, GC-time ~constant 575→541ms) both out-scale GenImmix; nursery-size control refutes starvation; GC-light matmul
+scales fine on all plans. **RQ10:** the bottleneck is the STW-mature *design choice* / integration boundary, not the
+GenImmix algorithm — swap the mature-reclamation discipline (concurrent trace / RC) at the same nursery+rendezvous and
+scaling returns. Caveats: `gc_time_ms` is aggregate CPU not pause-wall (full-GC *count* scaling is the unambiguous
+evidence; a per-domain STW-vs-mutator wall decomposition via `perf`/`bpftrace` is the open confirmation), and the
+analysis workflow's independent adversarial-verify layer did not run (schema bug) — synthesis was self-verified +
+code-checked only. Ranked remedies in SCALABILITY.md UPDATE 3 / §7 (finish ConcurrentImmix = highest).
+
 ## LXR parallel-scaling panel: RC does NOT rescue the multi-domain anti-scaling (2026-07-01)
 
 Added LXR to the quick panel's **parallel** domain sweep (the guard that forced LXR to seq-only was stale

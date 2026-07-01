@@ -59,6 +59,43 @@
 > 64 MiB; turing even shares church's mmtk-core `0fe660bb9c`). BUG A is a church branch/build artifact, not
 > mainline. The §11 tables marked *(church, contaminated)* are kept only as a record of the artifact.
 
+> ## ⚠️ UPDATE 3 (2026-07-01) — the residual slope is the STW **mature/full-GC FREQUENCY**, and it scales ~linearly with domain count. LXR + ConcurrentImmix added.
+>
+> New parallel panel (M4 Pro, 8 P-cores; `quickbench.py par`; strong scaling; **speedup T(1)/T(8)**):
+> `par_binarytrees` — vanilla **3.68** / GenImmix **0.90** / ConcurrentImmix **1.11** / LXR **1.26**;
+> `par_matmul` 6.38 / 3.31 / 4.08 / 3.37; `par_spectralnorm` 4.77 / 2.22 / 1.83 / 2.62.
+>
+> **Root cause, sharpened + code-grounded.** Experiments 2/3 below already pinned it to *STW trace-in-pause*;
+> the decomposition is now precise: **the amplifier is mature/full-GC FREQUENCY, not the per-minor copy volume.**
+> GenImmix `par_binarytrees` d1→d8 at FIXED total allocation: **full (mature) GCs ×2.4–5.0**, total GCs only
+> ×1.48, objects-copied ×2.1–2.7, **GC-time tracks the FULL-GC count** (d18 probe: full 9/19/31/45 ↔ GC-time
+> 148/259/366/494 ms). Mechanism: with N domains ~N trees are concurrently live at each global STW minor GC →
+> promotion scales ~N → the Immix **mature space fills ~N× faster** → the mature-pressure trigger
+> (`binding/src/collection.rs` `MATURE_PRESSURE_OVERHEAD_PCT=120` / nursery-cadence, ~`:108–135`; `stop_all_mutators`
+> `:322`) fires ~N× more → ~N× more **whole-mature-heap STW traces** on the critical path.
+>
+> **Why stock scales (3.7×) and we don't:** the fork **deleted stock OCaml's mostly-concurrent major GC in M9**
+> (`dcb35ef00` "delete the stock shared heap"; `shared_heap.c` gone; stock's `caml_major_collection_slice` in
+> `runtime/major_gc.c` is bypassed). Stock absorbs the extra promotion as *concurrent* mature work overlapping the
+> mutators; MMTk GenImmix does it as *synchronous STW*, then scales that pause's frequency with N. **That design
+> choice — where mature reclamation runs, on-STW vs concurrent — is the sole determinant of scaling here.**
+> Corroboration: **ConcurrentImmix** (off-STW trace) keeps GC-time nearly flat & copied=0 and out-scales GenImmix;
+> **LXR** (incremental RC, no STW mature trace) has **GC-time ~constant** across the sweep (575→541 ms) and is the
+> best MMTk plan. The **nursery-size control** refutes starvation (128 MiB @d8 cuts GC count but makes wall *worse*
+> 2.66→3.21 s → it's per-collection STW *cost*, not thrash). `par_matmul` (GC-light) scales fine on every plan —
+> the gap appears *only* under mature promotion, exactly as predicted.
+>
+> **RQ10 sharpened:** *can a third-party moving generational GC be integrated behind OCaml 5's multicore runtime so
+> that mature reclamation is concurrent/incremental (à la the deleted stock major, or LXR's RC) — no read barrier,
+> keeping the copying nursery — recovering vanilla's ~N× minor scaling?* OCaml's init-write-dominated allocation
+> (RQ1: field barrier near-free) is exactly what makes off-STW mature reclamation cheap here — the scalability fix
+> and the low-latency-RC bet are the same. **Caveat (open measurement):** `gc_time_ms` is aggregate worker CPU, not
+> pause-wall; the full-GC *count* scaling is unambiguous, but a per-domain STW-vs-mutator **wall** decomposition
+> (Linux `perf`/`bpftrace`) is the clean confirmation still to run. Method note: the 6 structured lenses of the
+> analysis workflow failed on an output-schema bug; the synthesis was self-verified + code-checked, but the
+> independent adversarial-verify layer did NOT run — treat UPDATE 3 as strong-but-single-analyst until that + the
+> wall decomposition land.
+
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The
