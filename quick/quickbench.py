@@ -137,6 +137,12 @@ CI = {
 PARITY_HEAPS = {
     "binarytrees": 208, "nbody": 32, "fannkuchredux": 32, "spectralnorm": 96,
     "mandelbrot": 32, "matrix_multiplication": 48, "LU_decomposition": 112, "kb": 96,
+    # Parallel benches: pinned at the d=8 GenImmix dynamic footprint (the max
+    # across the sweep). These are STRONG-scaling (a FIXED total work is split
+    # across domains), so total allocation — hence GC pressure — is ~constant
+    # across the domain sweep; one heap/bench is fair, and RSS is still measured
+    # + charted so parity stays verifiable.
+    "par_binarytrees": 448, "par_matmul": 112, "par_spectralnorm": 96,
 }
 
 COLORS = {
@@ -158,6 +164,7 @@ def parse_args(argv):
     p.add_argument("--bin-b", dest="bin_b", default="")
     p.add_argument("--label-a", dest="label_a", default="mmtk")
     p.add_argument("--label-b", dest="label_b", default="b")
+    p.add_argument("--benches", default="")   # restrict to these (comma/space list); default = all
     p.add_argument("--domains", default="1,2,4,8")
     p.add_argument("--heap", default="dynamic")
     p.add_argument("--threads", default="domains")   # "domains"=workers per cell (default); "nproc"/""=unset; int=pin
@@ -182,20 +189,19 @@ def parse_args(argv):
         a.reps, a.warmup, a.ci = 1, 0, True
     a.plans = [x for x in re.split(r"[,\s]+", a.plans.strip()) if x]
     a.domains = [int(x) for x in re.split(r"[,\s]+", a.domains.strip()) if x]
+    sel = [x for x in re.split(r"[,\s]+", a.benches.strip()) if x]
+    a.benches = set(sel) if sel else None   # None = all benches for the mode
     # LXR is a reference-counting plan with NO dynamic-heap default: it needs a
-    # pinned MMTK_HEAP_SIZE_MB (passed via --heap MB). And it is single-domain
-    # validated only (multidomain WIP), so it is SEQ-ONLY here: force mode=seq so
-    # the parallel domain sweep never runs LXR. Hard-fail on --heap dynamic rather
-    # than a confusing mid-run init crash.
-    if "LXR" in a.plans:
-        if a.heap == "dynamic":
-            p.error("LXR requires a pinned heap: pass --heap <MB> "
-                    "(LXR has no dynamic-heap default). E.g. --heap 512")
-        if a.mode != "seq":
-            print("note: LXR is single-domain only (multidomain WIP) — "
-                  "restricting to the sequential panel (mode=seq).",
-                  file=sys.stderr)
-            a.mode = "seq"
+    # pinned MMTK_HEAP_SIZE_MB — pass --heap <MB> or --heap parity (per-bench
+    # memory-parity heaps, incl. the par_* benches). LXR is now single- AND
+    # multi-domain validated (the Domain.join terminate-UAF fix), so it runs the
+    # parallel domain sweep too. Hard-fail on --heap dynamic rather than a
+    # confusing mid-run init crash. (chameneos_redux still SIGSEGVs under LXR —
+    # a separate, single-domain effect/fiber-alloc bug, unrelated to scaling —
+    # so keep it out of an LXR par run; see gc/mmtk/NOTES.md.)
+    if "LXR" in a.plans and a.heap == "dynamic":
+        p.error("LXR requires a pinned heap: pass --heap <MB> or --heap parity "
+                "(LXR has no dynamic-heap default). E.g. --heap 512")
     return a
 
 
@@ -417,7 +423,7 @@ def run_seq(a, variants, sizes, records):
     print(f"{'-'*10:22s}" + "".join(f"{'-'*22:<{colw}}" for _ in variants))
     seq_med = {}      # bench -> label -> ms|None
     seq_rss = {}      # bench -> label -> max-RSS MiB|None
-    for b in SEQ_BENCHES:
+    for b in [x for x in SEQ_BENCHES if a.benches is None or x in a.benches]:
         row = f"{b:22s}"
         base = None
         seq_med[b] = {}
@@ -451,7 +457,7 @@ def run_seq(a, variants, sizes, records):
 def run_par(a, variants, sizes, records):
     print(f"\n## parallel (domain sweep: {','.join(map(str,a.domains))})")
     lw = max([16] + [len(v["label"]) + 2 for v in variants])
-    for b in PAR_BENCHES:
+    for b in [x for x in PAR_BENCHES if a.benches is None or x in a.benches]:
         print(f"\n### {b}  (args: {sizes[b]})")
         print(f"{'variant':<{lw}}" + "".join(f"{'d='+str(d)+' (ms | spd)':<18}" for d in a.domains))
         for v in variants:
@@ -540,7 +546,7 @@ def plot_all(records, outdir):
                     va="bottom", fontsize=9, color="#444")
             ax.set_ylabel("time / vanilla 5.5.0  (lower is better)")
             ax.set_title("Quick panel — sequential: MMTk vs vanilla OCaml 5.5.0\n"
-                         "(native, dynamic heap = memory parity, best-of-N)")
+                         "(native, dynamic heap = memory parity, median-of-N)")
             ax.set_xticks(x); ax.set_xticklabels(benches, rotation=20, ha="right", fontsize=9)
             ax.legend(loc="upper left"); ax.grid(axis="y", ls=":", alpha=0.4)
             fig.tight_layout()
@@ -572,6 +578,7 @@ def plot_all(records, outdir):
             ax.set_ylabel("max RSS (MiB)  (lower is better)")
             ax.set_title("Quick panel — sequential: max RSS (MiB), lower is better\n"
                          "(native, dynamic heap = memory parity, peak-of-N)")
+            # (LXR runs at a pinned per-bench memory-parity heap; see README.)
             ax.set_xticks(x); ax.set_xticklabels(benches, rotation=20, ha="right", fontsize=9)
             ax.legend(loc="upper left"); ax.grid(axis="y", ls=":", alpha=0.4)
             fig.tight_layout()
@@ -609,7 +616,8 @@ def plot_all(records, outdir):
             axes[j//ncol][j % ncol].axis("off")
         wnote = ("MMTk GC workers = " + "/".join(sorted(workers))) if workers else ""
         fig.suptitle("Quick panel — parallel scalability: speedup vs domains\n"
-                     f"(native, dynamic heap, best-of-N; red × = hang/crash; {wnote})",
+                     "(native, median-of-N; tracing plans dynamic heap, LXR pinned; "
+                     f"red × = hang/crash; {wnote})",
                      fontsize=12)
         fig.tight_layout(rect=[0, 0, 1, 0.95])
         out = os.path.join(outdir, "speedup_domains.png")
