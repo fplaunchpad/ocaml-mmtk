@@ -85,6 +85,24 @@
 > 2.66→3.21 s → it's per-collection STW *cost*, not thrash). `par_matmul` (GC-light) scales fine on every plan —
 > the gap appears *only* under mature promotion, exactly as predicted.
 >
+> **`MMTK_THREADS` control (rules out GC-worker contention as the binarytrees cause).** GenImmix `par_binarytrees`
+> S(8): **1 GC worker = 0.50×**, workers=domains = **0.88×** — i.e. *fewer* GC threads makes the anti-scaling
+> WORSE, not better. At d8 the full-GC *count* is identical (80 vs 79) but GC-time is **3825 ms serial vs 2468 ms
+> with 8 workers**: the parallel workers HELP because the STW mature trace is real parallelizable work, and its
+> *frequency* (∝ mature pressure ∝ domains) is unaffected by worker count. So the alloc-heavy anti-scaling is the
+> STW mature trace itself, NOT worker oversubscription. (Opposite on GC-LIGHT `par_spectralnorm`: 1 worker = 2.61×
+> beats workers=domains = 2.28× — there the 8-worker park/wake overhead exceeds the tiny GC work. Two distinct
+> effects; the mature-trace one dominates wherever promotion is high.)
+>
+> **Fixable, not fundamental.** Stock scales 3.93× on the identical bench, so the *anti-scaling* is a design
+> artifact of on-STW mature reclamation (removable). What IS baked-in is OCaml 5's global STW-minor barrier, which
+> caps even the best case at stock's ~0.49 efficiency — reaching stock parity, not linear speedup, is the target.
+> Fix path (ranked): (1) **ConcurrentImmix + native SATB** — concurrent MARK is read-barrier-free in OCaml (RQ1:
+> init-write-dominated), the cheap high-impact win, unblock #30; (2) **domain-aware full-GC trigger**
+> (`MATURE_PRESSURE_OVERHEAD_PCT` is domain-blind → fires ~N× more) to cut frequency; (3) **LXR** as the
+> read-barrier-free *moving*-reclamation research vehicle (concurrent EVACUATION is the hard part — needs a read
+> barrier or RC); (4) non-gen **Immix** as the pragmatic interim parallel default.
+>
 > **RQ10 sharpened:** *can a third-party moving generational GC be integrated behind OCaml 5's multicore runtime so
 > that mature reclamation is concurrent/incremental (à la the deleted stock major, or LXR's RC) — no read barrier,
 > keeping the copying nursery — recovering vanilla's ~N× minor scaling?* OCaml's init-write-dominated allocation
