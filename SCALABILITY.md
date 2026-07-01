@@ -107,12 +107,29 @@
 > that mature reclamation is concurrent/incremental (à la the deleted stock major, or LXR's RC) — no read barrier,
 > keeping the copying nursery — recovering vanilla's ~N× minor scaling?* OCaml's init-write-dominated allocation
 > (RQ1: field barrier near-free) is exactly what makes off-STW mature reclamation cheap here — the scalability fix
-> and the low-latency-RC bet are the same. **Caveat (open measurement):** `gc_time_ms` is aggregate worker CPU, not
-> pause-wall; the full-GC *count* scaling is unambiguous, but a per-domain STW-vs-mutator **wall** decomposition
-> (Linux `perf`/`bpftrace`) is the clean confirmation still to run. Method note: the 6 structured lenses of the
-> analysis workflow failed on an output-schema bug; the synthesis was self-verified + code-checked, but the
-> independent adversarial-verify layer did NOT run — treat UPDATE 3 as strong-but-single-analyst until that + the
-> wall decomposition land.
+> and the low-latency-RC bet are the same.
+>
+> **STW-WALL DECOMPOSITION — caveat CLOSED, cross-host (2026-07-01).** `gc_time_ms` turns out to BE the STW
+> **pause-wall**: a single `Instant` span from `stop_all_mutators` to `resume_mutators` (`collection.rs:328` sets
+> `GC_PAUSE_START`, resume adds elapsed to `GC_NANOS`; doc `:84`), NOT aggregate worker CPU — my earlier caveat was
+> wrong. So **STW-fraction = `gc_time_ms / wall`** is a direct wall measurement. par_binarytrees 20,
+> MMTK_THREADS=domains, **STW-wall as % of total wall**:
+>
+> | domains | 1 | 2 | 4 | 8 | 16 | 28 |
+> |---|--:|--:|--:|--:|--:|--:|
+> | **GenImmix** (M4 Pro, 8c) | 60 | 80 | 90 | 94 | — | — |
+> | **GenImmix** (turing, 28c) | 65 | 73 | 81 | 90 | 93 | **94** |
+> | **ConcurrentImmix** (turing, 28c) | 11 | 12 | 9 | 16 | 17 | 17 |
+>
+> GenImmix's STW fraction climbs and **plateaus ~94%** — at high domain count the program is almost entirely
+> stopped-the-world, so there is no mutator parallelism left to gain (its wall bottoms at d4 then *rises* d8→d28) →
+> anti-scaling. Off-STW **ConcurrentImmix stays flat at ~10–17%** across d1→d28 at both hosts — isolating the
+> STW-mature trace as THE cause and confirming the fix holds at scale. (ConcurrentImmix's own mild residual wall
+> sublinearity is small and NOT STW — a separate mutator/concurrent-worker matter.) The M4 and turing GenImmix
+> curves agree (60→94 vs 65→94), so it is not a host artifact. Method note: the 6 structured lenses of the analysis
+> workflow failed on an output-schema bug; synthesis was self-verified + code-checked and the STW-wall
+> decomposition is now cross-host-confirmed — but the independent adversarial-verify layer did NOT run, so treat the
+> mechanism as strong + measured and the ranked remedies as one-analyst.
 
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
