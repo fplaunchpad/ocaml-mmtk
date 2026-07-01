@@ -81,15 +81,14 @@ Wall (× vs vanilla) / max RSS (MiB):
 | mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.01× / 42 | 1.01× / 46 | 0.99× / 73 |
 | matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.89× / 122 |
 | LU_decomposition | 1.00× / 17 | 1.06× / 99 | 1.30× / 98 | 1.33× / 106 | 1.16× / 258 |
-| kb † | — | 1.00× / 95 | 0.86× / 103 | 0.76× / 143 | 1.31× / 199 |
-
-† `kb` has no vanilla baseline; its ratios are vs GenImmix.
+| kb | 1.00× / 8 | 1.36× / 95 | 1.17× / 103 | 1.03× / 143 | 1.78× / 199 |
 
 **Wall.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.70× — its in-place
 RC avoids GenImmix's 1.31× copying-nursery cost and Immix's 2.30× re-marking), at **parity on the
-compute-bound benches**, competitive on `spectralnorm`/`LU`/`matmul`, and **slower on `kb`** (1.31× — the
+compute-bound benches**, competitive on `spectralnorm`/`LU`/`matmul`, and **slower on `kb`** (1.78× — the
 cyclic garbage its backup trace must sweep). GenImmix (the default) is parity-or-better on the compute
-benches (`matrix_multiplication` 0.87×); ConcurrentImmix leads `kb` (0.76×).
+benches (`matrix_multiplication` 0.87×); every MMTk plan is slower than stock on `kb` (ConcurrentImmix
+closest at 1.03×) — its many small short-lived symbolic terms are exactly stock's minor-GC sweet spot.
 
 **Memory.** `LXR` carries the **highest RSS across the board** — a fixed ~48 MiB whole-heap RC-metadata tax
 (`RC_TABLE`) plus proportional overhead: ~73 MiB on the tiny-live compute benches (vs GenImmix's 26, vanilla's
