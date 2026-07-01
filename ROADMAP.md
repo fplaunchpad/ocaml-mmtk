@@ -474,8 +474,11 @@ The active research/measurement threads behind the M8 milestone — the index; d
     The headline throughput/RSS campaign runs here. (See `PERFORMANCE.md` §1/§3.)
   - **Quick GC-decision bench panel** (on the `benchmarks` orphan branch, `quick/`; ~5 min/variant; sequential
     + parallel) — the **fast inner-loop complement** to the macro suite, the **no-zero (RQ8) A/B vehicle**, and
-    the **LXR (RQ1) SEQ measurement vehicle** (LXR runs sequential-only at a pinned heap — competitive with the
-    tracing plans single-domain; not in the byte-identical CLBG gate).
+    the **LXR (RQ1) measurement vehicle** (LXR runs both sequential AND the parallel domain sweep at a pinned
+    heap; not in the byte-identical CLBG gate). **Parallel finding:** RC does *not* rescue the multi-domain
+    anti-scaling — LXR scales like the tracing plans (on par with GenImmix on compute benches, weak on
+    alloc-heavy par_binarytrees), well short of stock OCaml; the bottleneck is the MMTk↔OCaml integration, not
+    the collector algorithm (see README quick panel + `gc/mmtk/NOTES.md` 2026-07-01).
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime

@@ -97,19 +97,39 @@ benches (`matrix_multiplication` 0.87×); ConcurrentImmix leads `kb` (0.76×).
 acyclic churn at a real memory cost. LXR is single- **and** multi-domain validated but experimental; run it
 with `uv run quick/quickbench.py seq --plans LXR --heap parity`.
 
-**Parallel** — speedup at 8 domains (ideal = 8):
+**Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 3
+stdlib-only `Domain.spawn` benches, domains 1→8 on the M4 Pro (8 performance cores). Tracing plans run
+their dynamic heap; `LXR` is pinned per bench at an adequate (non-thrashing) heap, with its peak RSS
+reported alongside. Run: `… quickbench.py par --plans "GenImmix ConcurrentImmix" --vanilla … --heap dynamic`
+then a second pass `--plans LXR --heap parity`.
 
 ![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
 
-| bench | vanilla | GenImmix | Immix | ConcurrentImmix |
-|---|--:|--:|--:|--:|
-| par_matmul | 5.72 | 2.89 | 0.56 | 3.03 |
-| par_binarytrees | 3.76 | 0.72 | 3.15 | 0.86 |
-| par_spectralnorm | 4.81 | 1.74 | 2.39 | 1.56 |
+Speedup T(1)/T(8) / peak RSS at 8 domains (MiB):
 
-Multi-domain scaling is sublinear: the per-collection stop-the-world cost grows with domain count, so the
-allocation-heavy `par_binarytrees` anti-scales under GenImmix (0.72) while Immix scales best (3.15).
-`SCALABILITY.md` has the mechanism; the macro-bench campaign (`PERFORMANCE.md`) is authoritative.
+| bench | vanilla | GenImmix *(default)* | ConcurrentImmix | LXR |
+|---|--:|--:|--:|--:|
+| par_matmul | 6.38 / 20 | 3.31 / 108 | 4.08 / 79 | 3.37 / 123 |
+| par_spectralnorm | 4.77 / 21 | 2.22 / 93 | 1.83 / 101 | 2.62 / 236 |
+| par_binarytrees | 3.68 / 484 | 0.90 / 439 | 1.11 / 530 | **1.26 / 585** |
+
+**Stock OCaml scales best.** Vanilla 5.5.0's purpose-built multicore GC (stop-the-world minor + concurrent
+major) reaches 3.7–6.4× at 8 domains; **every MMTk plan scales worse**, and the gap widens with allocation
+intensity. On the compute-bound benches (`par_matmul`, `par_spectralnorm`) `LXR`'s reference counting scales
+on par with GenImmix (3.37 vs 3.31; 2.62 vs 2.22). On allocation-heavy `par_binarytrees` GenImmix
+**anti-scales** (0.90× — *slower* at 8 domains than 1, dominated by the per-collection stop-the-world cost
+and per-domain TLAB fragmentation); ConcurrentImmix and LXR only weakly recover (1.11×, 1.26× — LXR peaks
+1.68× at 4 domains, then falls).
+
+**RQ1 (parallel): reference counting does *not* rescue the multi-domain anti-scaling.** LXR has the best
+*single-domain* throughput (it wins `binarytrees` sequentially at 0.70× vanilla) but in parallel it behaves
+like the tracing plans — the bottleneck is the MMTk↔OCaml multi-domain integration (STW coordination, TLAB
+fragmentation, `Domain.spawn`/`join` cost), not the collector algorithm. LXR also pays a memory tax: its
+~48 MiB RC-metadata (`RC_TABLE`) counts in RSS but is not usable heap, so at strict RSS parity (pinning
+`par_binarytrees` at GenImmix's 448 MiB footprint) it **thrashes to 0.28×**; a 768 MiB heap restores the
+1.26× shown, at the higher RSS. `chameneos_redux` (effect-handler/fiber alloc) SIGSEGVs under LXR — a
+separate, single-domain RC bug (see `gc/mmtk/NOTES.md`) — so it is excluded here. `SCALABILITY.md` has the
+mechanism; the macro-bench campaign (`PERFORMANCE.md`) is authoritative.
 
 ## Building
 

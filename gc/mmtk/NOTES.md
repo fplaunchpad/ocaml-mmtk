@@ -5,6 +5,36 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR parallel-scaling panel: RC does NOT rescue the multi-domain anti-scaling (2026-07-01)
+
+Added LXR to the quick panel's **parallel** domain sweep (the guard that forced LXR to seq-only was stale
+after the terminate-UAF fix; `quickbench.py` now runs LXR in `par` mode, `--benches` filter added). Ran
+3 stdlib-only `Domain.spawn` strong-scaling benches (par_matmul/par_spectralnorm/par_binarytrees),
+domains 1→8, M4 Pro (8 P-cores), median-5. Tracing plans dynamic heap; LXR pinned at an adequate heap.
+Speedup T(1)/T(8) — vanilla / GenImmix / ConcurrentImmix / LXR:
+- par_matmul: 6.38 / 3.31 / 4.08 / **3.37**   (RSS@8: 20/108/79/123 MiB)
+- par_spectralnorm: 4.77 / 2.22 / 1.83 / **2.62**   (21/93/101/236)
+- par_binarytrees: 3.68 / 0.90 / 1.11 / **1.26**   (484/439/530/585)
+
+**Finding (RQ1 parallel):** stock OCaml's multicore GC scales best (3.7–6.4×); every MMTk plan scales
+worse and the gap widens with allocation intensity. LXR (RC) — which has the *best single-domain*
+throughput (wins binarytrees seq at 0.70×) — scales in parallel **like the tracing plans**, NOT better:
+on par with GenImmix on the compute benches, weak on alloc-heavy binarytrees (GenImmix anti-scales 0.90×;
+LXR peaks 1.68× at d4 then falls to 1.26× at d8). So the multi-domain bottleneck is the **MMTk↔OCaml
+integration** (STW coordination, per-domain TLAB fragmentation, spawn/join), not the collector algorithm —
+RC does not escape it. Publishable framing: the parallel-scaling gap is structural to the integration.
+
+**Two traps hit + documented (don't rediscover):**
+1. **RSS-parity heap starves LXR's GC.** Pinning LXR at a tracing plan's RSS footprint is UNFAIR: LXR's
+   ~48 MiB RC_TABLE counts in RSS but is not usable heap. par_binarytrees at 448 MiB (GenImmix's d8
+   footprint) → LXR **thrashes** to 0.28× (54 GCs at d8); 768 MiB → 1.26× (`PARITY_HEAPS` keeps 448 for
+   the caveat; the panel uses the adequate 768). Measure RC scalability at an adequate heap, report the
+   (higher) RSS separately — pinning to equal RSS measures heap-starvation, not scalability.
+2. **chameneos_redux SIGSEGVs under LXR — a SEPARATE bug, not the terminate-UAF.** It crashes even
+   single-domain (d=1) at the large size (500000) but runs at the small size (50000); tracing plans
+   (GenImmix/Immix) run it fine. So it's a distinct high-volume effect/fiber (continuation) RC bug,
+   unrelated to Domain.join scaling — excluded from the LXR par panel, tracked as an open LXR limitation.
+
 ## LXR reference-counting plan: single-domain VALIDATED + RQ1 answered; multidomain primary crash fixed, residual open (2026-06-30)
 
 LXR (reference counting on Immix; Zhao/Blackburn/McKinley PLDI'22) is now a selectable plan
