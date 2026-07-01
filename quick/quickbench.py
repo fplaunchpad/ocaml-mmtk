@@ -17,7 +17,8 @@ the header, so `uv` fetches them per-run; no venv, no global install) that:
     group (some plans, e.g. ConcurrentImmix, deadlock on some benches),
   * prints a table (+ optional ASCII bar chart),
   * writes NDJSON results, and
-  * renders PNG graphs (seq ratio bars + speedup-vs-domains lines).
+  * renders PNG graphs (seq wall-ratio bars + seq max-RSS bars +
+    speedup-vs-domains lines).
 
 USAGE
   uv run quick/quickbench.py [seq|par|all] [options]
@@ -102,6 +103,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -125,6 +127,16 @@ CI = {
     "spectralnorm": "200", "mandelbrot": "200", "matrix_multiplication": "64",
     "LU_decomposition": "64", "par_spectralnorm": "200", "par_matmul": "64",
     "par_binarytrees": "12", "chameneos_redux": "2000", "kb": "5",
+}
+# Per-bench MEMORY-PARITY heaps (MiB) for `--heap parity`: each bench pinned at ~the
+# footprint the dynamic (live x2.2) policy picks for it (measured as GenImmix's dynamic
+# max RSS, M4 Pro, PERF sizes). Used to bench plans that have NO dynamic-heap trigger
+# (LXR) at the SAME memory the dynamic plans use — the honest, per-bench memory-parity
+# comparison (a flat generous heap makes GC barely fire and hides the result). RSS is
+# still measured and charted, so parity is verifiable rather than assumed.
+PARITY_HEAPS = {
+    "binarytrees": 208, "nbody": 32, "fannkuchredux": 32, "spectralnorm": 96,
+    "mandelbrot": 32, "matrix_multiplication": 48, "LU_decomposition": 112, "kb": 96,
 }
 
 COLORS = {
@@ -253,12 +265,18 @@ def threads_label(a):
     return f"nproc({os.cpu_count()})"
 
 
-def cell_env(a, plan, dom):
+def cell_env(a, plan, dom, bench=None):
     e = dict(os.environ)
     e["OCAMLLIB"] = STDLIB
     if plan:
         e["MMTK_PLAN"] = plan
-        if a.heap != "dynamic":
+        if a.heap == "parity":
+            # per-bench memory-parity heap (see PARITY_HEAPS); pin at that bench's
+            # dynamic footprint so no-dynamic-heap plans (LXR) run at the same memory.
+            hp = PARITY_HEAPS.get(bench)
+            if hp is not None:
+                e["MMTK_HEAP_SIZE_MB"] = str(hp)
+        elif a.heap != "dynamic":
             e["MMTK_HEAP_SIZE_MB"] = str(a.heap)
         # GC-worker count. Default policy "domains" sets workers = this cell's
         # domain count (single-domain -> 1 worker; the parallel sweep scales GC
@@ -271,52 +289,102 @@ def cell_env(a, plan, dom):
     return e
 
 
+def _maxrss_kib(rusage):
+    """Normalize rusage.ru_maxrss to KiB. Linux reports KiB already; macOS
+    (Darwin) reports BYTES. Returns None if unavailable."""
+    if rusage is None:
+        return None
+    try:
+        rss = rusage.ru_maxrss
+    except AttributeError:
+        return None
+    if rss is None:
+        return None
+    return (rss // 1024) if sys.platform == "darwin" else rss
+
+
 def run_once(cmd, env, timeout):
-    """Run cmd; return (elapsed_ms, status). status: 'ok'|'hang'|'err'.
-    Kills the whole process group on timeout (hung GC workers included)."""
+    """Run cmd; return (elapsed_ms, rss_kib, status). status: 'ok'|'hang'|'err'.
+    Kills the whole process group on timeout (hung GC workers included).
+    RSS (peak, KiB) comes from os.wait4's rusage on the success path; it is
+    None if the child couldn't run or was killed on timeout."""
     t0 = time.monotonic()
     try:
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
     except FileNotFoundError:
-        return None, "err"
-    try:
-        rc = p.wait(timeout=timeout if timeout and timeout > 0 else None)
-    except subprocess.TimeoutExpired:
+        return None, None, "err"
+
+    # Timeout/kill path: os.wait4() has no timeout, so arm a watchdog Timer that
+    # SIGKILLs the whole process group (hung GC workers included) on expiry. The
+    # kill makes the blocked wait4() below return, and we report 'hang'.
+    timed_out = {"fired": False}
+
+    def _kill_group():
+        timed_out["fired"] = True
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError):
             pass
-        p.wait()
-        return None, "hang"
+
+    timer = None
+    if timeout and timeout > 0:
+        timer = threading.Timer(timeout, _kill_group)
+        timer.start()
+
+    # Reap with wait4 to get rusage (peak RSS). On EINTR/ECHILD fall back
+    # cleanly rather than crash.
+    rusage = None
+    try:
+        _, wstatus, rusage = os.wait4(p.pid, 0)
+        rc = os.waitstatus_to_exitcode(wstatus)
+    except ChildProcessError:
+        rc = p.poll() if p.poll() is not None else -1
+        wstatus = None
+    finally:
+        if timer is not None:
+            timer.cancel()
+    # Keep Popen's internal bookkeeping consistent (child already reaped).
+    p.returncode = rc if isinstance(rc, int) else -1
+
+    if timed_out["fired"]:
+        return None, None, "hang"
+
     ms = (time.monotonic() - t0) * 1000.0
-    return (ms, "ok" if rc == 0 else "err")
+    rss_kib = _maxrss_kib(rusage)
+    return (ms, rss_kib, "ok" if rc == 0 else "err")
 
 
 def cell_median(a, variant, bench, args, dom):
-    """Best-of-reps median wall ms for one cell, or (None,'hang')."""
+    """One cell: return (median_wall_ms, max_rss_kib, status).
+    RSS is the PEAK across the measured reps; None if unavailable.
+    status: 'ok'|'hang'|'err'|'missing'."""
     exe = os.path.join(variant["dir"], f"{bench}." + ("byte" if a.bytecode else "native"))
     if not os.path.exists(exe):
-        return None, "missing"
+        return None, None, "missing"
     launcher = [variant["ocamlrun"]] if a.bytecode else []
     argv = [str(args)] + ([str(dom)] if dom is not None else [])
     k = dom if dom else 1
     cmd = pin_prefix(a, k) + setarch_prefix(a) + launcher + [exe] + argv
-    env = cell_env(a, variant["plan"], dom)
+    env = cell_env(a, variant["plan"], dom, bench)
     for _ in range(a.warmup):
-        _, st = run_once(cmd, env, a.timeout)
+        _, _, st = run_once(cmd, env, a.timeout)
         if st == "hang":
-            return None, "hang"
+            return None, None, "hang"
     times = []
+    rss_vals = []
     for _ in range(a.reps):
-        ms, st = run_once(cmd, env, a.timeout)
+        ms, rss, st = run_once(cmd, env, a.timeout)
         if st == "hang":
-            return None, "hang"
+            return None, None, "hang"
         if ms is not None:
             times.append(ms)
+        if rss is not None:
+            rss_vals.append(rss)
     if not times:
-        return None, "err"
-    return statistics.median(times), "ok"
+        return None, None, "err"
+    max_rss = max(rss_vals) if rss_vals else None
+    return statistics.median(times), max_rss, "ok"
 
 
 # ---- formatting ------------------------------------------------------------
@@ -342,22 +410,27 @@ def write_json(path, records):
 
 # ---- run modes -------------------------------------------------------------
 def run_seq(a, variants, sizes, records):
-    print("\n## sequential   (cells: median-ms | ratio-vs-baseline)")
-    colw = 22
+    print("\n## sequential   (cells: median-ms | ratio-vs-baseline // maxRSS-MiB))")
+    colw = 24
     hdr = f"{'bench':22s}" + "".join(f"{v['label']:<{colw}}" for v in variants)
     print(hdr)
-    print(f"{'-'*10:22s}" + "".join(f"{'-'*20:<{colw}}" for _ in variants))
+    print(f"{'-'*10:22s}" + "".join(f"{'-'*22:<{colw}}" for _ in variants))
     seq_med = {}      # bench -> label -> ms|None
+    seq_rss = {}      # bench -> label -> max-RSS MiB|None
     for b in SEQ_BENCHES:
         row = f"{b:22s}"
         base = None
         seq_med[b] = {}
+        seq_rss[b] = {}
         for v in variants:
-            med, st = cell_median(a, v, b, sizes[b], None)
+            med, rss_kib, st = cell_median(a, v, b, sizes[b], None)
+            rss_mib = round(rss_kib / 1024) if (st == "ok" and rss_kib is not None) else None
             seq_med[b][v["label"]] = med if st == "ok" else None
+            seq_rss[b][v["label"]] = rss_mib
             emit(records, mode="seq", bench=b, variant=v["label"],
                  plan=v["plan"] or "vanilla", domains=1, threads=threads_label(a),
                  median_ms=med if st == "ok" else None,
+                 rss_mib=rss_mib,
                  status=("ok" if st == "ok" else "hang" if st == "hang" else st))
             if st == "missing":
                 row += f"{'n/a':<{colw}}"; continue
@@ -366,10 +439,13 @@ def run_seq(a, variants, sizes, records):
             if base is None:
                 base = med
             ratio = f"{med/base:.2f}x" if base else "-"
-            row += f"{fmt_ms(med)+' | '+ratio:<{colw}}"
+            rss_str = f"{rss_mib}M" if rss_mib is not None else "?M"
+            cell = f"{fmt_ms(med)} | {ratio} // {rss_str}"
+            row += f"{cell:<{colw}}"
         print(row)
-    print(f"(ratio is vs the first variant: {variants[0]['label'] if variants else '-'} = 1.00x)")
-    return seq_med
+    print(f"(ratio is vs the first variant: {variants[0]['label'] if variants else '-'} = 1.00x; "
+          f"maxRSS = peak RSS across reps, MiB)")
+    return seq_med, seq_rss
 
 
 def run_par(a, variants, sizes, records):
@@ -382,10 +458,12 @@ def run_par(a, variants, sizes, records):
             row = f"{v['label']:<{lw}}"
             t1 = None
             for d in a.domains:
-                med, st = cell_median(a, v, b, sizes[b], d)
+                med, rss_kib, st = cell_median(a, v, b, sizes[b], d)
+                rss_mib = round(rss_kib / 1024) if (st == "ok" and rss_kib is not None) else None
                 emit(records, mode="par", bench=b, variant=v["label"],
                      plan=v["plan"] or "vanilla", domains=d, threads=threads_label(a),
                      median_ms=med if st == "ok" else None,
+                     rss_mib=rss_mib,
                      status=("ok" if st == "ok" else "hang" if st == "hang" else st))
                 if st == "missing":
                     row += f"{'n/a':<18}"; continue
@@ -431,10 +509,12 @@ def plot_all(records, outdir):
     par = [r for r in records if r["mode"] == "par"]
 
     if seq:
-        by = {}
+        by = {}       # bench -> variant -> median_ms
+        by_rss = {}   # bench -> variant -> max RSS MiB
         variants = []
         for r in seq:
             by.setdefault(r["bench"], {})[r["variant"]] = r["median_ms"]
+            by_rss.setdefault(r["bench"], {})[r["variant"]] = r.get("rss_mib")
             if r["variant"] not in variants:
                 variants.append(r["variant"])
         benches = [b for b in SEQ_BENCHES if b in by]
@@ -465,6 +545,37 @@ def plot_all(records, outdir):
             ax.legend(loc="upper left"); ax.grid(axis="y", ls=":", alpha=0.4)
             fig.tight_layout()
             out = os.path.join(outdir, "seq_ratio.png")
+            fig.savefig(out, dpi=120); print("wrote", out)
+
+        # Companion RSS chart: absolute peak RSS (MiB) per variant, grouped by
+        # bench. All variants (incl. vanilla) shown, since memory parity is the
+        # point. Skipped if no RSS was captured. None -> 0 bar, gracefully.
+        rss_variants = [v for v in variants
+                        if any(isinstance(by_rss[b].get(v), (int, float)) for b in benches)]
+        if rss_variants and benches:
+            x = np.arange(len(benches)); w = 0.8 / len(rss_variants)
+            fig, ax = plt.subplots(figsize=(11, 5))
+            for i, v in enumerate(rss_variants):
+                vals = [by_rss[b].get(v) if isinstance(by_rss[b].get(v), (int, float)) else 0
+                        for b in benches]
+                off = (i - (len(rss_variants)-1)/2) * w
+                bars = ax.bar(x+off, vals, w,
+                              label=("vanilla 5.5.0" if v == "vanilla"
+                                     else v.replace("mmtk:", "MMTk ")),
+                              color=COLORS.get(v))
+                for r in bars:
+                    h = r.get_height()
+                    if h and np.isfinite(h):
+                        ax.annotate(f"{h:.0f}", (r.get_x()+r.get_width()/2, h),
+                                    textcoords="offset points", xytext=(0, 2),
+                                    ha="left", va="bottom", fontsize=7, rotation=45)
+            ax.set_ylabel("max RSS (MiB)  (lower is better)")
+            ax.set_title("Quick panel — sequential: max RSS (MiB), lower is better\n"
+                         "(native, dynamic heap = memory parity, peak-of-N)")
+            ax.set_xticks(x); ax.set_xticklabels(benches, rotation=20, ha="right", fontsize=9)
+            ax.legend(loc="upper left"); ax.grid(axis="y", ls=":", alpha=0.4)
+            fig.tight_layout()
+            out = os.path.join(outdir, "seq_rss.png")
             fig.savefig(out, dpi=120); print("wrote", out)
 
     if par:
@@ -531,8 +642,9 @@ def main():
 
     records = []
     seq_med = {}
+    seq_rss = {}
     if a.mode in ("seq", "all"):
-        seq_med = run_seq(a, variants, sizes, records)
+        seq_med, seq_rss = run_seq(a, variants, sizes, records)
     if a.mode in ("par", "all"):
         run_par(a, variants, sizes, records)
     if a.chart and a.mode != "par":
