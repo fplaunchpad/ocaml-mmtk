@@ -78,6 +78,26 @@ GenImmix (the default) is parity-or-better on 6 of 8 benches — including `matr
 (**0.86×**); `kb` (1.23×) and `LU_decomposition` (1.09×) are the exceptions. ConcurrentImmix leads on the
 allocation-heavy `binarytrees` (**0.53×**) and `kb` (0.98×); Immix trails on `binarytrees` (2.11×).
 
+**`LXR`** (reference counting, RQ1) has **no dynamic heap**, so it is benched at a fixed heap **pinned per
+bench to GenImmix's natural (dynamic) footprint** — the real memory-parity comparison — reporting **wall
+(ratio vs GenImmix) and max RSS** (LXR carries a side-metadata cost, so RSS matters):
+
+| bench | heap | GenImmix | Immix | LXR |
+|---|--:|--:|--:|--:|
+| binarytrees | 288 MiB | 11.4 s / 306 MB | 3.3 s / 383 MB (0.29×) | **1.3 s / 378 MB (0.12×)** |
+| kb | 112 MiB | 0.52 s / 137 MB | 0.43 s / 161 MB (0.83×) | 0.70 s / 264 MB (1.35×) |
+| spectralnorm | 96 MiB | 0.76 s / 114 MB | 0.78 s / 154 MB (1.03×) | 0.76 s / 218 MB (1.00×) |
+| LU_decomposition | 112 MiB | 1.00 s / 134 MB | 0.96 s / 174 MB (0.96×) | 0.96 s / 258 MB (0.96×) |
+| nbody · fannkuch · mandelbrot · matmul | 32–48 MiB | 1.00× | ≈1.00× | ≈1.00× (heap-insensitive) |
+
+LXR's **in-place RC dominates on allocation-heavy `binarytrees` at GenImmix's own memory** (**0.12× — 8×
+faster**: GenImmix's copying nursery thrashes there while LXR promotes in place — the RQ1 result), is at
+**parity on compute-bound benches**, and is **slower on `kb`** (1.35× — cyclic garbage swept by the backup
+trace). The trade-off is memory: LXR carries a fixed ~48 MiB whole-heap RC-metadata tax plus proportional
+overhead, so its RSS runs ~20–90% above the tracing plans at the same heap. This is the RQ1 story — RC buys
+throughput + memory-robustness on acyclic churn, at a side-metadata cost. LXR is single- and multi-domain
+validated but experimental; run it via `uv run quick/quickbench.py seq --plans LXR --heap <MB>`.
+
 **Parallel** — speedup at 8 domains (ideal = 8):
 
 ![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
