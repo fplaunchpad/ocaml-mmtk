@@ -583,6 +583,21 @@ pub extern "C" fn mmtk_ocaml_is_in_mmtk_spaces(addr: *const libc::c_void) -> boo
     })
 }
 
+/// LXR (issue #31): durably keep `addr` and its transitive children alive under the LXR
+/// reference-counting plan, applied synchronously at domain termination BEFORE the domain
+/// deregisters and its nursery block can be swept/reused. Under LXR the just-built `Finished(Ok
+/// result)` chain has RC 0 (nothing has incremented it) and would be freed by
+/// `sweep_nursery_blocks` before the joiner reads `term_sync.state` -- SIGSEGV in `Domain.join`.
+/// This bumps RC >= 1 on the whole chain so it survives. Returns false (no-op) for non-LXR plans:
+/// they promote the result via the `caml_mmtk_collect` path in `sync_and_terminate` instead.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_lxr_keep_alive(addr: *const libc::c_void) -> bool {
+    let object = unsafe {
+        ObjectReference::from_raw_address_unchecked(Address::from_ptr(addr))
+    };
+    memory_manager::lxr_keep_alive_recursive(mmtk(), object)
+}
+
 /// True iff `addr` is an object currently residing in the generational NURSERY
 /// (young space). False for mature objects and for every non-generational plan
 /// (which has no nursery). Used by the domain-termination path (issue #31) to

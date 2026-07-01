@@ -150,7 +150,7 @@ stock plans are wired in bytecode, **plus our own `LXR`** reference-counting res
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
 | `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
-| `LXR` | reference counting (in-place, on Immix) + concurrent backup trace for cycles | bytecode + native — **experimental: single-domain validated, multidomain WIP. Requires a pinned `MMTK_HEAP_SIZE_MB`.** |
+| `LXR` | reference counting (in-place, on Immix) + concurrent backup trace for cycles | bytecode + native — **experimental (research plan): single- and multi-domain validated (par_binarytrees D=1..32). Requires a pinned `MMTK_HEAP_SIZE_MB`.** |
 
 `ConcurrentImmix` is the low-latency **research** plan: concurrent marking + SATB write barrier
 (bytecode + native), clean on `lazy` and effect-handler continuations (subtle cases in
@@ -160,9 +160,11 @@ fresh objects) is also what lets the runtime skip zeroing new memory.
 `LXR` is our **reference-counting** research plan (Zhao/Blackburn/McKinley, PLDI'22): a coalescing
 field-logging write barrier feeds in-place reference counting on an Immix heap, with a periodic
 stop-the-world backup mark/sweep to reclaim cycles (triggered only when RC under-reclaims, so it is
-nearly free on acyclic code). It is **experimental** — single-domain validated (correct + sanity-clean +
-at memory parity with Immix; the field barrier is essentially free on OCaml's init-write-dominated code),
-multidomain still in progress. It **requires a pinned `MMTK_HEAP_SIZE_MB`**. Extra knobs: `MMTK_RC_DEBUG`
+nearly free on acyclic code). It is **experimental** (a research plan) but now validated **both single-
+and multi-domain**: correct + sanity-clean + at memory parity with Immix; the field barrier is essentially
+free on OCaml's init-write-dominated code; and `par_binarytrees` runs correctly at D=1..32 domains (the
+Domain.join result is kept alive across teardown by a synchronous recursive RC-pin). It **requires a pinned
+`MMTK_HEAP_SIZE_MB`**. Extra knobs: `MMTK_RC_DEBUG`
 (per-pause RC stats), `MMTK_RC_NO_CM` (disable the cycle-collecting backup trace), `MMTK_BARRIER_COUNT`
 (count write-barrier fires). LXR is a **runnable sequential quick-panel plan** — `uv run
 quick/quickbench.py seq --plans LXR --heap 512` (it needs a pinned heap, and is SEQ-only until

@@ -22,7 +22,8 @@ plan whose Default allocator is a bump/Immix region (the eight:
 `Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan.
 **`LXR`** is our reference-counting **research plan** (PLDI'22 RC-on-Immix): single-domain validated
 (correct, sanity-clean, at memory parity with Immix; the field barrier is near-free on OCaml's
-init-write-dominated code; a backup trace reclaims cycles) — **experimental, multidomain WIP**; requires a
+init-write-dominated code; a backup trace reclaims cycles) — **experimental; single- AND multi-domain
+validated** (par_binarytrees D=1..32); requires a
 pinned `MMTK_HEAP_SIZE_MB` and is **not** in the CI plan matrix. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,

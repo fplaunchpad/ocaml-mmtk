@@ -35,12 +35,22 @@ Domain spawn/join teardown to a `.data` `Stdlib.Domain` static (outside any MMTk
 `FieldSlot::load`'s GH#15 immediate/null re-check and reached `rc.inc` → unmapped RC_TABLE metadata →
 SIGSEGV (tracing plans survive via SFT-bounds-aware `trace_object`; RC indexes raw). Fix = re-check
 `is_in_mmtk_spaces` in `FieldSlot::load` + `process_inc`/`process_slot` guards. Item #1 (non-atomic
-decrement kill → atomic CAS) also merged. RESIDUAL (D≥12) — **OPEN**: the SAME `term_sync->state` premature
-free as the #31 entry below; the terminating domain's buffered RC `+1` on the published `Finished` result
-is not applied, so the result (kept only by the deferred `ml_values->result` root) is swept before
-`Domain.join` reads it. Wiring `flush_terminating_mutator` at terminate did not fix it (the drain runs but
-the result still reaches RC=0; block-promotion found 0 `Unallocated` blocks among the drained incs) —
-under diagnosis. LXR is correct at D≤4, partial at D=8.
+decrement kill → atomic CAS) also merged. RESIDUAL (D≥8) — **FIXED** (rr-confirmed, trace
+`pbt-RESIDUAL-d24`): the `Finished(Ok v)` join result has **RC=0 from birth** under LXR — (a) the
+`term_sync->state` `caml_modify` inc is buffered but `caml_mmtk_domain_terminate` never flushes the
+mutator barrier; (b) the deferred `ml_values->result` global-root inc never fires because the terminate
+`caml_mmtk_collect()` COALESCES onto a peer GC that already ran its global-root scan; and (c) the
+`while (caml_mmtk_is_young(result))` retry loop (domain.c:954) meant to catch that is a **dead no-op under
+LXR** (`is_young` → `plan.generational()` = `None` for LXR, always 0). So v's still-`Unallocated` block is
+nursery-swept (`state==Unallocated && rc_dead()`) and bump-reused before `Domain.join` reads it. The earlier
+`flush_terminating_mutator` drain failed because it was never wired AND a bare `rc.inc(v)` does not
+recurse (the inner `Ok`/payload blocks stay RC=0 → swept → SIGSEGV reading `Ok`). **Fix**: a synchronous,
+RECURSIVE RC-pin at terminate — `caml_mmtk_keep_alive(v)` in `sync_and_terminate` (domain.c, after the
+global-root store, before the collect) → `mmtk_ocaml_lxr_keep_alive` → `lxr_keep_alive_recursive` (rc.rs):
+SFT-guard → `rc.inc` → `set_as_in_place_promoted`+`promote_with_size` → recurse over fields, pinning all
+three chain blocks with RC≥1 (spares them from the `rc_dead()` AND-guarded sweep), independent of any
+collection. No-op for non-LXR plans. Validated par_binarytrees D=1..32 ×6 all pass (was 0/8 at D=24).
+Bounded over-retention: one result chain per terminated domain, reclaimed when `term_sync` dies.
 
 ## GH#3 / #31 Domain.join result-UAF — promotion made reliable (global root), BUT residual is a SEPARATE post-publish term_sync->state corruption (2026-06-29)
 

@@ -164,6 +164,12 @@ bool mmtk_ocaml_is_in_nursery(const void* addr);
  * support). Returns false for non-MMTk addresses / inert under non-moving plans. */
 bool mmtk_ocaml_pin_object(const void* addr);
 
+/** LXR (issue #31): durably keep `addr` and its transitive children alive under the
+ * reference-counting plan, applied synchronously at domain termination so the domain's
+ * `Finished(Ok v)` result survives its own nursery-block sweep until the joiner reads it.
+ * Returns false (no-op) for non-LXR plans. */
+bool mmtk_ocaml_lxr_keep_alive(const void* addr);
+
 /** Objects relocated by copying collection so far (Immix defrag, etc.). */
 size_t mmtk_ocaml_objects_copied(void);
 

@@ -659,6 +659,20 @@ int caml_mmtk_is_young(value v)
   return mmtk_ocaml_is_in_nursery((const void *) v) ? 1 : 0;
 }
 
+/* LXR (issue #31): durably RC-pin the domain result chain `v` (and its transitive
+   children) at domain termination, so it survives this domain's own nursery-block
+   sweep/reuse until the joiner reads it via term_sync.state. Under LXR the tracing-plan
+   promotion in sync_and_terminate is inert (LXR is non-generational: caml_mmtk_is_young
+   always returns 0, so its retry loop is a no-op; and the forced caml_mmtk_collect
+   coalesces past the result's global-root scan), so without this the result is swept at
+   RC 0 -> SIGSEGV in Domain.join. No-op on the tracing/generational plans (they keep the
+   result alive via caml_mmtk_collect instead) and when MMTk cannot collect. */
+void caml_mmtk_keep_alive(value v)
+{
+  if (caml_mmtk_collects && Is_block(v))
+    mmtk_ocaml_lxr_keep_alive((const void *) v);
+}
+
 /* Generational write barrier. Records that `count` value-sized slots starting
    at `start` may now hold pointers into the nursery, so a young collection
    scans them. Called from caml_modify/write_barrier (count 1, slot-based —
