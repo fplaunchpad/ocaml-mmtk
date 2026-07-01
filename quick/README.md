@@ -139,12 +139,12 @@ uv run quick/quickbench.py [seq|par|all] [options]
 
 | Option | Meaning |
 |---|---|
-| `--plans P1,P2,...` | MMTk plans (default `GenImmix`); `"A,B"` or `"A B"` both work |
+| `--plans P1,P2,...` | MMTk plans (default `GenImmix`); `"A,B"` or `"A B"` both work. **`LXR`** (reference counting, RQ1) is **SEQ-only** (single-domain; multidomain WIP) and **requires `--heap <MB>`** — the harness rejects `--heap dynamic` and forces `mode=seq` for it |
 | `--vanilla DIR` | also run a vanilla baseline (a dir of native binaries) — the ratio baseline |
 | `--bin-a DIR --label-a S` | the MMTk-built bench dir (× plans); label default `mmtk` |
 | `--bin-b DIR --label-b S` | optional second binary set (A/B feature axis) |
 | `--domains 1,2,4,8` | (par) domain counts to sweep (default `1,2,4,8`) |
-| `--heap MB\|dynamic` | `MMTK_HEAP_SIZE_MB`; `dynamic` (default) = don't pin (memory parity) |
+| `--heap MB\|dynamic` | `MMTK_HEAP_SIZE_MB`; `dynamic` (default) = don't pin (memory parity). **`LXR` requires a pinned `MB`** (no dynamic heap) |
 | `--threads N` | pin `MMTK_THREADS=N`. **Default: unset** — MMTk uses its own default = **nproc**; each record logs the effective count (`nproc(<cpus>)`) |
 | `--reps N --warmup N` | reps / warmups per cell (default `3` / `1`); median of reps |
 | `--quick` / `--ci` | tiny CI sizes (smoke); `--quick` also sets reps=1 warmup=0 |

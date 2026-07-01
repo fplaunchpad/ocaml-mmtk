@@ -130,6 +130,7 @@ CI = {
 COLORS = {
     "vanilla": "#444444", "mmtk:GenImmix": "#4C72B0",
     "mmtk:Immix": "#DD8452", "mmtk:ConcurrentImmix": "#55A868",
+    "mmtk:LXR": "#C44E52",
 }
 
 
@@ -169,6 +170,20 @@ def parse_args(argv):
         a.reps, a.warmup, a.ci = 1, 0, True
     a.plans = [x for x in re.split(r"[,\s]+", a.plans.strip()) if x]
     a.domains = [int(x) for x in re.split(r"[,\s]+", a.domains.strip()) if x]
+    # LXR is a reference-counting plan with NO dynamic-heap default: it needs a
+    # pinned MMTK_HEAP_SIZE_MB (passed via --heap MB). And it is single-domain
+    # validated only (multidomain WIP), so it is SEQ-ONLY here: force mode=seq so
+    # the parallel domain sweep never runs LXR. Hard-fail on --heap dynamic rather
+    # than a confusing mid-run init crash.
+    if "LXR" in a.plans:
+        if a.heap == "dynamic":
+            p.error("LXR requires a pinned heap: pass --heap <MB> "
+                    "(LXR has no dynamic-heap default). E.g. --heap 512")
+        if a.mode != "seq":
+            print("note: LXR is single-domain only (multidomain WIP) — "
+                  "restricting to the sequential panel (mode=seq).",
+                  file=sys.stderr)
+            a.mode = "seq"
     return a
 
 
