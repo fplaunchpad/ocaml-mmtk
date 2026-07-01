@@ -164,7 +164,12 @@ nearly free on acyclic code). It is **experimental** — single-domain validated
 at memory parity with Immix; the field barrier is essentially free on OCaml's init-write-dominated code),
 multidomain still in progress. It **requires a pinned `MMTK_HEAP_SIZE_MB`**. Extra knobs: `MMTK_RC_DEBUG`
 (per-pause RC stats), `MMTK_RC_NO_CM` (disable the cycle-collecting backup trace), `MMTK_BARRIER_COUNT`
-(count write-barrier fires). LXR is **not** in the CI plan matrix yet.
+(count write-barrier fires). LXR is a **runnable sequential quick-panel plan** — `uv run
+quick/quickbench.py seq --plans LXR --heap 512` (it needs a pinned heap, and is SEQ-only until
+multidomain lands). On the sequential panel at memory parity (fixed 512 MiB heap) it is competitive
+with the tracing plans — at parity with GenImmix on the compute benches, faster on binarytrees
+(0.88×), and ahead of Immix on binarytrees/spectralnorm/LU. It is **not** in the CI cross-plan gate
+yet (it is experimental — a different, non-byte-identical collector).
 
 The one **unwired** stock plan is **`Compressor`** (needs a unified object-reference model incompatible
 with OCaml's layout). `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only (their allocators can't

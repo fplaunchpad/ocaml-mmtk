@@ -472,7 +472,9 @@ The active research/measurement threads behind the M8 milestone — the index; d
     driven via **`running-ng`** — adopted as the M8 measurement vehicle (rather than building our own harness).
     The headline throughput/RSS campaign runs here. (See `PERFORMANCE.md` §1/§3.)
   - **Quick GC-decision bench panel** (on the `benchmarks` orphan branch, `quick/`; ~5 min/variant; sequential
-    + parallel) — the **fast inner-loop complement** to the macro suite and the **no-zero (RQ8) A/B vehicle**.
+    + parallel) — the **fast inner-loop complement** to the macro suite, the **no-zero (RQ8) A/B vehicle**, and
+    the **LXR (RQ1) SEQ measurement vehicle** (LXR runs sequential-only at a pinned heap — competitive with the
+    tracing plans single-domain; not in the byte-identical CLBG gate).
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime
