@@ -56,47 +56,46 @@ The milestone-by-milestone plan and current status are in
 
 ### Performance (quick panel)
 
-12 stdlib-only CLBG/sandmark/effects programs, native, dynamic heap (memory parity with vanilla),
-median of 5 reps on an Apple M4 Pro. GC workers = domains. Run: `uv run quick/quickbench.py …`.
+8 stdlib-only sequential CLBG/sandmark programs, native, median of 5 reps on an Apple M4 Pro. Compared
+**at memory parity, reporting both wall time AND max RSS** — a plan that "wins" on wall by using more
+memory is not a win. The tracing plans (vanilla 5.5.0, GenImmix, Immix, ConcurrentImmix) run at their
+natural dynamic heap; `LXR` — which has no dynamic-heap trigger — is pinned per bench at that same
+footprint (`--heap parity`). Run: `uv run quick/quickbench.py seq --plans "GenImmix Immix LXR" …`.
 
-**Sequential** — wall vs vanilla 5.5.0 (lower is better):
+**Wall** — × vs vanilla 5.5.0 (lower is better):
 
-![sequential ratio vs vanilla](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_ratio.png)
+![sequential wall ratio vs vanilla](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_ratio.png)
 
-| bench | GenImmix *(default)* | Immix | ConcurrentImmix |
-|---|--:|--:|--:|
-| binarytrees | 1.05× | 2.11× | **0.53×** |
-| nbody | 1.01× | **0.94×** | 1.01× |
-| fannkuchredux | 1.00× | 1.00× | 1.01× |
-| spectralnorm | **0.96×** | 1.24× | 1.23× |
-| mandelbrot | 1.00× | 0.99× | 1.00× |
-| matrix_multiplication | **0.86×** | 0.87× | **0.87×** |
-| LU_decomposition | 1.09× | 1.32× | 1.33× |
-| kb | 1.23× | 1.10× | **0.98×** |
+**Max RSS** — MiB, the memory each plan actually uses (lower is better):
 
-GenImmix (the default) is parity-or-better on 6 of 8 benches — including `matrix_multiplication`
-(**0.86×**); `kb` (1.23×) and `LU_decomposition` (1.09×) are the exceptions. ConcurrentImmix leads on the
-allocation-heavy `binarytrees` (**0.53×**) and `kb` (0.98×); Immix trails on `binarytrees` (2.11×).
+![sequential max RSS](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_rss.png)
 
-**`LXR`** (reference counting, RQ1) has **no dynamic heap**, so it is benched at a fixed heap **pinned per
-bench to GenImmix's natural (dynamic) footprint** — the real memory-parity comparison — reporting **wall
-(ratio vs GenImmix) and max RSS** (LXR carries a side-metadata cost, so RSS matters):
+Wall (× vs vanilla) / max RSS (MiB):
 
-| bench | heap | GenImmix | Immix | LXR |
-|---|--:|--:|--:|--:|
-| binarytrees | 288 MiB | 11.4 s / 306 MB | 3.3 s / 383 MB (0.29×) | **1.3 s / 378 MB (0.12×)** |
-| kb | 112 MiB | 0.52 s / 137 MB | 0.43 s / 161 MB (0.83×) | 0.70 s / 264 MB (1.35×) |
-| spectralnorm | 96 MiB | 0.76 s / 114 MB | 0.78 s / 154 MB (1.03×) | 0.76 s / 218 MB (1.00×) |
-| LU_decomposition | 112 MiB | 1.00 s / 134 MB | 0.96 s / 174 MB (0.96×) | 0.96 s / 258 MB (0.96×) |
-| nbody · fannkuch · mandelbrot · matmul | 32–48 MiB | 1.00× | ≈1.00× | ≈1.00× (heap-insensitive) |
+| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | LXR |
+|---|--:|--:|--:|--:|--:|
+| binarytrees | 1.00× / 91 | 1.31× / 209 | 2.30× / 190 | 0.89× / 332 | **0.70× / 310** |
+| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.01× / 46 | 1.00× / 74 |
+| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.01× / 42 | 1.01× / 46 | 0.99× / 73 |
+| spectralnorm | 1.00× / 5 | 1.00× / 82 | 1.17× / 94 | 1.18× / 90 | 1.11× / 218 |
+| mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.01× / 42 | 1.01× / 46 | 0.99× / 73 |
+| matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.89× / 122 |
+| LU_decomposition | 1.00× / 17 | 1.06× / 99 | 1.30× / 98 | 1.33× / 106 | 1.16× / 258 |
+| kb † | — | 1.00× / 95 | 0.86× / 103 | 0.76× / 143 | 1.31× / 199 |
 
-LXR's **in-place RC dominates on allocation-heavy `binarytrees` at GenImmix's own memory** (**0.12× — 8×
-faster**: GenImmix's copying nursery thrashes there while LXR promotes in place — the RQ1 result), is at
-**parity on compute-bound benches**, and is **slower on `kb`** (1.35× — cyclic garbage swept by the backup
-trace). The trade-off is memory: LXR carries a fixed ~48 MiB whole-heap RC-metadata tax plus proportional
-overhead, so its RSS runs ~20–90% above the tracing plans at the same heap. This is the RQ1 story — RC buys
-throughput + memory-robustness on acyclic churn, at a side-metadata cost. LXR is single- and multi-domain
-validated but experimental; run it via `uv run quick/quickbench.py seq --plans LXR --heap <MB>`.
+† `kb` has no vanilla baseline; its ratios are vs GenImmix.
+
+**Wall.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.70× — its in-place
+RC avoids GenImmix's 1.31× copying-nursery cost and Immix's 2.30× re-marking), at **parity on the
+compute-bound benches**, competitive on `spectralnorm`/`LU`/`matmul`, and **slower on `kb`** (1.31× — the
+cyclic garbage its backup trace must sweep). GenImmix (the default) is parity-or-better on the compute
+benches (`matrix_multiplication` 0.87×); ConcurrentImmix leads `kb` (0.76×).
+
+**Memory.** `LXR` carries the **highest RSS across the board** — a fixed ~48 MiB whole-heap RC-metadata tax
+(`RC_TABLE`) plus proportional overhead: ~73 MiB on the tiny-live compute benches (vs GenImmix's 26, vanilla's
+2) and ~1.5× the tracing plans on the alloc-heavy ones. This is the RQ1 trade-off — RC buys throughput on
+acyclic churn at a real memory cost. LXR is single- **and** multi-domain validated but experimental; run it
+with `uv run quick/quickbench.py seq --plans LXR --heap parity`.
 
 **Parallel** — speedup at 8 domains (ideal = 8):
 
