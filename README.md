@@ -71,7 +71,8 @@ ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --
 
 ![sequential max RSS](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_rss.png)
 
-Wall (× vs vanilla) / max RSS (MiB):
+<details>
+<summary><b>Sequential table</b> — wall (× vs vanilla) / max RSS (MiB)</summary>
 
 | bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
 |---|--:|--:|--:|--:|--:|--:|
@@ -83,6 +84,8 @@ Wall (× vs vanilla) / max RSS (MiB):
 | matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.87× / 38 | 0.89× / 122 |
 | LU_decomposition | 1.00× / 17 | 1.03× / 99 | 1.28× / 98 | 1.30× / 107 | 1.04× / 99 | 1.17× / 258 |
 | kb | 1.00× / 8 | 1.23× / 95 | 1.06× / 103 | 0.94× / 147 | 1.22× / 95 | 1.59× / 199 |
+
+</details>
 
 **Wall.** **`Bactrian` (RQ7) — the stock-*architecture* plan (copying nursery + concurrently-marked,
 (near-)non-moving Immix mature + SATB deletion barrier — vanilla's collector *architecture*, though not
@@ -116,13 +119,22 @@ reported alongside.
 
 ![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
 
-Speedup T(1)/T(8) / peak RSS at 8 domains (MiB):
+**Why the parallel gap exists — measured, not guessed** (turing, 28 cores; `SCALABILITY.md` UPDATE 4):
+vanilla completes **zero major cycles** on every one of these runs, while MMTk's pacing *manufactures*
+domain-scaled major-GC work and pays for it stop-the-world:
+
+![GC work manufactured vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/gcwork_domains.png)
+
+<details>
+<summary><b>Parallel table</b> — speedup T(1)/T(8) / peak RSS at 8 domains (MiB)</summary>
 
 | bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
 |---|--:|--:|--:|--:|--:|--:|
 | par_matmul | 6.74 / 20 | 3.41 / 109 | 3.37 / 78 | 3.62 / 80 | 3.31 / 109 | 3.44 / 123 |
 | par_spectralnorm | 5.19 / 21 | 2.33 / 92 | 3.03 / 98 | 1.77 / 102 | 2.41 / 92 | 2.84 / 236 |
 | par_binarytrees | 3.89 / 497 | 0.89 / 440 | **3.20 / 358** | 0.30 / 523 | 0.80 / 1689 | 0.29 / 577 |
+
+</details>
 
 **Stock OCaml scales best.** Vanilla 5.5.0's purpose-built multicore GC (stop-the-world minor + concurrent
 major) reaches 3.9–6.7× at 8 domains; **every MMTk plan scales worse**, and the gap widens with allocation
