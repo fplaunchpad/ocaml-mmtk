@@ -36,11 +36,10 @@ on a common substrate. The research agenda lives in
   *sole* all-domains rendezvous ("one STW" — the `caml_try_run_on_all_domains` family deleted,
   −478 lines; GH#15 fixed); and **`ConcurrentImmix`** (bytecode + native) — a concurrent marker
   with an SATB write barrier, proven clean on `lazy` values and on effect-handler continuations.
-- **In progress:** the macro-benchmark performance campaign + analysis (M8); and a few
-  rare-crash investigations tracked as GitHub issues (notably the pre-existing #31 `Domain.join`
-  result use-after-free under heavy multi-domain join, which the STW excision unmasked — a
-  global-rooted-promote fix has since roughly halved its rate, and instrumentation reframed the
-  residual as a *separate* post-publish `term_sync` corruption, so GH#3 stays open).
+- **In progress:** the macro-benchmark performance campaign + analysis (M8); the LXR /
+  ConcurrentImmix testsuite triage backlog; and the parallel-scaling programme in
+  [`SCALABILITY.md`](SCALABILITY.md) (the `Domain.join` crash — GH#3 — is **fixed**: remembered-set
+  buffers were lost at domain termination; flushed at deregister as of 2026-07-02).
 - **Known tails:** a flagged memprof colour read and `runtime_events` emission under MMTk
   (broken — see ROADMAP / FAQ). (Weak-clear timing under the generational plans — GH#5 — is
   fixed: full GC under mature pressure + `Gc.major_collections` counts full GCs only.)
