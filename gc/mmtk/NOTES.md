@@ -5,6 +5,39 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## chameneos mechanism CORRECTED by controls: promotion volume × per-promoted-object cost — the framework copy-path tax DOUBLED by the cont/fiber scan machinery; remset granularity disproven (2026-07-02, later)
+
+Controls run before implementing the slot-remset "fix" falsified the first mechanism story:
+
+1. **Mutation-storm control (88 M `caml_modify`, mature array slots ← young conses, NO fibers):
+   GenImmix 0.98 s BEATS vanilla 1.55 s** (GC 537 ms, 0.55 M copied). The unfiltered slot remset
+   absorbs chameneos-level mutation volume for free → remset granularity/filtering was NOT the
+   pathology, and a value-filtered slot barrier would not fix it.
+2. **StickyImmix control (in-place young generation): identical cost** (5.0 s wall, 4.1 s GC,
+   22.9 M copied) — same for GenCopy. Not the copying-nursery policy either.
+3. **binarytrees calibration:** GenImmix promotes MORE objects (27.6 M) in HALF the GC time —
+   **89 ns/promoted object vs chameneos's 195 ns**. So chameneos pays the framework's known
+   per-promoted-object tax (~90 ns: SFT dispatch, forwarding CAS, side-metadata, packet machinery
+   — the same floor kb/binarytrees pay) PLUS ~100 ns/object of **cont/fiber-specific overhead**:
+   promoted continuations scan their fiber stacks through `caml_scan_stack` (frame-descriptor
+   lookup per frame) feeding EVERY stack slot through the generic per-slot visitor
+   (enqueue → `FieldSlot::load` revalidation (GH#15 B1') → SFT `get_checked` → trace).
+   Stock runs the same ~22 M-object promotion volume + the same stack walks inside a 1.26 s run
+   (≤40 ns/object all-in).
+
+**Revised fix ranking for the effects workload class:**
+1. **Cut the per-promoted-object framework tax** (~90 ns → stock's ~40): a fast-path OCaml nursery
+   trace (batched forwarding, fewer side-metadata ops per object, cheaper post_copy). Benefits
+   binarytrees/kb too — this IS the sequential framework floor, chameneos just multiplies it 100×
+   via its survival rate.
+2. **Batch the cont-stack slot path**: direct trace of fiber-stack slots during the stack walk
+   instead of per-slot enqueue+revalidate+SFT (the revalidation exists for stale stack slots —
+   GH#15 — so any fast path must keep a cheap validity guard).
+3. Guidance meanwhile: mutation+fiber-heavy code runs BEST on plain Immix (0.90 s d=1, beats
+   vanilla; no promotion at all) — the panel's plan-choice lever is real.
+
+Multi-domain (39× vs 4×) still stacks the per-minor rendezvous on top (culprits 1/3).
+
 ## chameneos (effects/fiber churn) QUANTIFIED: the pathology is generational-barrier granularity under a mutation-dominated workload, NOT fiber scanning — plain Immix BEATS vanilla on it (2026-07-02)
 
 First panel with chameneos on all plans exposed GenImmix d=8 at 12.3 s vs vanilla 0.32 s (39×) and
@@ -30,11 +63,13 @@ d=1 at ~4×. Quantified (M4, n=500000, d=1):
   0 objects copied). The fiber path itself is fine; the GENERATIONAL machinery is the pathology.
 
 **Fix direction (= BACTRIAN.md closing-step 4, now promoted):** a slot-granular, value-filtered
-generational barrier for OCaml — stock ref_table semantics: on `caml_modify(slot, v)` remember the
-SLOT, only when `young(v) && mature(slot)`; scan slots (1 load each) instead of re-scanning objects
-(and cont stacks) at each minor. Keep region-remembering only for array blits. Multi-domain (the
-remaining 39× vs 4×) stacks the per-minor global rendezvous on top — same culprit-1/3 mechanics.
-Stock-parity check: stock's ref_table absorbs the same 88 M barrier fires in a 1.26 s run.
+generational barrier for OCaml — stock ref_table semantics. ~~...~~ **CORRECTION (same day, controls
+run before implementing): this hypothesis is DISPROVEN — see the follow-up entry above.** The
+binding's generational barrier already records slot-granular 1-word regions (`caml_modify` passes
+the field address; `mmtk_ocaml_region_barrier(slot, 1)`), and a fiber-free 88 M-`caml_modify`
+mutation-storm control runs FASTER than vanilla under GenImmix (0.98 s vs 1.55 s, GC 537 ms) — the
+remset volume was never the cost. Kept for the record of how the wrong conclusion was reached (the
+profile's `ProcessRegionModBuf`/`memory_region_copy_slow` samples were real but small).
 
 ## Per-domain nursery scaling LANDED — culprit-1 experiment: size was most of it (2026-07-02, mmtk-core `ed02eafc6b`)
 
