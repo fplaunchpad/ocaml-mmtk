@@ -75,6 +75,9 @@ bool mmtk_ocaml_refill_tlab(MMTk_Mutator mutator, size_t min_bytes,
 /* ── GC control ─────────────────────────────────────────────────────── */
 
 void mmtk_ocaml_handle_user_collection_request(uintptr_t domain_state_addr);
+/* Forced but NON-exhaustive collection: a nursery GC under generational plans.
+   Used by the domain-termination result-promotion path (GH#3). */
+void mmtk_ocaml_handle_user_minor_collection_request(uintptr_t domain_state_addr);
 
 /* ── Stop-the-world (multi-domain) ──────────────────────────────────── */
 

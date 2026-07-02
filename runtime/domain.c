@@ -911,10 +911,13 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      Forcing a collection here, while the result is rooted and this domain is
      still a registered, running STW participant, traces the result into stable
      space (and, for the generational plans, promotes it out of the nursery).
-     After this the result survives the deregister/teardown edge. A whole-heap
-     collection per domain-terminate is acceptable: termination is infrequent and
-     heavyweight, and stock OCaml likewise did non-trivial GC work here. Self-
-     gated: caml_mmtk_collect is a no-op for NoGC / when MMTk cannot collect.
+     After this the result survives the deregister/teardown edge. A MINOR
+     collection suffices: `v` is a global root (below), and nursery GCs scan and
+     promote global-root targets. The previous whole-heap (exhaustive) collect
+     here was measured to be the dominant multi-domain scaling pathology — one
+     full STW GC per Domain termination, i.e. per spawn on spawn-per-round
+     programs (SCALABILITY.md UPDATE 4/5). Self-gated: caml_mmtk_collect_minor
+     is a no-op for NoGC / when MMTk cannot collect.
 
      ROOT THE RESULT AS A GLOBAL ROOT FIRST (issue #31 / GH#3). A single
      caml_mmtk_collect() against a CAMLlocal-only `v` does NOT reliably promote it
@@ -949,7 +952,7 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      the load-bearing promotion. Do it BEFORE the collect so a peer GC that snapshots this
      domain's roots sees a consistent, RC-pinned result. */
   caml_mmtk_keep_alive(v);
-  caml_mmtk_collect();
+  caml_mmtk_collect_minor();
   /* Confirm the result is actually out of the nursery before publishing. The
      first caml_mmtk_collect() can coalesce onto a peer GC that had already run
      its global-root scan before we stored `v`, returning without promoting it.
@@ -965,7 +968,7 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
   {
     int tries = 0;
     while (caml_mmtk_is_young(ml_values->result) && tries++ < 1000)
-      caml_mmtk_collect();
+      caml_mmtk_collect_minor();
   }
   /* re-read through the (now-forwarded, promoted) global root */
   v = ml_values->result;

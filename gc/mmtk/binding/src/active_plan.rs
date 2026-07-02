@@ -11,6 +11,7 @@ use lazy_static::lazy_static;
 
 use mmtk::util::opaque_pointer::{VMMutatorThread, VMThread};
 use mmtk::vm::ActivePlan;
+use mmtk::plan::MutatorContext;
 use mmtk::Mutator;
 
 use crate::OCamlVM;
@@ -51,7 +52,28 @@ pub fn domain_addrs() -> Vec<usize> {
 /// (The Mutator allocation itself is intentionally leaked here — retiring it
 /// safely w.r.t. an in-progress collection is left for later.)
 pub fn deregister_by_addr(domain_state_addr: usize) {
-    DOMAIN_REGISTRY.write().unwrap().remove(&domain_state_addr);
+    let removed = DOMAIN_REGISTRY.write().unwrap().remove(&domain_state_addr);
+    // FLUSH THE DYING MUTATOR'S BARRIER BUFFERS before it becomes invisible.
+    // Once out of the registry the mutator is never visited by StopMutators
+    // again, so any REMEMBERED-SET entries still sitting in its thread-local
+    // modbufs would be lost — and a mature->young edge written shortly before
+    // termination then never gets re-traced at a minor GC. That is exactly the
+    // domain-termination result publish (`sync_result`: mature term_sync.state
+    // := young Finished(...)): the global root promotes the Finished block but
+    // the un-remembered slot keeps the stale young address, whose memory the
+    // nursery then recycles -> Domain.join reads garbage (GH#3 residual;
+    // rr/lldb-confirmed 2026-07-02: joiner's `res` pointing into the CopySpace
+    // region with float-array contents). The old whole-heap collect per
+    // termination masked this by re-tracing every slot without needing the
+    // remset. Flushing here is safe off-pause: the packets land in the closed
+    // Closure bucket and are consumed by the next collection.
+    if let Some(m) = removed {
+        // SAFETY: the mutator pointer is valid (the allocation is deliberately
+        // leaked at termination) and this runs on the dying domain's own thread
+        // before any further mutator activity; no GC can be mid-flight on this
+        // mutator because it already left the RUNNING set's mutating states.
+        unsafe { (*m.0).flush() };
+    }
     // Also drop it from the stop-the-world RUNNING set so a collection in flight
     // does not wait for a domain that has terminated (it has left the runtime's
     // STW participant set and is no longer executing OCaml).

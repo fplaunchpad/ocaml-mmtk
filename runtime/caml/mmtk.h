@@ -33,6 +33,11 @@ extern int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize);
  * MMTk collection (rather than the stock major-GC machinery, which is bypassed
  * under MMTk). No-op for NoGC and when MMTk is disabled. */
 extern void caml_mmtk_collect(void);
+/* Forced MINOR (non-exhaustive) collection: promotes young objects without a
+   whole-heap trace. For the domain-termination result-promotion path (GH#3);
+   a no-op when MMTk cannot collect. Non-generational plans collect whole-heap
+   on any GC, so this degrades to caml_mmtk_collect there. */
+extern void caml_mmtk_collect_minor(void);
 
 /* True (1) iff value `v` is a heap block currently in the generational nursery.
  * 0 for immediates, mature blocks, non-generational plans, and NoGC. Used by the
