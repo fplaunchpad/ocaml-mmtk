@@ -58,9 +58,10 @@ The milestone-by-milestone plan and current status are in
 
 8 stdlib-only sequential CLBG/sandmark programs, native, median of 5 reps on an Apple M4 Pro. Compared
 **at memory parity, reporting both wall time AND max RSS** — a plan that "wins" on wall by using more
-memory is not a win. The tracing plans (vanilla 5.5.0, GenImmix, Immix, ConcurrentImmix) run at their
-natural dynamic heap; `LXR` — which has no dynamic-heap trigger — is pinned per bench at that same
-footprint (`--heap parity`). Run: `uv run quick/quickbench.py seq --plans "GenImmix Immix LXR" …`.
+memory is not a win. The tracing plans (vanilla 5.5.0, GenImmix, Immix, ConcurrentImmix, Bactrian) run at
+their natural dynamic heap; `LXR` — which has no dynamic-heap trigger — is pinned per bench at that same
+footprint (`--heap parity`). Run: `uv run quick/quickbench.py --vanilla <dir> --plans "GenImmix Immix
+ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --heap parity`.
 
 **Wall** — × vs vanilla 5.5.0 (lower is better):
 
@@ -72,65 +73,69 @@ footprint (`--heap parity`). Run: `uv run quick/quickbench.py seq --plans "GenIm
 
 Wall (× vs vanilla) / max RSS (MiB):
 
-| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | LXR |
-|---|--:|--:|--:|--:|--:|
-| binarytrees | 1.00× / 91 | 1.31× / 209 | 2.30× / 190 | 0.89× / 332 | **0.70× / 310** |
-| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.01× / 46 | 1.00× / 74 |
-| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.01× / 42 | 1.01× / 46 | 0.99× / 73 |
-| spectralnorm | 1.00× / 5 | 1.00× / 82 | 1.17× / 94 | 1.18× / 90 | 1.11× / 218 |
-| mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.01× / 42 | 1.01× / 46 | 0.99× / 73 |
-| matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.89× / 122 |
-| LU_decomposition | 1.00× / 17 | 1.06× / 99 | 1.30× / 98 | 1.33× / 106 | 1.16× / 258 |
-| kb | 1.00× / 8 | 1.36× / 95 | 1.17× / 103 | 1.03× / 143 | 1.78× / 199 |
+| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
+|---|--:|--:|--:|--:|--:|--:|
+| binarytrees | 1.00× / 92 | 1.26× / 210 | 2.19× / 189 | 0.89× / 290 | 1.06× / 241 | **0.77× / 309** |
+| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.01× / 46 | 1.00× / 26 | 1.04× / 74 |
+| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.01× / 42 | 1.00× / 46 | 1.01× / 26 | 1.04× / 73 |
+| spectralnorm | 1.00× / 5 | 0.96× / 82 | 1.14× / 94 | 1.13× / 90 | 0.99× / 83 | 1.10× / 218 |
+| mandelbrot | 1.00× / 2 | 1.00× / 26 | 1.01× / 42 | 1.00× / 46 | 1.00× / 26 | 1.11× / 73 |
+| matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.87× / 38 | 0.89× / 122 |
+| LU_decomposition | 1.00× / 17 | 1.03× / 99 | 1.28× / 98 | 1.30× / 107 | 1.04× / 99 | 1.17× / 258 |
+| kb | 1.00× / 8 | 1.23× / 95 | 1.06× / 103 | 0.94× / 147 | 1.22× / 95 | 1.59× / 199 |
 
-**Wall.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.70× — its in-place
-RC avoids GenImmix's 1.31× copying-nursery cost and Immix's 2.30× re-marking), at **parity on the
-compute-bound benches**, competitive on `spectralnorm`/`LU`/`matmul`, and **slower on `kb`** (1.78× — the
-cyclic garbage its backup trace must sweep). GenImmix (the default) is parity-or-better on the compute
-benches (`matrix_multiplication` 0.87×); every MMTk plan is slower than stock on `kb` (ConcurrentImmix
-closest at 1.03×) — its many small short-lived symbolic terms are exactly stock's minor-GC sweet spot.
+**Wall.** **`Bactrian` (RQ7) — the stock-OCaml-faithful plan (copying nursery + concurrently-marked,
+STW-evacuated Immix mature + SATB deletion barrier, i.e. vanilla's own collector architecture in MMTk) —
+tracks vanilla within ~6% on 7 of 8 benches** (`binarytrees` 1.06× where GenImmix is 1.26×; `LU` 1.04×;
+`spectralnorm` 0.99×; `matmul` 0.87×), with `kb` the lone loss (1.22×, = GenImmix — the per-minor-GC
+framework floor, see NOTES 2026-06-24/07-02). That is the RQ7 apples-to-apples readout: **most of the
+MMTk-vs-stock gap measured on the other plans is collector-design difference, not MMTk framework
+overhead.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.77× — in-place
+RC avoids the copying-nursery and re-marking costs) but **slowest on `kb`** (1.59× — the cyclic garbage
+its backup trace must sweep). On `kb`, ConcurrentImmix is now at 0.94× (marking off the critical path);
+the generational plans pay the minor-GC pause floor.
 
 **Memory.** `LXR` carries the **highest RSS across the board** — a fixed ~48 MiB whole-heap RC-metadata tax
-(`RC_TABLE`) plus proportional overhead: ~73 MiB on the tiny-live compute benches (vs GenImmix's 26, vanilla's
-2) and ~1.5× the tracing plans on the alloc-heavy ones. This is the RQ1 trade-off — RC buys throughput on
-acyclic churn at a real memory cost. LXR is single- **and** multi-domain validated but experimental; run it
-with `uv run quick/quickbench.py seq --plans LXR --heap parity`.
+(`RC_TABLE`) plus proportional overhead: ~73 MiB on the tiny-live compute benches (vs GenImmix's 26,
+vanilla's 2) and ~1.5× the tracing plans on the alloc-heavy ones. This is the RQ1 trade-off — RC buys
+throughput on acyclic churn at a real memory cost. `Bactrian`'s footprint matches GenImmix's (same nursery
++ mature spaces; its concurrent cycles add no measurable RSS on the sequential panel). Every MMTk plan
+still carries a multiple of vanilla's RSS at the default triggers — the open memory-premium tail (M8).
 
 **Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 3
 stdlib-only `Domain.spawn` benches, domains 1→8 on the M4 Pro (8 performance cores). Tracing plans run
 their dynamic heap; `LXR` is pinned per bench at an adequate (non-thrashing) heap, with its peak RSS
-reported alongside. Run: `… quickbench.py par --plans "GenImmix ConcurrentImmix" --vanilla … --heap dynamic`
-then a second pass `--plans LXR --heap parity`.
+reported alongside.
 
 ![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
 
 Speedup T(1)/T(8) / peak RSS at 8 domains (MiB):
 
-| bench | vanilla | GenImmix *(default)* | ConcurrentImmix | LXR |
-|---|--:|--:|--:|--:|
-| par_matmul | 6.38 / 20 | 3.31 / 108 | 4.08 / 79 | 3.37 / 123 |
-| par_spectralnorm | 4.77 / 21 | 2.22 / 93 | 1.83 / 101 | 2.62 / 236 |
-| par_binarytrees | 3.68 / 484 | 0.90 / 439 | 1.11 / 530 | **1.26 / 585** |
+| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
+|---|--:|--:|--:|--:|--:|--:|
+| par_matmul | 6.74 / 20 | 3.41 / 109 | 3.37 / 78 | 3.62 / 80 | 3.31 / 109 | 3.44 / 123 |
+| par_spectralnorm | 5.19 / 21 | 2.33 / 92 | 3.03 / 98 | 1.77 / 102 | 2.41 / 92 | 2.84 / 236 |
+| par_binarytrees | 3.89 / 497 | 0.89 / 440 | **3.20 / 358** | 0.30 / 523 | 0.80 / 1689 | 0.29 / 577 |
 
 **Stock OCaml scales best.** Vanilla 5.5.0's purpose-built multicore GC (stop-the-world minor + concurrent
-major) reaches 3.7–6.4× at 8 domains; **every MMTk plan scales worse**, and the gap widens with allocation
-intensity. On the compute-bound benches (`par_matmul`, `par_spectralnorm`) `LXR`'s reference counting scales
-on par with GenImmix (3.37 vs 3.31; 2.62 vs 2.22). On allocation-heavy `par_binarytrees` GenImmix
-**anti-scales** (0.90× — *slower* at 8 domains than 1: its stop-the-world **mature-GC frequency** grows with
-domains until the STW-wall fraction reaches ~94%, measured — see `SCALABILITY.md`); ConcurrentImmix and LXR
-only weakly recover (1.11×, 1.26× — LXR peaks 1.68× at 4 domains, then falls).
+major) reaches 3.9–6.7× at 8 domains; **every MMTk plan scales worse**, and the gap widens with allocation
+intensity. On the compute-bound benches all MMTk plans sit in the 2.3–3.6× band. On allocation-heavy
+`par_binarytrees` the *generational* plans **anti-scale** (GenImmix 0.89×, Bactrian 0.80× — slower at 8
+domains than at 1): stop-the-world **mature-GC frequency** grows with domains until the STW-wall fraction
+reaches ~94%, measured — see `SCALABILITY.md`. Notably, plain `Immix` (non-generational, no per-minor STW
+cadence) is the only MMTk plan that scales there (3.20×), sharpening the attribution: it is the
+*STW-pause frequency*, not tracing itself, that anti-scales.
 
-**RQ1 (parallel): reference counting does *not* rescue the multi-domain anti-scaling.** LXR has the best
-*single-domain* throughput (it wins `binarytrees` sequentially at 0.70× vanilla) but in parallel it behaves
-like the tracing plans — the bottleneck is that the fork does all mature reclamation **stop-the-world** (its
-frequency scales with domains → STW-wall fraction ~94%; a bigger nursery does *not* fix it), not the
-collector algorithm. LXR also pays a memory tax: its
-~48 MiB RC-metadata (`RC_TABLE`) counts in RSS but is not usable heap, so at strict RSS parity (pinning
-`par_binarytrees` at GenImmix's 448 MiB footprint) it **thrashes to 0.28×**; a 768 MiB heap restores the
-1.26× shown, at the higher RSS. `chameneos_redux` (effect-handler/fiber alloc): its
-single-domain LXR SIGSEGV is now **fixed** (a fiber-stack slot-unlog guard, `gc/mmtk/NOTES.md`), but a racy
-*multidomain* LXR crash (continuation RC race) remains, so it is excluded from the LXR parallel panel here. `SCALABILITY.md` has the
-mechanism; the macro-bench campaign (`PERFORMANCE.md`) is authoritative.
+**RQ1/RQ7 (parallel).** Reference counting does *not* rescue the multi-domain anti-scaling: `LXR` wins
+`binarytrees` sequentially (0.77×) but anti-scales in parallel (0.29× at 8 domains) — mature reclamation
+is stop-the-world in this fork regardless of collector algorithm. Nor does matching stock's architecture:
+`Bactrian` — whose *sequential* profile is at vanilla parity — anti-scales too (0.80×) and balloons to
+1.7 GB RSS at 8 domains (mid-cycle floating garbage under a domain-scaled STW cadence). The multi-domain
+STW coordination cost is now the clearest quantified framework gap (SCALABILITY.md has the mechanism; the
+macro-bench campaign in `PERFORMANCE.md` is authoritative). `chameneos_redux` (effect-handler/fiber
+alloc): its single-domain LXR SIGSEGV is fixed (fiber-stack slot-unlog guard, `gc/mmtk/NOTES.md`), but a
+racy *multidomain* LXR crash (continuation RC race) remains, so it is excluded from the LXR parallel
+panel here.
 
 ## Building
 
