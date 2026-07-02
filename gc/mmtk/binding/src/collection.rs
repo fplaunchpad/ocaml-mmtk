@@ -136,10 +136,20 @@ const MATURE_PRESSURE_OVERHEAD_PCT: usize = 120;
 /// cadence fires ~N× more often per unit work (measured: 71→328→807 cycles at
 /// d1/8/24 on par_spectralnorm, up to 92–98% STW-wall on par_binarytrees, while
 /// vanilla — allocated-words-paced — completed ZERO major cycles on every cell).
-/// 64 keeps reclamation bounded for GH#5 (weaklifetime still cycles under its
-/// allocation) without the domain-scaled frequency blow-up; the growth trigger
-/// below, floored at a nursery's worth of promotion, is the primary pacer.
-const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE: usize = 64;
+/// The cadence is now PER-DOMAIN-SCALED (see `cadence_threshold`): minors/sec
+/// scales with the domain count (the shared nursery fills proportionally
+/// faster), so a fixed minor-count cadence makes the forced-full frequency
+/// scale with domains. 8 x ndomains keeps the single-domain reclamation
+/// timing identical to the GH#5-validated behaviour (weaklifetime's
+/// major_collections wait) while making the forced-full rate per wall-second
+/// domain-invariant.
+const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN: usize = 8;
+
+/// Cadence threshold for the current run: 8 minors per registered domain.
+fn cadence_threshold() -> usize {
+    let ndomains = crate::active_plan::domain_addrs().len().max(1);
+    MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN * ndomains
+}
 
 /// Floor (in pages) below which the mature-pressure trigger never fires. This is
 /// the allocation budget a program must actually promote/allocate into the mature
@@ -438,7 +448,7 @@ impl Collection<OCamlVM> for VMCollection {
                     baseline.saturating_mul(MATURE_PRESSURE_OVERHEAD_PCT) / 100,
                 );
                 let by_mature = mature > floor && mature > threshold;
-                let by_cadence = n >= MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE;
+                let by_cadence = n >= cadence_threshold();
                 if by_mature || by_cadence {
                     g.force_full_heap_collection();
                 }
