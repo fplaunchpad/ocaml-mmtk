@@ -24,20 +24,21 @@
 #include "caml/fail.h"
 /* GC-cycle RCU retire: tag each retired frametable snapshot with the MMTk
    collection count and free it once a full collection has elapsed (every reader
-   re-fetched, every ConcurrentImmix worker finished). NB caml_major_cycles_completed
-   is DEAD under MMTk (major_gc.c initialises it to 0 and never bumps it — the stock
-   major-GC machinery that incremented it is bypassed), so we key on
-   mmtk_ocaml_gc_count() instead. */
+   re-fetched, every ConcurrentImmix worker finished). NB
+   caml_major_cycles_completed is DEAD under MMTk (major_gc.c initialises it to
+   0 and never bumps it -- the stock major-GC machinery that incremented it is
+   bypassed), so we key on mmtk_ocaml_gc_count() instead. */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 #include <stddef.h>
 
 /* The reader-visible frame-descriptor table: an IMMUTABLE {mask, descriptors}
-   snapshot. A writer NEVER mutates a published descriptors[] in place — it
+   snapshot. A writer NEVER mutates a published descriptors[] in place -- it
    builds a fresh one and atomically swaps the published pointer (see
    current_frametable / struct frametable_version below). So concurrent
-   stack-walkers (the GC root scan, backtrace, signals, tsan, and ConcurrentImmix
-   GC workers) read a stable mask+descriptors pair: both come from the one pointer
-   they acquire-loaded, so a probe can never mix a new mask with an old array. */
+   stack-walkers (the GC root scan, backtrace, signals, tsan, and
+   ConcurrentImmix GC workers) read a stable mask+descriptors pair: both come
+   from the one pointer they acquire-loaded, so a probe can never mix a new mask
+   with an old array. */
 struct caml_frame_descrs {
   int mask;
   frame_descr** descriptors;
@@ -57,35 +58,39 @@ struct caml_frame_descrs {
 */
 
 /* Writer-private bookkeeping (NOT reader-visible), protected by writer_lock for
-   installs and by `mutex` for the finalizer-callable unregister/zombie splicing.
+   installs and by `mutex` for the finalizer-callable unregister/zombie
+   splicing.
 
    We keep the list of frametables that was used to build the hashtable; we use
    it when rebuilding. We keep the list of frametables to be removed (zombies);
    an installer applies them (drops them from the build list) before the next
-   rebuild. caml_unregister_frametable(s) may be called at any time, even inside a
-   STW section / a custom-block finalizer, so it only ever splices the lists under
-   `mutex` (no rebuild, no writer_lock). */
+   rebuild. caml_unregister_frametable(s) may be called at any time, even inside
+   a STW section / a custom-block finalizer, so it only ever splices the lists
+   under `mutex` (no rebuild, no writer_lock). */
 struct frame_descrs_state {
   int num_descr;
   caml_frametable_list *frametables;
   caml_frametable_list *zombies;
   caml_plat_mutex mutex;        /* protects frametables/zombies list splicing */
-  caml_plat_mutex writer_lock;  /* serialises installers (the old STW-leader role) */
+  /* serialises installers (the old STW-leader role) */
+  caml_plat_mutex writer_lock;
 };
 
-/* A versioned, retire-able snapshot. Memory backing a frametable snapshot is only
-   freed once a full MMTk collection has elapsed since it was retired, because
-   other threads (mutator stack-walkers AND ConcurrentImmix GC workers) read the
-   snapshot at unpredictable times and hold it only for the duration of one walk /
-   one object scan. (This is RCU; mirrors Dolan's 2018 frametable_version design,
-   re-keyed from the dead caml_major_cycles_completed onto mmtk_ocaml_gc_count.) */
+/* A versioned, retire-able snapshot. Memory backing a frametable snapshot is
+   only freed once a full MMTk collection has elapsed since it was retired,
+   because other threads (mutator stack-walkers AND ConcurrentImmix GC workers)
+   read the snapshot at unpredictable times and hold it only for the duration of
+   one walk / one object scan. (This is RCU; mirrors Dolan's 2018
+   frametable_version design, re-keyed from the dead caml_major_cycles_completed
+   onto mmtk_ocaml_gc_count.) */
 struct frametable_version {
   caml_frame_descrs table;          /* the published immutable snapshot */
-  caml_frametable_list *retired;    /* zombie cons cells retired with this version */
-  /* mmtk_ocaml_gc_count() captured when THIS version was published (i.e. when its
-     ->prev chain became stale). Once gc_count() has strictly advanced past it, the
-     whole ->prev chain (and their ->retired zombie cells) may be freed. Set to
-     No_need_to_free once that chain has been freed. */
+  /* zombie cons cells retired with this version */
+  caml_frametable_list *retired;
+  /* mmtk_ocaml_gc_count() captured when THIS version was published (i.e. when
+     its ->prev chain became stale). Once gc_count() has strictly advanced past
+     it, the whole ->prev chain (and their ->retired zombie cells) may be freed.
+     Set to No_need_to_free once that chain has been freed. */
   atomic_uintnat free_prev_after_cycle;
   struct frametable_version *prev;  /* chain of older, not-yet-freed versions */
 };
@@ -164,12 +169,13 @@ static void fill_hashtable(
   }
 }
 
-/* Detach the pending zombie list (frametables unregistered since the last build).
-   They were already unlinked from state->frametables by remove_frame_descriptors,
-   so the next rebuild will not include their descriptors; here we just account for
-   the removed descriptors and RETURN the zombie cons cells so the caller can defer
-   their free to the grace period (a reader mid-walk may still hold a frame_descr*
-   into a just-unregistered frametable). Caller holds writer_lock. */
+/* Detach the pending zombie list (frametables unregistered since the last
+   build). They were already unlinked from state->frametables by
+   remove_frame_descriptors, so the next rebuild will not include their
+   descriptors; here we just account for the removed descriptors and RETURN the
+   zombie cons cells so the caller can defer their free to the grace period (a
+   reader mid-walk may still hold a frame_descr* into a just-unregistered
+   frametable). Caller holds writer_lock. */
 static caml_frametable_list* clean_frame_descriptors(
   struct frame_descrs_state *state)
 {
@@ -185,13 +191,13 @@ static caml_frametable_list* clean_frame_descriptors(
   return zombies;
 }
 
-/* Prepend new_frametables (may be NULL on a pure rebuild) to state->frametables,
-   update state->num_descr, and build a FRESH immutable {mask, descriptors}
-   snapshot from the full list. Never mutates or frees any published array — the
-   old snapshot is retired by the caller via the grace period. Writes the snapshot
-   into *out and returns 1; returns 0 on OOM (state->frametables / num_descr are
-   still updated, which is fine: the list grew, only the rebuild failed). Caller
-   holds writer_lock. */
+/* Prepend new_frametables (may be NULL on a pure rebuild) to
+   state->frametables, update state->num_descr, and build a FRESH immutable
+   {mask, descriptors} snapshot from the full list. Never mutates or frees any
+   published array -- the old snapshot is retired by the caller via the grace
+   period. Writes the snapshot into *out and returns 1; returns 0 on OOM
+   (state->frametables / num_descr are still updated, which is fine: the list
+   grew, only the rebuild failed). Caller holds writer_lock. */
 static int build_frame_descrs(
   struct frame_descrs_state *state,
   caml_frametable_list *new_frametables,
@@ -218,9 +224,10 @@ static int build_frame_descrs(
   return 1;
 }
 
-/* Free a retired frametable_version chain: every version's descriptors array and,
-   for versions that retired zombies, the zombie cons cells (which carry the
-   copy_cons frametable copies). Only called once the grace period has elapsed. */
+/* Free a retired frametable_version chain: every version's descriptors array
+   and, for versions that retired zombies, the zombie cons cells (which carry
+   the copy_cons frametable copies). Only called once the grace period has
+   elapsed. */
 static void free_frametable_versions(struct frametable_version *p)
 {
   while (p != NULL) {
@@ -238,16 +245,17 @@ static void free_frametable_versions(struct frametable_version *p)
   }
 }
 
-/* Writer-side bookkeeping (installs hold writer_lock; unregister uses mutex). */
+/* Writer-side bookkeeping (installs hold writer_lock; unregister uses mutex).
+   */
 static struct frame_descrs_state frame_descrs = {
   0, NULL, NULL,
   CAML_PLAT_MUTEX_INITIALIZER, CAML_PLAT_MUTEX_INITIALIZER
 };
 
-/* The currently-published frametable version. Written only under writer_lock (and
-   at single-domain startup), but READ without locking by every stack-walker, so
-   it is atomic. caml_init_frame_descriptors publishes the first version before any
-   mutator or GC worker exists. */
+/* The currently-published frametable version. Written only under writer_lock
+   (and at single-domain startup), but READ without locking by every
+   stack-walker, so it is atomic. caml_init_frame_descriptors publishes the
+   first version before any mutator or GC worker exists. */
 static _Atomic(struct frametable_version*) current_frametable = NULL;
 
 static caml_frametable_list *cons(
@@ -286,10 +294,10 @@ void caml_init_frame_descriptors(void)
   for (int i = 0; caml_frametable[i] != 0; i++)
     frametables = cons(caml_frametable[i], frametables);
 
-  /* Called from caml_init_gc, BEFORE caml_init_domains — single-domain, before
+  /* Called from caml_init_gc, BEFORE caml_init_domains -- single-domain, before
      any mutator runs and before MMTk's collection workers exist. So we publish
-     the first version directly; there is no older version to retire and no reader
-     or GC worker to drain. */
+     the first version directly; there is no older version to retire and no
+     reader or GC worker to drain. */
   struct frametable_version *ft = caml_stat_alloc(sizeof(*ft));
   if (!build_frame_descrs(&frame_descrs, frametables, &ft->table))
     caml_raise_out_of_memory();
@@ -299,23 +307,25 @@ void caml_init_frame_descriptors(void)
   atomic_store_release(&current_frametable, ft);
 }
 
-/* RCU install (replaces the all-domains STW). Serialise installers (writer_lock),
-   apply pending zombie removals, build a FRESH snapshot off to the side, and
-   atomically publish it. The OLD version is NOT freed here: it is chained onto the
-   new version's ->prev and freed lazily (in caml_get_frame_descrs) once a full
-   MMTk collection has elapsed (free_prev_after_cycle gate), by which time every
-   mutator stack-walker has re-fetched (the "valid until next GC" reader contract)
-   AND every ConcurrentImmix GC worker scanning a stack has finished. No quiesce,
-   no wait_collection_done.
+/* RCU install (replaces the all-domains STW). Serialise installers
+   (writer_lock), apply pending zombie removals, build a FRESH snapshot off to
+   the side, and atomically publish it. The OLD version is NOT freed here: it is
+   chained onto the new version's ->prev and freed lazily (in
+   caml_get_frame_descrs) once a full MMTk collection has elapsed
+   (free_prev_after_cycle gate), by which time every mutator stack-walker has
+   re-fetched (the "valid until next GC" reader contract) AND every
+   ConcurrentImmix GC worker scanning a stack has finished. No quiesce, no
+   wait_collection_done.
 
-   Sole caller chain: caml_natdynlink_register (dynlink_nat.c) -> RUNNING, holding
-   the domain lock, NOT in a blocking section. */
+   Sole caller chain: caml_natdynlink_register (dynlink_nat.c) -> RUNNING,
+   holding the domain lock, NOT in a blocking section. */
 static void install_frametables(caml_frametable_list *new_frametables)
 {
   caml_plat_lock_blocking(&frame_descrs.writer_lock);
 
-  /* Detach zombies retired since the last build (their cells are freed with this
-     version, not now — a reader may still hold a descriptor from them). */
+  /* Detach zombies retired since the last build (their cells are freed with
+     this version, not now -- a reader may still hold a descriptor from them).
+     */
   caml_frametable_list *retired = clean_frame_descriptors(&frame_descrs);
 
   struct frametable_version *ft = caml_stat_alloc_noexc(sizeof(*ft));
@@ -342,8 +352,9 @@ static void install_frametables(caml_frametable_list *new_frametables)
 
   struct frametable_version *old = atomic_load_acquire(&current_frametable);
   ft->prev = old;
-  /* Tag: free old (and its ->prev chain) once gc_count strictly advances past this.
-     Reclaimed lazily in caml_get_frame_descrs (runs on every GC root scan). */
+  /* Tag: free old (and its ->prev chain) once gc_count strictly advances past
+     this. Reclaimed lazily in caml_get_frame_descrs (runs on every GC root
+     scan). */
   atomic_store_release(&ft->free_prev_after_cycle,
                        (uintnat) mmtk_ocaml_gc_count());
   atomic_store_release(&current_frametable, ft);
@@ -425,17 +436,18 @@ void caml_unregister_frametable(void * frametables)
   caml_unregister_frametables(&frametables, 1);
 }
 
-/* Free the ->prev chain of [ft] (the versions retired before [ft] was published)
-   iff a full MMTk collection has elapsed since [ft]'s retire tag — i.e. every
-   reader has re-fetched and every ConcurrentImmix worker scan has finished. The
-   common case (nothing pending: tag == No_need_to_free, or no cycle yet) takes no
-   lock. Mirrors Dolan's free-in-caml_get_frame_descrs, keyed on mmtk_ocaml_gc_count.
-   Serialised against concurrent reclaimers / unregister by frame_descrs.mutex. */
+/* Free the ->prev chain of [ft] (the versions retired before [ft] was
+   published) iff a full MMTk collection has elapsed since [ft]'s retire tag --
+   i.e. every reader has re-fetched and every ConcurrentImmix worker scan has
+   finished. The common case (nothing pending: tag == No_need_to_free, or no
+   cycle yet) takes no lock. Mirrors Dolan's free-in-caml_get_frame_descrs,
+   keyed on mmtk_ocaml_gc_count. Serialised against concurrent reclaimers /
+   unregister by frame_descrs.mutex. */
 static void reclaim_retired(struct frametable_version *ft)
 {
   if (atomic_load_acquire(&ft->free_prev_after_cycle)
         >= (uintnat) mmtk_ocaml_gc_count())
-    return;                                  /* not yet a full cycle, or nothing pending */
+    return;                /* not yet a full cycle, or nothing pending */
   caml_plat_lock_blocking(&frame_descrs.mutex);
   /* Re-check under the lock (another thread may have reclaimed). */
   if (ft->prev != NULL

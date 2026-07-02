@@ -1,4 +1,4 @@
-(* MMTk DISABLED: signal-delivery timing: a SIGINT unblocked via Unix.sigprocmask SIG_UNBLOCK is not delivered at the unblock point under MMTk (native: not within the test -> "false false false"; bytecode: one statement late -> "false false true") vs stock "false true true". Pending-signal poll lands at a different safepoint; deterministic, not a hang or lost-signal [behavioral-diff]. *)
+(* MMTk DISABLED: unblocked SIGINT polls at a later safepoint; deterministic diff vs stock, no lost signal [behavioral-diff]. *)
 
  not_macos_amd64_tsan;
  {

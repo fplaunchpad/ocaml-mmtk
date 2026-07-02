@@ -56,7 +56,7 @@ void caml_orphan_finalisers(caml_domain_state*);
    so it need not be atomic */
 extern uintnat caml_major_cycles_completed;
 
-/* ── Mark-status colours ─────────────────────────────────────────────────
+/* -- Mark-status colours -------------------------------------------------
    These header-colour helpers and the global colour-cycle state used to live
    in shared_heap.h (deleted under always-on MMTk). They remain live because
    weak/ephemeron/finaliser processing still reads mark bits, so they have

@@ -66,9 +66,9 @@ struct caml_custom_table CAML_TABLE_STRUCT(struct caml_custom_elt);
 
 struct caml_minor_tables {
   /* major_ref (the stock minor->major remembered set) is gone: under always-on
-     MMTk it is never populated — the write barrier records modified slots via
-     MMTk's region barrier instead. ephe_ref (weak/ephemerons) and custom (custom
-     blocks) are still populated. */
+     MMTk it is never populated -- the write barrier records modified slots via
+     MMTk's region barrier instead. ephe_ref (weak/ephemerons) and custom
+     (custom blocks) are still populated. */
   struct caml_ephe_ref_table ephe_ref;
   struct caml_custom_table custom;
 };
@@ -81,12 +81,14 @@ CAMLextern void caml_minor_collection (void);
 
 #ifdef CAML_INTERNALS
 extern void caml_set_minor_heap_size (asize_t); /* size in bytes */
-/* Per-domain young-region reset (excise Phase 3a) — the load-bearing residue of
-   the deleted all-domains minor-empty STW; called on the triggering domain's
-   safepoint + terminate path (bytecode only; native resets via the TLAB refill). */
+/* Per-domain young-region reset (excise Phase 3a) -- the load-bearing residue
+   of the deleted all-domains minor-empty STW; called on the triggering domain's
+   safepoint + terminate path (bytecode only; native resets via the TLAB
+   refill). */
 extern void caml_minor_gc_reset_young_region(caml_domain_state* domain);
 /* Domain-local minor-cycle bookkeeping, re-homed off the all-domains minor STW
-   (excise Phase 1); called on the triggering domain's safepoint + terminate path. */
+   (excise Phase 1); called on the triggering domain's safepoint + terminate
+   path. */
 extern void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain,
                                              int bump_count);
 void caml_alloc_small_dispatch (caml_domain_state* domain,

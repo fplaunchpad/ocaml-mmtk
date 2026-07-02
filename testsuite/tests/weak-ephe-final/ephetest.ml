@@ -1,4 +1,4 @@
-(* MMTk DISABLED: finaliser/ephemeron sync-timing: Gc.finalise_last that flips the "unset" flag does not fire synchronously on the test's Gc.full_major under MMTk (finalisers/weak clearing are deferred, not on-the-call); they DO fire/clear eventually under allocation pressure [semantic-timing]. *)
+(* MMTk DISABLED: finalise_last/weak clearing deferred past Gc.full_major (fires under later allocation) [semantic-timing]. *)
 
 let debug = false
 

@@ -100,11 +100,12 @@ struct caml_intern_state {
   /* 1 if the compressed format is in use, 0 otherwise */
 
   char gc_was_disabled;
-  /* MMTk: 1 if this unmarshal disabled collection (in intern_rec) and still owes
-     a re-enable in intern_cleanup. Restores vanilla's "no GC during intern_rec"
-     invariant — under MMTk the per-object caml_mmtk_alloc_shr would otherwise
-     trigger a moving GC mid-unmarshal, relocating/collecting the partially-built
-     structure that intern_rec is still filling through raw pointers. */
+  /* MMTk: 1 if this unmarshal disabled collection (in intern_rec) and still
+     owes a re-enable in intern_cleanup. Restores vanilla's "no GC during
+     intern_rec" invariant -- under MMTk the per-object caml_mmtk_alloc_shr
+     would otherwise trigger a moving GC mid-unmarshal, relocating/collecting
+     the partially-built structure that intern_rec is still filling through raw
+     pointers. */
 };
 
 static void init_intern_stack(struct caml_intern_state* s)
@@ -299,9 +300,9 @@ static void intern_free_stack(struct caml_intern_state* s)
 static void intern_cleanup(struct caml_intern_state* s)
 {
   /* MMTk: re-enable collection if this unmarshal disabled it (see intern_rec).
-     intern_cleanup is the single cleanup reached on every exit — normal return
+     intern_cleanup is the single cleanup reached on every exit -- normal return
      (via intern_end) and every error path (intern_cleanup_failwith) before the
-     longjmp — so the disable/enable stays balanced. */
+     longjmp -- so the disable/enable stays balanced. */
   if (s->gc_was_disabled) {
     caml_mmtk_enable_collection();
     s->gc_was_disabled = 0;
@@ -528,10 +529,11 @@ static void intern_rec(struct caml_intern_state* s,
      collects), so no GC runs while intern_rec fills the structure through raw
      [dest]/[intern_obj_table] pointers. Under MMTk each object is allocated
      individually via caml_mmtk_alloc_shr, whose slow path can trigger a moving
-     GC mid-unmarshal — relocating/collecting the half-built structure and leaving
-     those raw pointers dangling. Disabling collection here restores the invariant;
-     intern_cleanup re-enables it (on every success and error/longjmp exit). On
-     genuine exhaustion the alloc fails -> Out_of_memory, as in vanilla. */
+     GC mid-unmarshal -- relocating/collecting the half-built structure and
+     leaving those raw pointers dangling. Disabling collection here restores the
+     invariant; intern_cleanup re-enables it (on every success and error/longjmp
+     exit). On genuine exhaustion the alloc fails -> Out_of_memory, as in
+     vanilla. */
   if (!s->gc_was_disabled) {
     caml_mmtk_disable_collection();
     s->gc_was_disabled = 1;
@@ -799,11 +801,11 @@ static void intern_rec(struct caml_intern_state* s,
         Unsafe_store_tag_val(v, Custom_tag);
         intern_record_obj(s, v);
         if (ops->finalize != NULL) {
-          /* MMTk: register the deserialised custom block on MMTk's finalizer queue
-             so its finalize op runs when it dies — caml_alloc_custom is bypassed on
-             this unmarshal path, so the registration there does not cover it.
-             Self-gated on MMTK_WEAK_REFS; the minor-table entry below is for the
-             stock path. */
+          /* MMTk: register the deserialised custom block on MMTk's finalizer
+             queue so its finalize op runs when it dies -- caml_alloc_custom is
+             bypassed on this unmarshal path, so the registration there does not
+             cover it. Self-gated on MMTK_WEAK_REFS; the minor-table entry below
+             is for the stock path. */
           caml_mmtk_register_finalizable(v);
         }
         if (ops->finalize != NULL && Is_young(v)) {

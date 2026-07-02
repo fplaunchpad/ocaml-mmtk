@@ -3003,31 +3003,34 @@ shlwapi.lib synchronization.lib"])
 AC_CONFIG_COMMANDS_PRE([cclibs="$cclibs $mathlib $DLLIBS $PTHREAD_LIBS"])
 
 # MMTk GC binding: this fork (mmtk-ocaml) always links the in-tree MMTk static
-# library (gc/mmtk) into native and -custom bytecode programs so the runtime glue
-# (mmtk_ocaml_*, referenced from lib{caml,asm}run) resolves. MMTk stays dormant
-# unless MMTK_ENABLED is set at run time.
+# library (gc/mmtk) into native and -custom bytecode programs so the runtime
+# glue (mmtk_ocaml_*, referenced from lib{caml,asm}run) resolves. MMTk stays
+# dormant unless MMTK_ENABLED is set at run time.
 #
 # How the Rust staticlib's objects reach a user link: at build time we *bundle*
-# libmmtk_ocaml.a's objects directly INTO the runtime archives the compiler always
-# links (lib{asm,caml}run*.a — see Makefile.mmtk MMTK_BUNDLE). The linker still
-# pulls only the objects a program actually references, so there is no per-binary
-# bloat, and crucially the published config carries NO bare "-lmmtk_ocaml": that
-# token is unresolvable by any tool that links a probe with plain `cc` and without
-# OCaml's -L<stdlib> (e.g. dune-configurator feature-probes in lwt/ctypes/owl),
-# which mis-detected features and broke third-party builds (GH#10). An earlier
-# design put "-lmmtk_ocaml" in {bytecomp,native}_c_libraries and relied on ocamlc/
-# ocamlopt adding -L<stdlib>; that works for real OCaml links but not for those
-# bare-cc probes, hence the switch to bundling.
+# libmmtk_ocaml.a's objects directly INTO the runtime archives the compiler
+# always links (lib{asm,caml}run*.a -- see Makefile.mmtk MMTK_BUNDLE). The
+# linker still pulls only the objects a program actually references, so there is
+# no per-binary bloat, and crucially the published config carries NO bare
+# "-lmmtk_ocaml": that token is unresolvable by any tool that links a probe with
+# plain `cc` and without OCaml's -L<stdlib> (e.g. dune-configurator
+# feature-probes in lwt/ctypes/owl), which mis-detected features and broke
+# third-party builds (GH#10). An earlier design put "-lmmtk_ocaml" in
+# {bytecomp,native}_c_libraries and relied on ocamlc/ ocamlopt adding
+# -L<stdlib>; that works for real OCaml links but not for those bare-cc probes,
+# hence the switch to bundling.
 #
 # {bytecomp,native}_c_libraries (consumed by ocamlc/ocamlopt) therefore carries
-# ONLY MMTk's transitive *system* dependencies — libs a bare `cc` resolves — so
-# probes pass while real native/-custom links still pull mmtk_ocaml_* from the
-# bundled runtime archive. These also feed the runtime executables via MMTK_LINK
-# in the Makefile; not added to cclibs/BYTECCLIBS (avoids a redundant double-link).
-# The transitive native deps differ per OS (matches Makefile.mmtk).
+# ONLY MMTk's transitive *system* dependencies -- libs a bare `cc` resolves --
+# so probes pass while real native/-custom links still pull mmtk_ocaml_* from
+# the bundled runtime archive. These also feed the runtime executables via
+# MMTK_LINK in the Makefile; not added to cclibs/BYTECCLIBS (avoids a redundant
+# double-link). The transitive native deps differ per OS (matches
+# Makefile.mmtk).
 AS_CASE([$host_os],
   [*darwin*],
-    [mmtk_native_libs="-lobjc -framework IOKit -framework CoreFoundation -liconv"],
+    [mmtk_native_libs="-lobjc -framework IOKit"
+     mmtk_native_libs="$mmtk_native_libs -framework CoreFoundation -liconv"],
   [mmtk_native_libs="-ldl -lpthread -lm"])
 mmtk_c_libraries="$mmtk_native_libs"
 AC_SUBST([mmtk_c_libraries])

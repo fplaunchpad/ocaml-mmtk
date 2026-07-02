@@ -1,20 +1,27 @@
 /**************************************************************************/
 /*                                                                        */
-/*                MMTk garbage collector glue (bytecode)                  */
+/*                                 OCaml                                  */
+/*                                                                        */
+/*             KC Sivaramakrishnan, FP Launchpad, IIT Madras              */
+/*                                                                        */
+/*   Copyright 2026 FP Launchpad, IIT Madras                              */
+/*                                                                        */
+/*   All rights reserved.  This file is distributed under the terms of    */
+/*   the GNU Lesser General Public License version 2.1, with the          */
+/*   special exception on linking described in the file LICENSE.          */
 /*                                                                        */
 /**************************************************************************/
 
-/* C glue between the OCaml runtime and the in-tree MMTk binding. Compiled into
- * both the bytecode and native runtimes (a COMMON source). Currently the body is
- * behind #ifndef NATIVE_CODE, so the native object is empty; native enablement
- * is in progress (see ROADMAP M5). */
+/* C glue between the OCaml runtime and the in-tree MMTk binding.
+   Compiled into both the bytecode and native runtimes (a COMMON source). */
 
 #define CAML_INTERNALS
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>   /* usleep — caml_mmtk_quiesce_running_domains poll wait */
+/* usleep: caml_mmtk_quiesce_running_domains poll wait */
+#include <unistd.h>
 
 #include "caml/config.h"
 
@@ -38,23 +45,25 @@
 /* The in-tree MMTk binding's C ABI (gc/mmtk/include/mmtk_ocaml.h). */
 #include "../gc/mmtk/include/mmtk_ocaml.h"
 
-/* Link anchor — force roots.o into the link. The MMTk binding (Rust staticlib,
+/* Link anchor -- force roots.o into the link. The MMTk binding (Rust staticlib,
    scanning.rs) calls caml_do_roots for per-domain root scanning, but with the
    stock GC removed no C code references it anymore. The link line lists
    libcamlrun/libasmrun before the staticlib, so without a C-side reference the
    linker never pulls roots.o out of the archive and fails with "undefined
    reference to caml_do_roots". mmtk.o is always linked (the C runtime calls
-   caml_mmtk_*), so referencing caml_do_roots here forces roots.o to be pulled. */
+   caml_mmtk_*), so referencing caml_do_roots here forces roots.o to be pulled.
+   */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((used))
 #endif
-static void (*const caml_mmtk_link_anchor)(void) = (void (*)(void)) caml_do_roots;
+static void (*const caml_mmtk_link_anchor)(void) =
+  (void (*)(void)) caml_do_roots;
 
 /* Collection-suppression counter (see caml/mmtk.h, runtime/intern.c). MMTk's
    gc_trigger consults caml_mmtk_collection_enabled() via the binding's
-   VMCollection::is_collection_enabled; while the count is non-zero no collection
-   is triggered. Atomic because concurrent domains may bracket their own unmarshals
-   and gc_trigger reads it from other mutator threads. */
+   VMCollection::is_collection_enabled; while the count is non-zero no
+   collection is triggered. Atomic because concurrent domains may bracket their
+   own unmarshals and gc_trigger reads it from other mutator threads. */
 static atomic_uintnat caml_mmtk_gc_disabled;
 
 void caml_mmtk_disable_collection(void)
@@ -75,9 +84,10 @@ int caml_mmtk_collection_enabled(void)
 /* Native TLAB / nursery-aliasing: MMTk owns the nursery too. The inlined native
    fast-path bumps an MMTk Immix block (handed over by mmtk_ocaml_refill_tlab);
    when it is exhausted the runtime refills another block instead of running a
-   minor GC. No OCaml minor GC, no promotion — every object is an MMTk object from
-   birth. Set for native code at domain init; requires an Immix-family plan
-   (Immix/StickyImmix/GenImmix). Read on the allocation slow path, so a plain int. */
+   minor GC. No OCaml minor GC, no promotion -- every object is an MMTk object
+   from birth. Set for native code at domain init; requires an Immix-family plan
+   (Immix/StickyImmix/GenImmix). Read on the allocation slow path, so a plain
+   int. */
 int caml_mmtk_tlab = 0;
 
 static int caml_mmtk_initialised = 0;
@@ -91,20 +101,21 @@ static int caml_mmtk_generational = 0;
    needs the SATB (snapshot-at-the-beginning) deletion write barrier. Read on
    every mutable pointer write, so keep it a plain int. */
 static int caml_mmtk_concurrent = 0;
-/* Whether the active plan (LXR) uses the coalescing field-logging write barrier for
-   reference counting. Like the SATB barrier, the per-slot pre-store hook in caml_modify
-   routes to the mutator's installed barrier (a FieldBarrier for LXR) via
-   mmtk_ocaml_satb_barrier, which logs the field + buffers the RC inc/dec. */
+/* Whether the active plan (LXR) uses the coalescing field-logging write barrier
+   for reference counting. Like the SATB barrier, the per-slot pre-store hook in
+   caml_modify routes to the mutator's installed barrier (a FieldBarrier for
+   LXR) via mmtk_ocaml_satb_barrier, which logs the field + buffers the RC
+   inc/dec. */
 static int caml_mmtk_field_log = 0;
 static int caml_mmtk_collection_started = 0;
 
 /* M6: MMTk-native weak-reference / ephemeron / finaliser processing via the
-   binding's Scanning::process_weak_refs (weak refs clear, ephemeron data releases
-   on dead keys, Gc.finalise/finalise_last + custom-block finalizers run). Now ON by
-   default; set MMTK_WEAK_REFS=0 to fall back to the conservative
-   caml_mmtk_scan_ephe_roots scheme (keep the whole ephemeron graph alive — never
-   clears). The opt-out is transitional, to be removed with the conservative scheme
-   in M9 stage 3. See gc/mmtk/NOTES.md. */
+   binding's Scanning::process_weak_refs (weak refs clear, ephemeron data
+   releases on dead keys, Gc.finalise/finalise_last + custom-block finalizers
+   run). Now ON by default; set MMTK_WEAK_REFS=0 to fall back to the
+   conservative caml_mmtk_scan_ephe_roots scheme (keep the whole ephemeron graph
+   alive -- never clears). The opt-out is transitional, to be removed with the
+   conservative scheme in M9 stage 3. See gc/mmtk/NOTES.md. */
 int caml_mmtk_weak_refs = 1;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
@@ -124,24 +135,26 @@ void caml_mmtk_init(void)
   if (caml_mmtk_initialised) return;
 
   /* Default to a collecting plan now that MMTk is always on (NoGC can't sustain
-     the runtime). The default is **GenImmix**: a copying nursery (CopySpace) over
-     an Immix mature space — the generational, stock-OCaml-faithful plan. OCaml
-     allocates a torrent of short-lived data, so a cheap copying nursery is the
-     right default (the M8 benchmarking confirmed plain Immix loses on
+     the runtime). The default is **GenImmix**: a copying nursery (CopySpace)
+     over an Immix mature space -- the generational, stock-OCaml-faithful plan.
+     OCaml allocates a torrent of short-lived data, so a cheap copying nursery
+     is the right default (the M8 benchmarking confirmed plain Immix loses on
      allocation-heavy workloads where a nursery collects the young garbage
-     cheaply). Caveat: weak-clear timing under generational plans is a known tail
-     (see ROADMAP/NOTES); MMTK_WEAK_REFS=0 is the conservative never-clear
-     fallback. Override with MMTK_PLAN=<Immix|StickyImmix|ConcurrentImmix|…>. */
+     cheaply). Caveat: weak-clear timing under generational plans is a known
+     tail (see ROADMAP/NOTES); MMTK_WEAK_REFS=0 is the conservative never-clear
+     fallback. Override with MMTK_PLAN=<Immix|StickyImmix|ConcurrentImmix|...>.
+     */
   const char *plan = getenv("MMTK_PLAN");
   if (plan == NULL || plan[0] == '\0') plan = "GenImmix";
 
-  /* Heap sizing. Default to a DYNAMIC (MemBalancer) heap so the runtime grows on
-     demand like stock OCaml — a CLI tool needs only a few MB of RSS, and memory
-     tracks the live set. The old hard-coded fixed 1 GB heap never collected until
-     ~1 GB, so allocation-heavy programs used ~15x stock's footprint. Pass 0 to
-     mmtk_ocaml_init to request the dynamic default; MMTK_HEAP_SIZE_MB=<MB> still
-     pins a fixed heap for benchmarking/repro. */
-  size_t heap_bytes = 0;   /* 0 => dynamic heap (binding chooses min .. physical RAM) */
+  /* Heap sizing. Default to a DYNAMIC (MemBalancer) heap so the runtime grows
+     on demand like stock OCaml -- a CLI tool needs only a few MB of RSS, and
+     memory tracks the live set. The old hard-coded fixed 1 GB heap never
+     collected until ~1 GB, so allocation-heavy programs used ~15x stock's
+     footprint. Pass 0 to mmtk_ocaml_init to request the dynamic default;
+     MMTK_HEAP_SIZE_MB=<MB> still pins a fixed heap for benchmarking/repro. */
+  /* 0 => dynamic heap (binding chooses min .. physical RAM) */
+  size_t heap_bytes = 0;
   const char *heap_env = getenv("MMTK_HEAP_SIZE_MB");
   if (heap_env != NULL && heap_env[0] != '\0') {
     long v = strtol(heap_env, NULL, 10);
@@ -153,7 +166,8 @@ void caml_mmtk_init(void)
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
   /* Bactrian (RQ7) is BOTH: a copying nursery (generational barrier) and a
      concurrently-marked mature space (SATB deletion barrier + continuation
-     snapshot/lock machinery). Both flags on arms both halves of write_barrier(). */
+     snapshot/lock machinery). Both flags on arms both halves of
+     write_barrier(). */
   caml_mmtk_generational = (strcmp(plan, "GenImmix") == 0
                            || strcmp(plan, "StickyImmix") == 0
                            || strcmp(plan, "GenCopy") == 0
@@ -163,28 +177,31 @@ void caml_mmtk_init(void)
   caml_mmtk_field_log = (strcmp(plan, "LXR") == 0);
 
   /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
-     plan including ConcurrentImmix. OCaml fully initializes every block before the
-     next GC-observable safepoint, so MMTk eager-zeroing is a redundant double-write
-     (~20% of cycles on alloc-heavy code). This is safe for both collector families:
-       - STW Immix-family plans (GenImmix/Immix/StickyImmix/GenCopy): a collection
-         only happens at a safepoint, by which time OCaml has already written every
-         field (the unzeroed-minor-heap discipline), so the GC never reads garbage.
-       - ConcurrentImmix: it is ALLOCATE-BLACK — newly-allocated objects are born
-         marked, and the concurrent marker does NOT field-scan freshly-allocated
-         (black) objects, so the header-written / fields-unwritten window is never
-         traced. Hence no-zero is safe here too.
-       - Bactrian: both arguments compose. Young objects are never traced by the
-         concurrent marker (it skips the nursery), nursery collection is STW at a
-         safepoint, and mature allocations during marking are born live/black.
-     Set before any allocation (this runs at init, before any domain/mutator is
-     bound).
-     EXCEPTION: MarkCompact must keep zeroing ON. It is a Lisp-2 sliding-compaction
-     plan whose mark / compute-forwarding passes reconstruct per-object metadata
-     (the per-object VO bit + reserved forwarding header word) by reading object
-     fields across the whole heap; the unzeroed-minor-heap discipline above does
-     not cover those reads, so with no-zero MarkCompact reads garbage and SIGSEGVs
-     on alloc-heavy programs (CLBG binarytrees/mandelbrot/knucleotide). It was never
-     validated under no-zero (only the Immix family + ConcurrentImmix were). */
+     plan including ConcurrentImmix. OCaml fully initializes every block before
+     the next GC-observable safepoint, so MMTk eager-zeroing is a redundant
+     double-write (~20% of cycles on alloc-heavy code). This is safe for both
+     collector families:
+     - STW Immix-family plans (GenImmix/Immix/StickyImmix/GenCopy): a collection
+       only happens at a safepoint, by which time OCaml has already written
+       every field (the unzeroed-minor-heap discipline), so the GC never reads
+       garbage.
+     - ConcurrentImmix: it is ALLOCATE-BLACK -- newly-allocated objects are born
+       marked, and the concurrent marker does NOT field-scan freshly-allocated
+     (black) objects, so the header-written / fields-unwritten window is never
+             traced. Hence no-zero is safe here too.
+     - Bactrian: both arguments compose. Young objects are never traced by the
+       concurrent marker (it skips the nursery), nursery collection is STW at a
+       safepoint, and mature allocations during marking are born live/black. Set
+       before any allocation (this runs at init, before any domain/mutator is
+       bound). EXCEPTION: MarkCompact must keep zeroing ON. It is a Lisp-2
+       sliding-compaction plan whose mark / compute-forwarding passes
+       reconstruct per-object metadata (the per-object VO bit + reserved
+       forwarding header word) by reading object fields across the whole heap;
+       the unzeroed-minor-heap discipline above does not cover those reads, so
+       with no-zero MarkCompact reads garbage and SIGSEGVs on alloc-heavy
+       programs (CLBG binarytrees/mandelbrot/knucleotide). It was never
+       validated under no-zero (only the Immix family + ConcurrentImmix were).
+     */
   mmtk_ocaml_set_alloc_zeroed(strcmp(plan, "MarkCompact") == 0);
 
   {
@@ -213,7 +230,8 @@ void caml_mmtk_init(void)
 static void caml_mmtk_report_copied(void)
 {
   fprintf(stderr,
-          "[mmtk] GCs: %zu (full: %zu), GC time: %llu ms, objects copied: %zu\n",
+          "[mmtk] GCs: %zu (full: %zu), GC time: %llu ms, "
+          "objects copied: %zu\n",
           mmtk_ocaml_total_gc_count(),
           mmtk_ocaml_gc_count(),
           (unsigned long long) mmtk_ocaml_gc_time_ms(),
@@ -221,8 +239,8 @@ static void caml_mmtk_report_copied(void)
 }
 
 /* MMTk is this fork's only garbage collector; it initialises unconditionally at
-   the first domain's startup. (NoGC can't sustain the runtime, so the default plan
-   is Immix.) */
+   the first domain's startup. (NoGC can't sustain the runtime, so the default
+   plan is Immix.) */
 void caml_mmtk_domain_init(caml_domain_state *dom)
 {
   caml_mmtk_init();
@@ -235,23 +253,25 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   }
 
 #ifdef NATIVE_CODE
-  /* Native code inlines a bump allocator over the young region, so MMTk owns the
-     nursery via TLAB nursery-aliasing. This requires the plan's Default allocator
-     to be an Immix or a plain bump allocator, which OCaml can bump-fill directly:
-       - Immix/StickyImmix — an in-place Immix block (young objects don't move);
-       - GenImmix/GenCopy  — the copy-nursery CopySpace bump buffer (a minor GC
-         evacuates survivors and hands back a fresh nursery, so young objects move);
-       - SemiSpace         — the to-space CopySpace bump buffer (whole-heap copy);
-       - NoGC              — the never-collected bump space.
-     The C side is allocator-agnostic — caml_mmtk_refill_tlab just receives
-     [start,end) — and the binding (mmtk_ocaml_refill_tlab) picks the right
-     allocator from the plan's Default mapping. For a moving plan, young objects
-     move at a collection, fixed up via the usual updatable-root scan.
-     MarkSweep (free-list) and MarkCompact (its bump allocator reserves a
-     per-object header word and the space relies on per-object VO bits, neither of
-     which the inlined fast path produces) are NOT supported native — they abort
-     below. (Bytecode allocates through C entry points and is all-MMTk directly, so
-     this is native-only.) */
+  /* Native code inlines a bump allocator over the young region, so MMTk owns
+     the nursery via TLAB nursery-aliasing. This requires the plan's Default
+     allocator to be an Immix or a plain bump allocator, which OCaml can
+     bump-fill directly:
+     - Immix/StickyImmix -- an in-place Immix block (young objects don't move);
+     - GenImmix/GenCopy -- the copy-nursery CopySpace bump buffer (a minor GC
+       evacuates survivors and hands back a fresh nursery, so young objects
+       move);
+     - SemiSpace -- the to-space CopySpace bump buffer (whole-heap copy);
+     - NoGC -- the never-collected bump space. The C side is allocator-agnostic
+       -- caml_mmtk_refill_tlab just receives [start,end) -- and the binding
+       (mmtk_ocaml_refill_tlab) picks the right allocator from the plan's
+       Default mapping. For a moving plan, young objects move at a collection,
+       fixed up via the usual updatable-root scan. MarkSweep (free-list) and
+       MarkCompact (its bump allocator reserves a per-object header word and the
+       space relies on per-object VO bits, neither of which the inlined fast
+       path produces) are NOT supported native -- they abort below. (Bytecode
+       allocates through C entry points and is all-MMTk directly, so this is
+       native-only.) */
   if (caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
     caml_mmtk_tlab = 1;
     if (getenv("MMTK_VERBOSE") != NULL)
@@ -260,7 +280,8 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   } else {
     caml_fatal_error(
       "MMTk native code requires a plan whose Default allocator is an Immix or "
-      "bump allocator (Immix/StickyImmix/GenImmix/Bactrian/GenCopy/SemiSpace/NoGC); "
+      "bump allocator "
+      "(Immix/StickyImmix/GenImmix/Bactrian/GenCopy/SemiSpace/NoGC); "
       "MMTK_PLAN=%s has no bump/Immix Default allocator (e.g. MarkSweep's "
       "free-list or MarkCompact's per-object-header bump allocator)",
       getenv("MMTK_PLAN") ? getenv("MMTK_PLAN") : "Immix");
@@ -293,11 +314,11 @@ value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag, reserved_t reserved)
   /* Minor-words accounting (Gc.minor_words / Gc.counters). The bytecode small
      path allocates straight through MMTk and never touches the young region, so
      caml_gc_minor_words_unboxed's live (young_end - young_ptr) term is always 0
-     here — the only allocation odometer is stat_minor_words. Bump it by this
+     here -- the only allocation odometer is stat_minor_words. Bump it by this
      block's full size (header + fields). This is the bytecode analogue of the
      native fast path's young_ptr bump (which is accounted at block retirement,
-     see caml_mmtk_refill_tlab / caml_mmtk_uninterrupt). One add per object: cheap,
-     and bytecode allocation is not a tight native loop. */
+     see caml_mmtk_refill_tlab / caml_mmtk_uninterrupt). One add per object:
+     cheap, and bytecode allocation is not a tight native loop. */
   Caml_state->stat_minor_words += Whsize_wosize(wosize);
   return (value)p;
 }
@@ -348,11 +369,11 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
      young_end) have been reported live by caml_gc_minor_words_unboxed's
      (young_end - young_ptr) term; fold them into stat_minor_words now, BEFORE
      repointing young_* at the fresh block, so the odometer is preserved across
-     the swap. Invariant kept by every retirement point:
-         total_minor_words == stat_minor_words + Wsize_bsize(young_end-young_ptr)
-     The new block starts with young_ptr == young_end (consumed 0), so the live
-     term reads 0 and the words just moved into stat. Guard the first-ever refill
-     (young_end == NULL at domain init): nothing consumed yet. */
+     the swap. Invariant kept by every retirement point: total_minor_words ==
+     stat_minor_words + Wsize_bsize(young_end-young_ptr) The new block starts
+     with young_ptr == young_end (consumed 0), so the live term reads 0 and the
+     words just moved into stat. Guard the first-ever refill (young_end == NULL
+     at domain init): nothing consumed yet. */
   if (dom->young_end != NULL)
     dom->stat_minor_words +=
       Wsize_bsize((char*)dom->young_end - (char*)dom->young_ptr);
@@ -372,16 +393,17 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
    (domain->ephe_info->{todo,live}); the stock major GC (major_gc.c) is what
    normally marks, updates, and weakly-clears them. We bypass that GC, and these
    blocks are Abstract_tag (so scan_object skips them) and are reachable *only*
-   via ephe_info — so without this, MMTk would treat them as dead, collect/move
+   via ephe_info -- so without this, MMTk would treat them as dead, collect/move
    them, and leave dangling pointers in the lists that crash any later ephemeron
    walk (e.g. Gc.full_major). Until proper MMTk weak-reference processing exists
    (ROADMAP workstream E), keep the whole ephemeron graph alive and
    pointer-updated by reporting each block's fields (link, data, keys) and the
    list heads as ordinary roots. This is memory-safe but conservative: weak
-   references never clear (the same tradeoff as keeping finalisable values alive).
+   references never clear (the same tradeoff as keeping finalisable values
+   alive).
 
-   Called per domain from the binding's root scan (scan_roots_in_mutator_thread),
-   alongside caml_do_roots. */
+   Called per domain from the binding's root scan
+   (scan_roots_in_mutator_thread), alongside caml_do_roots. */
 void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
                                caml_domain_state *domain)
 {
@@ -410,20 +432,22 @@ void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
   }
 }
 
-/* ── M6: MMTk-native weak reference / ephemeron processing (experimental) ──────
-   Driven by the binding's Scanning::process_weak_refs when MMTK_WEAK_REFS=1.
-   Mirrors the stock major GC's two-phase scheme — ephe_mark (major_gc.c) then
-   caml_ephe_clean (weak.c) — but queries MMTk reachability (is_reachable) and
-   relocation (forward) instead of the stock mark bits, and resurrects retained
-   data via the MMTk tracer (retain). All callbacks operate on whole-object
-   `value`s; the caller (Rust) closes them over the GC worker's tracer.
+/* -- M6: MMTk-native weak reference / ephemeron processing (experimental)
+   ------ Driven by the binding's Scanning::process_weak_refs when
+   MMTK_WEAK_REFS=1. Mirrors the stock major GC's two-phase scheme -- ephe_mark
+   (major_gc.c) then caml_ephe_clean (weak.c) -- but queries MMTk reachability
+   (is_reachable) and relocation (forward) instead of the stock mark bits, and
+   resurrects retained data via the MMTk tracer (retain). All callbacks operate
+   on whole-object `value`s; the caller (Rust) closes them over the GC worker's
+   tracer.
 
-   Object liveness uses the post-strong-closure state: is_reachable(v) is true iff
-   the strong transitive closure reached v; forward(v) returns v's current address
-   (the new one if a moving plan relocated it, else v); retain(v) traces v (keeping
-   it and its closure alive) and returns its current address. Interior (infix)
-   pointers are normalised to their block base before querying, since MMTk reasons
-   about object starts. The callback typedefs live in caml/mmtk.h. */
+   Object liveness uses the post-strong-closure state: is_reachable(v) is true
+   iff the strong transitive closure reached v; forward(v) returns v's current
+   address (the new one if a moving plan relocated it, else v); retain(v) traces
+   v (keeping it and its closure alive) and returns its current address.
+   Interior (infix) pointers are normalised to their block base before querying,
+   since MMTk reasons about object starts. The callback typedefs live in
+   caml/mmtk.h. */
 
 /* Normalise a possibly-infix pointer to the containing block's base. */
 Caml_inline value caml_mmtk_block_base(value v)
@@ -433,10 +457,11 @@ Caml_inline value caml_mmtk_block_base(value v)
 }
 
 /* One marking pass over a single ephemeron list (head at *headp). For each
-   reachable ephemeron whose data is non-trivial and not yet retained, retain the
-   data iff every block key is reachable. Does NOT clear keys (that is the clean
-   pass). Rewrites the list links to forwarded addresses and drops unreachable
-   ephemerons from the chain. Returns 1 if any data was newly retained. */
+   reachable ephemeron whose data is non-trivial and not yet retained, retain
+   the data iff every block key is reachable. Does NOT clear keys (that is the
+   clean pass). Rewrites the list links to forwarded addresses and drops
+   unreachable ephemerons from the chain. Returns 1 if any data was newly
+   retained. */
 static int caml_mmtk_ephe_mark_list(value *headp,
                                     caml_mmtk_ephe_reachable_fn is_reachable,
                                     caml_mmtk_ephe_forward_fn forward,
@@ -450,11 +475,12 @@ static int caml_mmtk_ephe_mark_list(value *headp,
     value cur = live ? forward(e) : e;   /* dead objects don't move */
     value next = Ephe_link(cur);
     if (!live) {
-      /* Keep a dead ephemeron LINKED for now — a finaliser may resurrect this
-         block before the clean pass (PR#5233: a finalised weak array). Unlinking
-         it here would orphan it from ephe_info so its weak slots would never clear
-         after resurrection, leaving dangling pointers. The clean pass (which runs
-         after finaliser resurrection) unlinks the ones still dead by then. */
+      /* Keep a dead ephemeron LINKED for now -- a finaliser may resurrect this
+         block before the clean pass (PR#5233: a finalised weak array).
+         Unlinking it here would orphan it from ephe_info so its weak slots
+         would never clear after resurrection, leaving dangling pointers. The
+         clean pass (which runs after finaliser resurrection) unlinks the ones
+         still dead by then. */
       linkp = &Ephe_link(cur);
       e = next;
       continue;
@@ -484,10 +510,11 @@ static int caml_mmtk_ephe_mark_list(value *headp,
   return progress;
 }
 
-/* One clean pass over a single ephemeron list (after the mark fixpoint). For each
-   reachable ephemeron: forward surviving block keys; clear (to caml_ephe_none) any
-   key whose referent is unreachable, and if any key died, clear the data too;
-   otherwise forward the (already-retained) data. Drops unreachable ephemerons. */
+/* One clean pass over a single ephemeron list (after the mark fixpoint). For
+   each reachable ephemeron: forward surviving block keys; clear (to
+   caml_ephe_none) any key whose referent is unreachable, and if any key died,
+   clear the data too; otherwise forward the (already-retained) data. Drops
+   unreachable ephemerons. */
 static void caml_mmtk_ephe_clean_list(value *headp,
                                       caml_mmtk_ephe_reachable_fn is_reachable,
                                       caml_mmtk_ephe_forward_fn forward)
@@ -509,7 +536,8 @@ static void caml_mmtk_ephe_clean_list(value *headp,
       value base = caml_mmtk_block_base(key);
       if (is_reachable(base)) {
         value fwd = forward(base);
-        Field(cur, i) = (fwd == base) ? key : fwd + (key - base); /* keep infix */
+        /* keep infix */
+        Field(cur, i) = (fwd == base) ? key : fwd + (key - base);
       } else {
         Field(cur, i) = caml_ephe_none;
         released = 1;
@@ -554,22 +582,23 @@ void caml_mmtk_ephe_clean_pass(uintptr_t domain_addr,
   caml_mmtk_ephe_clean_list(&ei->live, is_reachable, forward);
 }
 
-/* Custom-block finalizers (Custom_operations.finalize). Stock OCaml runs these on
-   shared-heap sweep; under MMTk we register each finalizable custom block on MMTk's
-   finalizer queue at allocation, and drain the now-dead ones at a safepoint. Gated
-   by MMTK_WEAK_REFS (M6); a no-op otherwise, so the default keeps today's behaviour
-   (custom finalizers don't run under MMTk). See gc/mmtk/NOTES.md. */
+/* Custom-block finalizers (Custom_operations.finalize). Stock OCaml runs these
+   on shared-heap sweep; under MMTk we register each finalizable custom block on
+   MMTk's finalizer queue at allocation, and drain the now-dead ones at a
+   safepoint. Gated by MMTK_WEAK_REFS (M6); a no-op otherwise, so the default
+   keeps today's behaviour (custom finalizers don't run under MMTk). See
+   gc/mmtk/NOTES.md. */
 void caml_mmtk_register_finalizable(value v)
 {
   if (caml_mmtk_weak_refs)
     mmtk_ocaml_add_finalizer((const void *) v);
 }
 
-/* True iff [v] is currently the subject of a user Gc.finalise on this domain — it
-   sits in the first/last finalisable tables or has already been queued into the
-   run queue (todo_head) by caml_mmtk_final_update_first this cycle. Used to defer
-   the custom-block finalize a cycle when a user finaliser also targets the block
-   (see caml_mmtk_run_custom_finalizers). */
+/* True iff [v] is currently the subject of a user Gc.finalise on this domain --
+   it sits in the first/last finalisable tables or has already been queued into
+   the run queue (todo_head) by caml_mmtk_final_update_first this cycle. Used to
+   defer the custom-block finalize a cycle when a user finaliser also targets
+   the block (see caml_mmtk_run_custom_finalizers). */
 static int caml_mmtk_value_has_user_finaliser(value v)
 {
   struct caml_final_info *fi = Caml_state->final_info;
@@ -586,26 +615,27 @@ static int caml_mmtk_value_has_user_finaliser(value v)
   return 0;
 }
 
-/* Drain MMTk's ready-to-finalize queue and run each block's finalize op. Called at
-   a safepoint from caml_final_do_calls (post-GC, via the action-pending flag set in
-   caml_mmtk_uninterrupt). The objects are resurrected/valid for the call; after it
-   they are dropped and reclaimed on a later GC.
+/* Drain MMTk's ready-to-finalize queue and run each block's finalize op. Called
+   at a safepoint from caml_final_do_calls (post-GC, via the action-pending flag
+   set in caml_mmtk_uninterrupt). The objects are resurrected/valid for the
+   call; after it they are dropped and reclaimed on a later GC.
 
-   GH#11: a custom block that ALSO has a user Gc.finalise (e.g. an in_channel with
-   `Gc.finalise close_in`) must NOT have its custom finalize run in the SAME cycle
-   the user finaliser runs — stock OCaml spreads them over two sweep cycles. Under
-   MMTk both become ready in one cycle: mmtk-core's Finalization (FinalRefClosure)
-   queues the dead block BEFORE process_weak_refs (VMRefClosure) resurrects it for
-   the user finaliser. Running both here (custom queue first, in caml_final_do_calls)
-   makes caml_finalize_channel destroy the channel mutex + free the struct, then the
-   user close_in try_locks the freed mutex -> EINVAL -> "try_lock: Invalid argument"
-   abort. So if the popped block is also pending in a user finaliser, DEFER it: put
-   it back on MMTk's finalizer queue (it was resurrected this cycle, so it is live
-   and valid to re-register) and skip running its custom finalize now. The user
-   finaliser runs this cycle on the still-valid block (close_in only sets fd=-1; it
-   does not free the struct/mutex). A later GC, once the user finaliser has dropped
-   the reference, re-queues the now-unreachable block and runs its custom finalize
-   cleanly — mirroring stock's two-cycle separation. */
+   GH#11: a custom block that ALSO has a user Gc.finalise (e.g. an in_channel
+   with `Gc.finalise close_in`) must NOT have its custom finalize run in the
+   SAME cycle the user finaliser runs -- stock OCaml spreads them over two sweep
+   cycles. Under MMTk both become ready in one cycle: mmtk-core's Finalization
+   (FinalRefClosure) queues the dead block BEFORE process_weak_refs
+   (VMRefClosure) resurrects it for the user finaliser. Running both here
+   (custom queue first, in caml_final_do_calls) makes caml_finalize_channel
+   destroy the channel mutex + free the struct, then the user close_in try_locks
+   the freed mutex -> EINVAL -> "try_lock: Invalid argument" abort. So if the
+   popped block is also pending in a user finaliser, DEFER it: put it back on
+   MMTk's finalizer queue (it was resurrected this cycle, so it is live and
+   valid to re-register) and skip running its custom finalize now. The user
+   finaliser runs this cycle on the still-valid block (close_in only sets fd=-1;
+   it does not free the struct/mutex). A later GC, once the user finaliser has
+   dropped the reference, re-queues the now-unreachable block and runs its
+   custom finalize cleanly -- mirroring stock's two-cycle separation. */
 void caml_mmtk_run_custom_finalizers(void)
 {
   if (!caml_mmtk_weak_refs) return;
@@ -614,8 +644,8 @@ void caml_mmtk_run_custom_finalizers(void)
     value v = (value) p;
     if (caml_mmtk_value_has_user_finaliser(v)) {
       /* Defer to a later cycle: re-register (push to candidates, not the ready
-         queue, so it is not re-popped this drain) and let the user finaliser run
-         first. */
+         queue, so it is not re-popped this drain) and let the user finaliser
+         run first. */
       mmtk_ocaml_add_finalizer((const void *) v);
       continue;
     }
@@ -625,10 +655,10 @@ void caml_mmtk_run_custom_finalizers(void)
 }
 
 /* Fill the heap-size fields of Gc.stat from MMTk's accounting (page-granular).
-   Under MMTk the stock shared-heap counters are ~0 (the stock heap is bypassed),
-   so Gc.stat would otherwise report a near-empty heap. `*live_words` is the
-   in-use pages (a proxy for live data, not exact live bytes); `*collections` is
-   MMTk's GC count. Words = bytes / sizeof(value). */
+   Under MMTk the stock shared-heap counters are ~0 (the stock heap is
+   bypassed), so Gc.stat would otherwise report a near-empty heap. `*live_words`
+   is the in-use pages (a proxy for live data, not exact live bytes);
+   `*collections` is MMTk's GC count. Words = bytes / sizeof(value). */
 void caml_mmtk_gc_stats(uintnat *heap_words, uintnat *live_words,
                         uintnat *free_words, uintnat *collections)
 {
@@ -645,20 +675,21 @@ uintnat caml_mmtk_heap_size_bytes(void)
   return mmtk_ocaml_total_bytes();
 }
 
-/* Service an explicit `Gc` collection request (Gc.major / full_major / compact).
-   Under MMTk the stock major-GC machinery (caml_finish_major_cycle) must NOT run
-   — it operates on the bypassed stock shared heap and corrupts state (observed:
-   channel/custom-block corruption → crash under a moving plan). Instead trigger a
-   real MMTk collection on the calling domain and block until it completes. No-op
-   for NoGC (cannot collect) and when MMTk is disabled. */
+/* Service an explicit `Gc` collection request (Gc.major / full_major /
+   compact). Under MMTk the stock major-GC machinery (caml_finish_major_cycle)
+   must NOT run -- it operates on the bypassed stock shared heap and corrupts
+   state (observed: channel/custom-block corruption -> crash under a moving
+   plan). Instead trigger a real MMTk collection on the calling domain and block
+   until it completes. No-op for NoGC (cannot collect) and when MMTk is
+   disabled. */
 void caml_mmtk_collect(void)
 {
   if (caml_mmtk_collects)
     mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
 }
 
-/* Forced MINOR collection (non-exhaustive): under the generational plans this is
-   a nursery GC — enough to promote a global-rooted young value out of the
+/* Forced MINOR collection (non-exhaustive): under the generational plans this
+   is a nursery GC -- enough to promote a global-rooted young value out of the
    nursery, without the whole-heap trace caml_mmtk_collect forces. Used by the
    domain-termination result-promotion path (domain.c sync_and_terminate, GH#3):
    the old exhaustive collect there cost ONE FULL STW GC PER Domain TERMINATION,
@@ -671,23 +702,24 @@ void caml_mmtk_collect_minor(void)
 }
 
 /* True iff `v` is a heap block currently residing in the generational nursery
-   (young space). False for immediates, mature blocks, non-generational plans, and
-   NoGC. Used by sync_and_terminate (issue #31) to verify the domain result was
-   promoted out of the nursery before it is published to the joiner. */
+   (young space). False for immediates, mature blocks, non-generational plans,
+   and NoGC. Used by sync_and_terminate (issue #31) to verify the domain result
+   was promoted out of the nursery before it is published to the joiner. */
 int caml_mmtk_is_young(value v)
 {
   if (!caml_mmtk_collects || !Is_block(v)) return 0;
   return mmtk_ocaml_is_in_nursery((const void *) v) ? 1 : 0;
 }
 
-/* LXR (issue #31): durably RC-pin the domain result chain `v` (and its transitive
-   children) at domain termination, so it survives this domain's own nursery-block
-   sweep/reuse until the joiner reads it via term_sync.state. Under LXR the tracing-plan
-   promotion in sync_and_terminate is inert (LXR is non-generational: caml_mmtk_is_young
-   always returns 0, so its retry loop is a no-op; and the forced caml_mmtk_collect
-   coalesces past the result's global-root scan), so without this the result is swept at
-   RC 0 -> SIGSEGV in Domain.join. No-op on the tracing/generational plans (they keep the
-   result alive via caml_mmtk_collect instead) and when MMTk cannot collect. */
+/* LXR (issue #31): durably RC-pin the domain result chain `v` (and its
+   transitive children) at domain termination, so it survives this domain's own
+   nursery-block sweep/reuse until the joiner reads it via term_sync.state.
+   Under LXR the tracing-plan promotion in sync_and_terminate is inert (LXR is
+   non-generational: caml_mmtk_is_young always returns 0, so its retry loop is a
+   no-op; and the forced caml_mmtk_collect coalesces past the result's
+   global-root scan), so without this the result is swept at RC 0 -> SIGSEGV in
+   Domain.join. No-op on the tracing/generational plans (they keep the result
+   alive via caml_mmtk_collect instead) and when MMTk cannot collect. */
 void caml_mmtk_keep_alive(value v)
 {
   if (caml_mmtk_collects && Is_block(v))
@@ -696,26 +728,32 @@ void caml_mmtk_keep_alive(value v)
 
 /* Generational write barrier. Records that `count` value-sized slots starting
    at `start` may now hold pointers into the nursery, so a young collection
-   scans them. Called from caml_modify/write_barrier (count 1, slot-based —
+   scans them. Called from caml_modify/write_barrier (count 1, slot-based --
    OCaml hands a field address, not the object), caml_initialize, and array
    blits. Self-gated: a no-op unless an MMTk generational plan is active. */
-/* E1 (RQ1 finding 1): plan-independent write-barrier instrumentation. Counts the
-   program's intrinsic pointer-mutation volume (the LXR field-log barrier fires exactly
-   on these) vs init writes, to evidence "OCaml is init-write-dominated -> the barrier
-   rarely fires". Plain (non-atomic) longs: single-domain measurement only. Dumped at
-   exit when MMTK_BARRIER_COUNT is set. caml_e1_modify/caml_e1_init are bumped from
-   runtime/memory.c (caml_modify / caml_initialize). */
-unsigned long caml_e1_satb_calls = 0;   /* satb_barrier invocations (all mutation paths) */
-unsigned long caml_e1_satb_slots = 0;    /* mutated slots = LXR barrier fires (sum of count) */
-unsigned long caml_e1_modify = 0;        /* caml_modify calls (the generic pointer-mutation) */
-unsigned long caml_e1_init = 0;          /* caml_initialize calls (mature init writes) */
+/* E1 (RQ1 finding 1): plan-independent write-barrier instrumentation. Counts
+   the program's intrinsic pointer-mutation volume (the LXR field-log barrier
+   fires exactly on these) vs init writes, to evidence "OCaml is
+   init-write-dominated -> the barrier rarely fires". Plain (non-atomic) longs:
+   single-domain measurement only. Dumped at exit when MMTK_BARRIER_COUNT is
+   set. caml_e1_modify/caml_e1_init are bumped from runtime/memory.c
+   (caml_modify / caml_initialize). */
+/* satb_barrier invocations (all mutation paths) */
+unsigned long caml_e1_satb_calls = 0;
+/* mutated slots = LXR barrier fires (sum of count) */
+unsigned long caml_e1_satb_slots = 0;
+/* caml_modify calls (the generic pointer-mutation) */
+unsigned long caml_e1_modify = 0;
+/* caml_initialize calls (mature init writes) */
+unsigned long caml_e1_init = 0;
 
 /* Registered via atexit under MMTK_BARRIER_COUNT (a destructor attribute gets
    dead-stripped out of the static libasmrun archive; atexit does not). */
 static void caml_e1_dump(void)
 {
   fprintf(stderr,
-          "[E1-BARRIER] satb_fires=%lu satb_calls=%lu caml_modify=%lu caml_initialize=%lu\n",
+          "[E1-BARRIER] satb_fires=%lu satb_calls=%lu "
+          "caml_modify=%lu caml_initialize=%lu\n",
           caml_e1_satb_slots, caml_e1_satb_calls, caml_e1_modify, caml_e1_init);
 }
 
@@ -728,31 +766,35 @@ void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
 
 /* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
    plan (ConcurrentImmix). Greys the OLD referents held in `count` value-sized
-   slots at `start` so concurrent marking still reaches an object whose only live
-   edge is about to be overwritten. MUST be called BEFORE the store, while the
-   slots still hold the old values (the snapshot). Self-gated: a no-op unless the
-   concurrent plan is active. Called from write_barrier (caml_modify, count 1) and
-   the array-fill paths (before the fill loop). */
+   slots at `start` so concurrent marking still reaches an object whose only
+   live edge is about to be overwritten. MUST be called BEFORE the store, while
+   the slots still hold the old values (the snapshot). Self-gated: a no-op
+   unless the concurrent plan is active. Called from write_barrier (caml_modify,
+   count 1) and the array-fill paths (before the fill loop). */
 void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
 {
-  /* Fires for ConcurrentImmix (SATB delete barrier) AND LXR (field-logging RC barrier):
-     both route the pre-store slot to the mutator's installed Barrier (SATBBarrier vs
-     FieldBarrier), which dispatches the correct slow path. Only called on MUTATIONS
-     (caml_modify / atomic exchange/cas) where the old value is valid — never on
-     caml_initialize, so LXR never logs an initialising write as a mutation. */
-  caml_e1_satb_calls++;            /* E1: count every mutation-barrier entry (plan-independent) */
-  caml_e1_satb_slots += count;     /* E1: total mutated slots = LXR field-log barrier fires */
+  /* Fires for ConcurrentImmix (SATB delete barrier) AND LXR (field-logging RC
+     barrier): both route the pre-store slot to the mutator's installed Barrier
+     (SATBBarrier vs FieldBarrier), which dispatches the correct slow path. Only
+     called on MUTATIONS (caml_modify / atomic exchange/cas) where the old value
+     is valid -- never on caml_initialize, so LXR never logs an initialising
+     write as a mutation. */
+  /* E1: count every mutation-barrier entry (plan-independent) */
+  caml_e1_satb_calls++;
+  /* E1: total mutated slots = LXR field-log barrier fires */
+  caml_e1_satb_slots += count;
   if (caml_mmtk_concurrent || caml_mmtk_field_log)
     mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                             (size_t) count);
 }
 
-/* Per-continuation scan lock (concurrent plan). Held by a GC worker while it scans
-   a continuation's suspended fiber stack; the resume path acquires it (blocking)
-   before switching onto that stack, so a resume cannot race the concurrent scan.
-   Self-gated: a no-op for every non-concurrent plan (STW collectors scan stacks at
-   a safepoint with mutators stopped, so no resume can run concurrently). `cont` is
-   the continuation block; we key the lock on its address. */
+/* Per-continuation scan lock (concurrent plan). Held by a GC worker while it
+   scans a continuation's suspended fiber stack; the resume path acquires it
+   (blocking) before switching onto that stack, so a resume cannot race the
+   concurrent scan. Self-gated: a no-op for every non-concurrent plan (STW
+   collectors scan stacks at a safepoint with mutators stopped, so no resume can
+   run concurrently). `cont` is the continuation block; we key the lock on its
+   address. */
 void caml_mmtk_cont_lock(value cont)
 {
   if (caml_mmtk_concurrent)
@@ -766,16 +808,17 @@ void caml_mmtk_cont_unlock(value cont)
 }
 
 /* SATB snapshot of a continuation's suspended fiber stack, taken on the resume
-   path BEFORE the resume deletes the cont->stack edge (field 0 -> NULL via a raw
-   CAS that bypasses the write barrier). Mirrors vanilla's caml_darken_cont, which
-   scans the stack itself when a resume finds it not-yet-marked. Without this, a
-   continuation resumed during concurrent marking before any GC worker reached it
-   would have its stack roots lost (FinalMark does not re-scan mutator roots under
-   this SATB collector). We walk the stack with caml_scan_stack and grey each slot's
-   value into the SATB buffer (caml_mmtk_satb_barrier), so the marker keeps those
-   snapshot roots live. Greying is idempotent, so a double snapshot (worker + resume)
-   is harmless. Only meaningful while concurrent marking is in flight; the caller
-   gates on mmtk_ocaml_concurrent_marking_active(). */
+   path BEFORE the resume deletes the cont->stack edge (field 0 -> NULL via a
+   raw CAS that bypasses the write barrier). Mirrors vanilla's caml_darken_cont,
+   which scans the stack itself when a resume finds it not-yet-marked. Without
+   this, a continuation resumed during concurrent marking before any GC worker
+   reached it would have its stack roots lost (FinalMark does not re-scan
+   mutator roots under this SATB collector). We walk the stack with
+   caml_scan_stack and grey each slot's value into the SATB buffer
+   (caml_mmtk_satb_barrier), so the marker keeps those snapshot roots live.
+   Greying is idempotent, so a double snapshot (worker + resume) is harmless.
+   Only meaningful while concurrent marking is in flight; the caller gates on
+   mmtk_ocaml_concurrent_marking_active(). */
 static void caml_mmtk_satb_grey_stack_slot(void *fdata, value v,
                                            volatile value *slot)
 {
@@ -795,7 +838,7 @@ void caml_mmtk_cont_snapshot(value cont)
   }
 }
 
-/* ── Stop-the-world ──────────────────────────────────────────────────── */
+/* -- Stop-the-world ---------------------------------------------------- */
 
 /* Global epoch for the ragged safepoint (caml_mmtk_quiesce_running_domains).
    Bumped (release) by a quiescing writer; each domain stores the current value
@@ -829,15 +872,16 @@ void caml_mmtk_quiesce_ack(caml_domain_state *d)
 }
 
 /* Cooperatively wait out an in-progress collection: drop the domain lock (which
-   removes this domain from MMTk's RUNNING set, so the collector no longer awaits
-   it — exactly what a C blocking section does), mark STOPPED and wait for the
-   MMTk resume epoch, then re-acquire the lock. Does NOT re-mark RUNNING — the
-   caller does that via caml_mmtk_become_running (so the RUNNING transition and the
-   GC-active check stay atomic w.r.t. the next collection).
+   removes this domain from MMTk's RUNNING set, so the collector no longer
+   awaits it -- exactly what a C blocking section does), mark STOPPED and wait
+   for the MMTk resume epoch, then re-acquire the lock. Does NOT re-mark RUNNING
+   -- the caller does that via caml_mmtk_become_running (so the RUNNING
+   transition and the GC-active check stay atomic w.r.t. the next collection).
 
    (Under always-on MMTk, stop_all_mutators is the sole all-domains rendezvous.
-   OCaml's own STW was retired, so there is no second barrier to deadlock against
-   and no backup thread to hand participation to — releasing the lock suffices.) */
+   OCaml's own STW was retired, so there is no second barrier to deadlock
+   against and no backup thread to hand participation to -- releasing the lock
+   suffices.) */
 static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 {
   caml_release_domain_lock();
@@ -847,11 +891,12 @@ static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 
 /* Transition this domain to RUNNING (a must-stop STW participant). If a
    collection is active, mmtk_ocaml_try_mark_running refuses and we park
-   cooperatively (above) — releasing the domain lock so the collector does not
-   wait on us — then retry. We must NOT just spin on "GC active" while holding the
-   domain lock: that would keep this domain in the RUNNING set, wedging
-   stop_all_mutators on running.is_empty() forever. Used on every STOPPED->RUNNING
-   edge: resume from park, leave a blocking section, and a child starting OCaml. */
+   cooperatively (above) -- releasing the domain lock so the collector does not
+   wait on us -- then retry. We must NOT just spin on "GC active" while holding
+   the domain lock: that would keep this domain in the RUNNING set, wedging
+   stop_all_mutators on running.is_empty() forever. Used on every
+   STOPPED->RUNNING edge: resume from park, leave a blocking section, and a
+   child starting OCaml. */
 void caml_mmtk_become_running(uintnat domain_state_addr)
 {
   while (!mmtk_ocaml_try_mark_running(domain_state_addr))
@@ -888,13 +933,13 @@ void caml_mmtk_interrupt(uintnat domain_state_addr)
 /* Reset a domain's young_limit (un-poison) after the collection.
 
    In TLAB mode, also discard the domain's young region so it refills a fresh
-   MMTk block on its next allocation. This is essential for correctness: a GC may
-   have relocated (moving plans) or reclaimed lines around the objects the domain
-   already placed in its current block, so the unused tail [young_start, young_ptr)
-   and the block pointers themselves can no longer be trusted. The live objects
-   already allocated survived via root tracing (and had their references fixed up
-   if moved); we simply stop bumping into the stale block. Setting
-   young_ptr = young_start makes the next fast-path allocation trap to
+   MMTk block on its next allocation. This is essential for correctness: a GC
+   may have relocated (moving plans) or reclaimed lines around the objects the
+   domain already placed in its current block, so the unused tail [young_start,
+   young_ptr) and the block pointers themselves can no longer be trusted. The
+   live objects already allocated survived via root tracing (and had their
+   references fixed up if moved); we simply stop bumping into the stale block.
+   Setting young_ptr = young_start makes the next fast-path allocation trap to
    caml_alloc_small_dispatch, which refills. Safe to do from the GC worker here:
    all mutators are stopped. */
 void caml_mmtk_uninterrupt(uintnat domain_state_addr)
@@ -902,94 +947,100 @@ void caml_mmtk_uninterrupt(uintnat domain_state_addr)
   caml_domain_state *d = (caml_domain_state *) domain_state_addr;
   if (caml_mmtk_tlab) {
     /* Minor-words accounting: a collection discards this domain's current block
-       (the unused tail and the block pointers can no longer be trusted — see
+       (the unused tail and the block pointers can no longer be trusted -- see
        below). The words it consumed (young_end - young_ptr) were reported live
-       by caml_gc_minor_words_unboxed; fold them into stat_minor_words now so the
-       odometer survives the discard.
+       by caml_gc_minor_words_unboxed; fold them into stat_minor_words now so
+       the odometer survives the discard.
 
-       Double-count hazard: the discard below sets young_ptr = young_start so the
-       next allocation traps and refills. If we left young_end pointing at the old
-       block, the live term Wsize_bsize(young_end - young_ptr) would then read the
-       WHOLE block (young_end - young_start) — re-adding the consumed words AND
-       counting the never-allocated tail. We therefore also collapse the live
-       range by setting young_end = young_start, so the live term reads 0 and the
-       invariant total == stat + Wsize_bsize(young_end-young_ptr) still holds. The
-       block is fully discarded (young_start == young_end == young_ptr); the next
-       fast-path alloc traps to caml_alloc_small_dispatch and refills. */
+       Double-count hazard: the discard below sets young_ptr = young_start so
+       the next allocation traps and refills. If we left young_end pointing at
+       the old block, the live term Wsize_bsize(young_end - young_ptr) would
+       then read the WHOLE block (young_end - young_start) -- re-adding the
+       consumed words AND counting the never-allocated tail. We therefore also
+       collapse the live range by setting young_end = young_start, so the live
+       term reads 0 and the invariant total == stat +
+       Wsize_bsize(young_end-young_ptr) still holds. The block is fully
+       discarded (young_start == young_end == young_ptr); the next fast-path
+       alloc traps to caml_alloc_small_dispatch and refills. */
     d->stat_minor_words +=
       Wsize_bsize((char*)d->young_end - (char*)d->young_ptr);
     d->young_end             = d->young_start;
     d->young_ptr             = d->young_start;
     d->young_trigger         = d->young_start;
     d->memprof_young_trigger = d->young_start;
-    /* Leave the young region COLLAPSED (young_start == young_end == young_ptr); the
-       mutator refills its own TLAB at its next allocation (caml_alloc_small_dispatch,
-       a normal mutator safepoint, outside any GC lock). We must NOT drive the
-       allocator here. This runs inside resume_mutators (binding/src/collection.rs),
-       which MMTk calls from on_gc_finished while holding the WorkerMonitorSync lock.
-       caml_mmtk_refill_tlab can hit a full space -> Space::acquire -> GCTrigger::poll
-       -> request_schedule_collection -> WorkerMonitor::make_request, which re-takes
-       that same lock -> a GC worker self-deadlocks on a lock it already holds
-       (rr/core-confirmed via the deterministic ocamldoc man-gen hang; gc/mmtk/NOTES.md).
-       The sibling MMTk bindings (mmtk-openjdk/julia/ruby) all resume WITHOUT touching
-       the allocator, for exactly this reason — resume_mutators only unblocks mutators.
-       (The fft poll-trap micro-perf an eager refill once avoided — a collapsed region
-       keeps young_ptr at young_limit so an alloc-light hot loop traps at every poll —
-       must be re-homed to the mutator's OWN resume path, caml_mmtk_become_running, not
-       this GC-worker hook. TODO; see ROADMAP.) caml_reset_young_limit below is still
-       valid for the collapsed region. */
+    /* Leave the young region COLLAPSED (young_start == young_end == young_ptr);
+       the mutator refills its own TLAB at its next allocation
+       (caml_alloc_small_dispatch, a normal mutator safepoint, outside any GC
+       lock). We must NOT drive the allocator here. This runs inside
+       resume_mutators (binding/src/collection.rs), which MMTk calls from
+       on_gc_finished while holding the WorkerMonitorSync lock.
+       caml_mmtk_refill_tlab can hit a full space -> Space::acquire ->
+       GCTrigger::poll -> request_schedule_collection ->
+       WorkerMonitor::make_request, which re-takes that same lock -> a GC worker
+       self-deadlocks on a lock it already holds (rr/core-confirmed via the
+       deterministic ocamldoc man-gen hang; gc/mmtk/NOTES.md). The sibling MMTk
+       bindings (mmtk-openjdk/julia/ruby) all resume WITHOUT touching the
+       allocator, for exactly this reason -- resume_mutators only unblocks
+       mutators. (The fft poll-trap micro-perf an eager refill once avoided -- a
+       collapsed region keeps young_ptr at young_limit so an alloc-light hot
+       loop traps at every poll -- must be re-homed to the mutator's OWN resume
+       path, caml_mmtk_become_running, not this GC-worker hook. TODO; see
+       ROADMAP.) caml_reset_young_limit below is still valid for the collapsed
+       region. */
   }
-  /* A GC just finished — MMTk's finalizer queue may now hold dead custom blocks.
-     Flag pending actions so this domain drains + runs them (caml_final_do_calls →
-     caml_mmtk_run_custom_finalizers) at its next safepoint. */
+  /* A GC just finished -- MMTk's finalizer queue may now hold dead custom
+     blocks. Flag pending actions so this domain drains + runs them
+     (caml_final_do_calls -> caml_mmtk_run_custom_finalizers) at its next
+     safepoint. */
   if (caml_mmtk_weak_refs) caml_set_action_pending(d);
   caml_reset_young_limit(d);
 }
 
 /* Ragged safepoint (excise Phase 2, step 1): block the caller until every OCaml
    domain that was RUNNING OCaml at call time has passed one safepoint OR left
-   the RUNNING set (parked / blocked / terminated). No global STW barrier, no GC.
-   The two future callers (frametables RCU retire; runtime_events ring teardown)
-   publish new state, then call this to drain all in-flight lock-free readers of
-   the OLD state before freeing it. LIVE: the runtime_events ring teardown
-   (runtime_events.c) is the current caller.
+   the RUNNING set (parked / blocked / terminated). No global STW barrier, no
+   GC. The two future callers (frametables RCU retire; runtime_events ring
+   teardown) publish new state, then call this to drain all in-flight lock-free
+   readers of the OLD state before freeing it. LIVE: the runtime_events ring
+   teardown (runtime_events.c) is the current caller.
 
    Protocol:
-     1. epoch = ++caml_mmtk_quiesce_epoch (release). Domains store this into
-        their own mmtk_seen_quiesce_epoch at each safepoint (caml_mmtk_quiesce_ack).
-     2. The caller is itself RUNNING and holds its domain lock; if it spun here
-        it could deadlock a concurrent GC (which waits for running.is_empty()).
-        So it leaves RUNNING for the wait — caml_mmtk_enter_blocking(self) — and
-        re-enters cooperatively afterwards (caml_mmtk_become_running(self)), the
-        exact handoff a C blocking section uses. As the WRITER it reads nothing of
-        the old state between publish and free, so dropping RUNNING is reader-safe.
-     3. Snapshot the RUNNING set NOW (mmtk_ocaml_snapshot_running). Domains in it
-        are the in-flight readers we must wait for. (A domain that re-enters
-        RUNNING after the bump via try_mark_running was STOPPED during our publish,
-        so it cannot hold a pre-bump pointer — and it is NOT in our snapshot, so it
-        never makes us hang.)
-     4. Poison every snapshot domain (caml_mmtk_interrupt) so a running one traps
-        to its next safepoint and acks. A domain self-clears its OWN young_limit at
-        that safepoint (caml_reset_young_limit), so we never call
-        caml_mmtk_uninterrupt — which would clobber a CONCURRENT GC's poison.
-     5. Wait until, for every snapshot domain, EITHER mmtk_seen_quiesce_epoch >=
-        epoch (it acked) OR it is no longer RUNNING (mmtk_ocaml_is_running == 0:
-        parked / blocked / terminated holds no transient reader pointer). Poll on
-        a short sleep, re-poisoning stragglers each round (a domain may have
-        cleared its poison at an unrelated safepoint before acking our epoch).
+   1. epoch = ++caml_mmtk_quiesce_epoch (release). Domains store this into their
+      own mmtk_seen_quiesce_epoch at each safepoint (caml_mmtk_quiesce_ack).
+   2. The caller is itself RUNNING and holds its domain lock; if it spun here it
+      could deadlock a concurrent GC (which waits for running.is_empty()). So it
+      leaves RUNNING for the wait -- caml_mmtk_enter_blocking(self) -- and
+      re-enters cooperatively afterwards (caml_mmtk_become_running(self)), the
+      exact handoff a C blocking section uses. As the WRITER it reads nothing of
+      the old state between publish and free, so dropping RUNNING is
+      reader-safe.
+   3. Snapshot the RUNNING set NOW (mmtk_ocaml_snapshot_running). Domains in it
+      are the in-flight readers we must wait for. (A domain that re-enters
+      RUNNING after the bump via try_mark_running was STOPPED during our
+      publish, so it cannot hold a pre-bump pointer -- and it is NOT in our
+      snapshot, so it never makes us hang.)
+   4. Poison every snapshot domain (caml_mmtk_interrupt) so a running one traps
+      to its next safepoint and acks. A domain self-clears its OWN young_limit
+      at that safepoint (caml_reset_young_limit), so we never call
+      caml_mmtk_uninterrupt -- which would clobber a CONCURRENT GC's poison.
+   5. Wait until, for every snapshot domain, EITHER mmtk_seen_quiesce_epoch >=
+      epoch (it acked) OR it is no longer RUNNING (mmtk_ocaml_is_running == 0:
+      parked / blocked / terminated holds no transient reader pointer). Poll on
+      a short sleep, re-poisoning stragglers each round (a domain may have
+      cleared its poison at an unrelated safepoint before acking our epoch).
 
    Latency caveat: a domain spinning in a tight allocation-free, poll-free loop
    never reaches a safepoint; the young_limit poison only bites at the next
-   allocation or explicit poll. OCaml's bytecode loop polls and native back-edges
-   insert poll points, so ordinary code reaches a safepoint promptly, but a
-   hand-rolled C busy-loop with no caml_process_pending_actions is a (pre-existing,
-   same as GC STW) bounded-latency exception.
+   allocation or explicit poll. OCaml's bytecode loop polls and native
+   back-edges insert poll points, so ordinary code reaches a safepoint promptly,
+   but a hand-rolled C busy-loop with no caml_process_pending_actions is a
+   (pre-existing, same as GC STW) bounded-latency exception.
 
    Re-entrancy: the epoch is a single global monotone counter, so two concurrent
-   quiescers are individually correct (each waits for acks >= its OWN bump, and a
-   later bump only makes earlier waiters' predicate easier). The future callers
-   still serialise themselves with their own retire/teardown lock; this primitive
-   does not require it for safety. */
+   quiescers are individually correct (each waits for acks >= its OWN bump, and
+   a later bump only makes earlier waiters' predicate easier). The future
+   callers still serialise themselves with their own retire/teardown lock; this
+   primitive does not require it for safety. */
 void caml_mmtk_quiesce_running_domains(void)
 {
   uintnat self = (uintnat) Caml_state;
@@ -1000,8 +1051,9 @@ void caml_mmtk_quiesce_running_domains(void)
      thread covers our OCaml-STW participation while we are stopped. */
   caml_mmtk_enter_blocking(self);
 
-  /* Snapshot the domains RUNNING right now — the in-flight readers to drain.
-     Self was just removed from RUNNING by enter_blocking, so it is not awaited. */
+  /* Snapshot the domains RUNNING right now -- the in-flight readers to drain.
+     Self was just removed from RUNNING by enter_blocking, so it is not awaited.
+     */
   uintnat snap[CAML_MMTK_QUIESCE_MAX_DOMAINS];
   size_t n = mmtk_ocaml_snapshot_running(snap, CAML_MMTK_QUIESCE_MAX_DOMAINS);
 
@@ -1010,10 +1062,11 @@ void caml_mmtk_quiesce_running_domains(void)
     for (size_t i = 0; i < n; i++) {
       caml_domain_state *d = (caml_domain_state *) snap[i];
       if (atomic_load_acquire(&d->mmtk_seen_quiesce_epoch) >= epoch)
-        continue;                       /* acked a safepoint at/after our bump */
+        continue;               /* acked a safepoint at/after our bump */
       if (!mmtk_ocaml_is_running(snap[i]))
-        continue;                       /* parked/blocked/gone: holds no reader */
-      /* Still RUNNING and not yet acked — poison so it traps to a safepoint. */
+        continue;             /* parked/blocked/gone: holds no reader */
+      /* Still RUNNING and not yet acked -- poison so it traps to a safepoint.
+         */
       caml_mmtk_interrupt(snap[i]);
       all_done = 0;
     }
@@ -1032,21 +1085,22 @@ void caml_mmtk_quiesce_running_domains(void)
    safe for GC; on leaving it must wait out any in-progress collection.
 
    `dom` is the domain's caml_domain_state address, captured by the caller
-   (runtime/signals.c) while Caml_state was still bound — it must NOT be read
-   from Caml_state here. The blocking-section hooks release/re-acquire the domain
-   lock around these calls, which clears/restores Caml_state asymmetrically:
-   `caml_enter_blocking_section` calls enter AFTER the hook released the lock
-   (Caml_state is NULL), while `caml_leave_blocking_section` calls leave AFTER
-   the hook re-acquired it (Caml_state is valid). The previous code read
-   Caml_state_opt directly, so the enter found it NULL and skipped the
-   `stopped` increment while leave still decremented it — underflowing the usize
-   count to a huge value, making `stop_all_mutators`'s `stopped >= n` barrier
-   always true. The GC then never waited for running domains to reach a
+   (runtime/signals.c) while Caml_state was still bound -- it must NOT be read
+   from Caml_state here. The blocking-section hooks release/re-acquire the
+   domain lock around these calls, which clears/restores Caml_state
+   asymmetrically: `caml_enter_blocking_section` calls enter AFTER the hook
+   released the lock (Caml_state is NULL), while `caml_leave_blocking_section`
+   calls leave AFTER the hook re-acquired it (Caml_state is valid). The previous
+   code read Caml_state_opt directly, so the enter found it NULL and skipped the
+   `stopped` increment while leave still decremented it -- underflowing the
+   usize count to a huge value, making `stop_all_mutators`'s `stopped >= n`
+   barrier always true. The GC then never waited for running domains to reach a
    safepoint and scanned the live, mutating roots of a still-running domain,
    handing an immediate/foreign value to trace_object: the `cannot trace object
-   0x1` (Val_int 0) panic in the parallel spawn-burn tests. `dom == 0` (no domain
-   bound, e.g. caml_open_descriptor_in during early startup) is a no-op, and the
-   `mmtk_mutator != NULL` guard keeps enter/leave balanced across binding. */
+   0x1` (Val_int 0) panic in the parallel spawn-burn tests. `dom == 0` (no
+   domain bound, e.g. caml_open_descriptor_in during early startup) is a no-op,
+   and the `mmtk_mutator != NULL` guard keeps enter/leave balanced across
+   binding. */
 void caml_mmtk_enter_blocking(uintnat dom)
 {
   if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
@@ -1064,45 +1118,46 @@ void caml_mmtk_leave_blocking(uintnat dom)
 
    No park is needed. By the time caml_domain_terminate calls us, the domain has
    left the runtime's STW participant set (stop_active_domain) and is no longer
-   executing OCaml, so it is absent from MMTk's RUNNING set — a collection in
+   executing OCaml, so it is absent from MMTk's RUNNING set -- a collection in
    flight does not wait for it. Deregistering removes it from both the mutator
    registry and the RUNNING set (active_plan::deregister_by_addr). This subsumes
    the former terminate-specific park special-case (the terminating domain no
    longer needs to park at all). The caller still holds domain_lock continuously
-   across teardown to keep the slot from being reused mid-teardown — unchanged and
-   orthogonal to MMTk. */
+   across teardown to keep the slot from being reused mid-teardown -- unchanged
+   and orthogonal to MMTk. */
 void caml_mmtk_domain_terminate(caml_domain_state *dom)
 {
   if (dom->mmtk_mutator == NULL) return;
-  /* Deregister first: this removes the domain from BOTH the mutator registry (so
-     a collection started from now on will not scan it) AND the RUNNING set (so an
-     in-progress stop_all_mutators that is waiting for all running domains to stop
-     no longer waits for this one -- it has left OCaml STW too and sits in C
-     teardown with no safepoint, exactly the un-stoppable case bug #3b is about). */
+  /* Deregister first: this removes the domain from BOTH the mutator registry
+     (so a collection started from now on will not scan it) AND the RUNNING set
+     (so an in-progress stop_all_mutators that is waiting for all running
+     domains to stop no longer waits for this one -- it has left OCaml STW too
+     and sits in C teardown with no safepoint, exactly the un-stoppable case bug
+     #3b is about). */
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
-  /* Then, if a collection is in progress, wait for it to finish before returning
-     to caml_domain_terminate, which tears this domain's stack/roots down. A
-     collection that snapshotted the registry just BEFORE the deregister above
-     still holds this domain's mutator pointer and is scanning its roots; tearing
-     them down concurrently traced a freed/garbage slot -> the MMTk "cannot trace
-     object" panic (bug #3) seen in the spawn-burn tests. Waiting keeps the roots
-     valid until that scan completes. We do NOT release domain_lock here: the
-     domain has already left OCaml's STW participant set (stop_active_domain), so
-     OCaml STW will not wait for us and cannot deadlock, while domain_lock must
-     stay held across teardown to keep the slot from being reused mid-teardown
-     (domain_create blocks on the same lock). */
+  /* Then, if a collection is in progress, wait for it to finish before
+     returning to caml_domain_terminate, which tears this domain's stack/roots
+     down. A collection that snapshotted the registry just BEFORE the deregister
+     above still holds this domain's mutator pointer and is scanning its roots;
+     tearing them down concurrently traced a freed/garbage slot -> the MMTk
+     "cannot trace object" panic (bug #3) seen in the spawn-burn tests. Waiting
+     keeps the roots valid until that scan completes. We do NOT release
+     domain_lock here: the domain has already left OCaml's STW participant set
+     (stop_active_domain), so OCaml STW will not wait for us and cannot
+     deadlock, while domain_lock must stay held across teardown to keep the slot
+     from being reused mid-teardown (domain_create blocks on the same lock). */
   mmtk_ocaml_wait_collection_done();
   dom->mmtk_mutator = NULL;
 }
 
-/* Deregister a domain WITHOUT waiting for an in-flight collection — used by
+/* Deregister a domain WITHOUT waiting for an in-flight collection -- used by
    caml_stop_all_domains (excise Phase 3b) when the main domain forcibly cancels
    running peers at process exit. Unlike caml_mmtk_domain_terminate, the caller
    does NOT tear the peer's stack/roots down (it was pthread_cancel'd in an
    unknown state and left in memory), so there is nothing to protect with a
-   collection-done wait; we only need to remove the dead peer from MMTk's mutator
-   registry + RUNNING set so a stop_all_mutators stops awaiting a thread that will
-   never reach a safepoint again. Idempotent / no-op if not bound. */
+   collection-done wait; we only need to remove the dead peer from MMTk's
+   mutator registry + RUNNING set so a stop_all_mutators stops awaiting a thread
+   that will never reach a safepoint again. Idempotent / no-op if not bound. */
 void caml_mmtk_deregister_domain(caml_domain_state *dom)
 {
   if (dom->mmtk_mutator == NULL) return;
@@ -1110,15 +1165,16 @@ void caml_mmtk_deregister_domain(caml_domain_state *dom)
   dom->mmtk_mutator = NULL;
 }
 
-/* Wait out the grace period of any in-flight collection (returns at once if none
-   is active). C wrapper so the OCaml runtime can RCU-retire memory that a GC
-   worker may have snapshotted as a root before freeing it. caml_mmtk_domain_terminate
-   above uses the same primitive to keep a terminating domain's OWN roots valid
-   until the scanning collection completes; free_domain_ml_values in domain.c uses
-   this wrapper to give the per-spawn domain_ml_values global-root block the same
-   guarantee (GH#15 Bug B: a collection started AFTER caml_domain_terminate's wait
-   may still hold &ml_values->callback/&term_sync — freeing the block underneath it
-   traced a dangling slot -> "cannot trace object" panic). */
+/* Wait out the grace period of any in-flight collection (returns at once if
+   none is active). C wrapper so the OCaml runtime can RCU-retire memory that a
+   GC worker may have snapshotted as a root before freeing it.
+   caml_mmtk_domain_terminate above uses the same primitive to keep a
+   terminating domain's OWN roots valid until the scanning collection completes;
+   free_domain_ml_values in domain.c uses this wrapper to give the per-spawn
+   domain_ml_values global-root block the same guarantee (GH#15 Bug B: a
+   collection started AFTER caml_domain_terminate's wait may still hold
+   &ml_values->callback/&term_sync -- freeing the block underneath it traced a
+   dangling slot -> "cannot trace object" panic). */
 void caml_mmtk_wait_collection_done(void)
 {
   mmtk_ocaml_wait_collection_done();

@@ -63,24 +63,25 @@ CAMLprim value caml_gc_quick_stat(value v)
   caml_compute_gc_stats(&s);
 
   /* Collection-count semantics under MMTk (the only collector here):
-       - minor_collections: the stock caml_minor_collections_count. Native code uses
-         TLAB nursery-aliasing and never runs a stock minor cycle, so this stays 0
-         there (correct: there is no minor GC). Under bytecode a Gc.minor()/minor
-         collection still bumps it, so the count remains meaningful for code that
-         polls it (e.g. lib-systhreads/boundscheck).
-       - compactions: always 0. MMTk has no distinct compaction pass —
+       - minor_collections: the stock caml_minor_collections_count. Native code
+         uses TLAB nursery-aliasing and never runs a stock minor cycle, so this
+         stays 0 there (correct: there is no minor GC). Under bytecode a
+         Gc.minor()/minor collection still bumps it, so the count remains
+         meaningful for code that polls it (e.g. lib-systhreads/boundscheck).
+       - compactions: always 0. MMTk has no distinct compaction pass --
          Gc.compact() runs an ordinary MMTk collection (counted under
          major_collections; Immix may defrag) and never bumped a compaction
          counter, so Gc.stat's compactions field is the literal 0 stored below.
        - major_collections (set below): MMTk's GC count. */
   mincoll = atomic_load(&caml_minor_collections_count);
 
-  /* Under MMTk the stock shared-heap counters (s.heap_stats.*) are ~0 — MMTk owns
-     the heap. Pull the heap-size fields and the collection count from MMTk so
-     Gc.stat reports the real heap instead of a near-empty one. MMTk runs whole-heap
-     STW collections, so every MMTk GC — automatic or user-forced (Gc.major /
-     full_major / compact, all routed through caml_mmtk_collect) — bumps this count;
-     it is the field tests poll to confirm a collection happened. */
+  /* Under MMTk the stock shared-heap counters (s.heap_stats.*) are ~0 -- MMTk
+     owns the heap. Pull the heap-size fields and the collection count from MMTk
+     so Gc.stat reports the real heap instead of a near-empty one. MMTk runs
+     whole-heap STW collections, so every MMTk GC -- automatic or user-forced
+     (Gc.major / full_major / compact, all routed through caml_mmtk_collect) --
+     bumps this count; it is the field tests poll to confirm a collection
+     happened. */
   uintnat mmtk_heap_words = 0, mmtk_live_words = 0, mmtk_free_words = 0,
           mmtk_collections = 0;
   caml_mmtk_gc_stats(&mmtk_heap_words, &mmtk_live_words, &mmtk_free_words,
@@ -111,15 +112,14 @@ CAMLprim value caml_gc_quick_stat(value v)
 }
 
 /* Minor-words allocation odometer under MMTk. Invariant maintained by the MMTk
-   alloc paths (runtime/mmtk.c):
-       total minor words == stat_minor_words
-                            + Wsize_bsize(young_end - young_ptr)
+   alloc paths (runtime/mmtk.c): total minor words == stat_minor_words +
+   Wsize_bsize(young_end - young_ptr)
    - Native (TLAB): the inlined fast path bumps young_ptr downward within the
-     current MMTk block, so (young_end - young_ptr) tracks the live block exactly;
-     a retired block's consumed words are folded into stat_minor_words at block
-     retirement (caml_mmtk_refill_tlab) and at a collection's discard
-     (caml_mmtk_uninterrupt, which also collapses young_end to young_start so this
-     live term reads 0 — no double count).
+     current MMTk block, so (young_end - young_ptr) tracks the live block
+     exactly; a retired block's consumed words are folded into stat_minor_words
+     at block retirement (caml_mmtk_refill_tlab) and at a collection's discard
+     (caml_mmtk_uninterrupt, which also collapses young_end to young_start so
+     this live term reads 0 -- no double count).
    - Bytecode: young_* stay NULL (no TLAB), so the live term is 0;
      caml_mmtk_alloc_small bumps stat_minor_words per allocation. */
 double caml_gc_minor_words_unboxed (void)
@@ -140,22 +140,24 @@ CAMLprim value caml_gc_counters(value v)
   CAMLparam0 (); /* v is ignored */
   CAMLlocal4 (minwords_, prowords_, majwords_, res);
 
-  /* get a copy of these before allocating anything...
-     Gc.counters semantics under MMTk:
-       - minor_words: a faithful allocation odometer (see
-         caml_gc_minor_words_unboxed). The MMTk alloc paths feed stat_minor_words
-         at block retirement (native TLAB: caml_mmtk_refill_tlab /
-         caml_mmtk_uninterrupt) or per allocation (bytecode:
-         caml_mmtk_alloc_small), and the live (young_end - young_ptr) span covers
-         the current native block, so a tight alloc-then-measure loop sees the
-         words it allocated.
-       - promoted_words: 0. MMTk has no nursery->major promotion (native TLAB aliases
-         the nursery onto an Immix block; bytecode allocates straight into the heap),
-         so nothing is ever "promoted". Reported as 0 (documented stub).
-       - major_words: words allocated directly as major/large blocks. The stock
-         per-domain accumulators (stat_promoted_words/stat_major_words/allocated_words)
-         are no longer driven by the bypassed stock minor/major cycles, so these
-         currently read 0 under MMTk. */
+  /* get a copy of these before allocating anything... Gc.counters semantics
+     under MMTk:
+     - minor_words: a faithful allocation odometer (see
+       caml_gc_minor_words_unboxed). The MMTk alloc paths feed stat_minor_words
+       at block retirement (native TLAB: caml_mmtk_refill_tlab /
+       caml_mmtk_uninterrupt) or per allocation (bytecode:
+       caml_mmtk_alloc_small), and the live (young_end - young_ptr) span covers
+       the current native block, so a tight alloc-then-measure loop sees the
+       words it allocated.
+     - promoted_words: 0. MMTk has no nursery->major promotion (native TLAB
+       aliases the nursery onto an Immix block; bytecode allocates straight into
+       the heap), so nothing is ever "promoted". Reported as 0 (documented
+       stub).
+     - major_words: words allocated directly as major/large blocks. The stock
+       per-domain accumulators
+       (stat_promoted_words/stat_major_words/allocated_words) are no longer
+       driven by the bypassed stock minor/major cycles, so these currently read
+       0 under MMTk. */
   double minwords = caml_gc_minor_words_unboxed();
   double prowords = (double)Caml_state->stat_promoted_words;
   double majwords = Caml_state->stat_major_words +
@@ -290,7 +292,8 @@ static caml_result gc_major_res(int force_compaction)
 {
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MAJOR);
   caml_gc_log ("Major GC cycle requested");
-  /* MMTk owns the heap: run a real MMTk collection (the stock major cycle is gone). */
+  /* MMTk owns the heap: run a real MMTk collection (the stock major cycle is
+     gone). */
   (void)force_compaction;
   caml_mmtk_collect();
   caml_result result = caml_process_pending_actions_res();

@@ -1,18 +1,26 @@
 #**************************************************************************
 #*                                                                        *
-#*                     MMTk in-tree binding build glue                    *
+#*                                 OCaml                                  *
+#*                                                                        *
+#*             KC Sivaramakrishnan, FP Launchpad, IIT Madras              *
+#*                                                                        *
+#*   Copyright 2026 FP Launchpad, IIT Madras                              *
+#*                                                                        *
+#*   All rights reserved.  This file is distributed under the terms of    *
+#*   the GNU Lesser General Public License version 2.1, with the          *
+#*   special exception on linking described in the file LICENSE.          *
 #*                                                                        *
 #**************************************************************************
 
-# Build glue for the in-tree MMTk binding (gc/mmtk). The binding is a Rust
-# Cargo workspace producing a staticlib (libmmtk_ocaml.a). MMTk is the always-on
+# Build glue for the in-tree MMTk binding (gc/mmtk). The binding is a Rust Cargo
+# workspace producing a staticlib (libmmtk_ocaml.a). MMTk is the always-on
 # collector (M9). The staticlib's objects are bundled (MMTK_BUNDLE, below) into
 # the runtime static archives (lib{asm,caml}run*.a) that the compiler always
 # links, so the GC glue (mmtk_ocaml_*, referenced from runtime/mmtk.c) resolves
 # in every native and -custom bytecode program WITHOUT a bare "-lmmtk_ocaml" in
-# config's {bytecomp,native}_c_libraries. (The old "-lmmtk_ocaml" mechanism broke
-# third-party dune-configurator feature-probes that link via bare `cc` without
-# OCaml's -L<stdlib>; see GH#10 and configure.ac.)
+# config's {bytecomp,native}_c_libraries. (The old "-lmmtk_ocaml" mechanism
+# broke third-party dune-configurator feature-probes that link via bare `cc`
+# without OCaml's -L<stdlib>; see GH#10 and configure.ac.)
 #
 # This fragment is included by the top-level Makefile after Makefile.common.
 
@@ -31,12 +39,12 @@ else
   MMTK_NATIVE_LIBS = -ldl -lpthread -lm
 endif
 
-# Everything to append to a runtime-executable link line so the binding resolves.
-# Since GH#10 the staticlib's objects are bundled INTO the runtime archives (see
-# MMTK_BUNDLE below), so the runtime executables (ocamlrun*, which already link
-# lib{caml}run*.a) pull mmtk_ocaml_* from the archive — we must NOT re-add
-# $(MMTK_LIB) here or every symbol would be defined twice (duplicate-symbol link
-# error). Only MMTk's transitive system deps remain.
+# Everything to append to a runtime-executable link line so the binding
+# resolves. Since GH#10 the staticlib's objects are bundled INTO the runtime
+# archives (see MMTK_BUNDLE below), so the runtime executables (ocamlrun*, which
+# already link lib{caml}run*.a) pull mmtk_ocaml_* from the archive -- we must
+# NOT re-add $(MMTK_LIB) here or every symbol would be defined twice
+# (duplicate-symbol link error). Only MMTk's transitive system deps remain.
 MMTK_LINK = $(MMTK_NATIVE_LIBS)
 
 # Bundling the Rust staticlib into the runtime archives (GH#10).
@@ -49,20 +57,21 @@ MMTK_LINK = $(MMTK_NATIVE_LIBS)
 # which was unresolvable by third-party dune-configurator probes that link via
 # bare `cc` without OCaml's -L<stdlib> (GH#10). We keep the per-object structure
 # (we do NOT ld -r into one blob), so the linker still pulls only the objects a
-# program actually uses — no per-binary bloat.
+# program actually uses -- no per-binary bloat.
 #
 # Objects are staged once into $(MMTK_OBJS_DIR) (extracted from libmmtk_ocaml.a;
 # the 490 members have unique, non-colliding names that don't clash with the
 # runtime's own *.n.o/*.b.o), then appended to each archive with `ar r` and the
-# index rebuilt. RANLIB keeps macOS happy (GNU `ar r` already refreshes the index;
-# macOS `ar`'s does too, but an explicit ranlib is the portable belt-and-braces).
+# index rebuilt. RANLIB keeps macOS happy (GNU `ar r` already refreshes the
+# index; macOS `ar`'s does too, but an explicit ranlib is the portable
+# belt-and-braces).
 MMTK_OBJS_DIR = $(ROOTDIR)/runtime/mmtk_objs
 MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
 
 # Extract the staticlib's objects once. `ar x` writes them into CWD, so cd into
-# the staging dir; use the absolute archive path since $(MMTK_LIB) is $(ROOTDIR)-
-# relative ("./gc/mmtk/...") and would be wrong after the cd. The stamp tracks
-# freshness against $(MMTK_LIB).
+# the staging dir; use the absolute archive path since $(MMTK_LIB) is
+# $(ROOTDIR)- relative ("./gc/mmtk/...") and would be wrong after the cd. The
+# stamp tracks freshness against $(MMTK_LIB).
 $(MMTK_OBJS_STAMP): $(MMTK_LIB)
 	rm -rf $(MMTK_OBJS_DIR)
 	mkdir -p $(MMTK_OBJS_DIR)
@@ -79,18 +88,19 @@ $(ARCMD) r $(1) $(MMTK_OBJS_DIR)/*.o
 $(MMTK_RANLIB) $(1)
 endef
 
-# Strip the absolute build directory out of the staticlib's embedded DWARF.
-# The release profile keeps debug info (gc/mmtk/Cargo.toml: debug = true) for
-# gdb/lldb, but that bakes $(ROOTDIR) into libmmtk_ocaml.a — and, via the linker,
-# into every native executable that links it. That breaks the relocatability
-# check (testsuite/tools/testRelocation.ml), exactly as an un-prefix-mapped C
-# object would. This is the Rust equivalent of the C toolchain's
-# -fdebug-prefix-map (cc_has_debug_prefix_map): remap the build root to a
-# relative "." so the debug info stays useful but carries no build-dir path.
-# (The cargo registry paths under ~/.cargo are not the build root/prefix, so the
-# relocatability check ignores them; only the build root needs remapping.)
-# Cargo embeds *absolute* source paths in the DWARF, so the map source must be
-# the absolute build root ($(ROOTDIR) is relative — "." — at top level).
+# Strip the absolute build directory out of the staticlib's embedded DWARF. The
+# release profile keeps debug info (gc/mmtk/Cargo.toml: debug = true) for
+# gdb/lldb, but that bakes $(ROOTDIR) into libmmtk_ocaml.a -- and, via the
+# linker, into every native executable that links it. That breaks the
+# relocatability check (testsuite/tools/testRelocation.ml), exactly as an
+# un-prefix-mapped C object would. This is the Rust equivalent of the C
+# toolchain's -fdebug-prefix-map (cc_has_debug_prefix_map): remap the build root
+# to a relative "." so the debug info stays useful but carries no build-dir
+# path. (The cargo registry paths under ~/.cargo are not the build root/prefix,
+# so the relocatability check ignores them; only the build root needs
+# remapping.) Cargo embeds *absolute* source paths in the DWARF, so the map
+# source must be the absolute build root ($(ROOTDIR) is relative -- "." -- at
+# top level).
 MMTK_RUSTFLAGS = --remap-path-prefix=$(abspath $(ROOTDIR))=.
 
 # Build the staticlib via Cargo. Declared PHONY so Cargo's own incremental

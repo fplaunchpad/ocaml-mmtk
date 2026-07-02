@@ -1,4 +1,4 @@
-(* MMTk DISABLED: multi-threaded-runtime gdb artifact: gdb enumerates MMTk's 28 GC worker threads and uses the multi-thread "Thread N hit Breakpoint" format vs the single-threaded reference; all breakpoints hit correctly [infra-artifact]. *)
+(* MMTk DISABLED: gdb prints the multi-thread breakpoint format (MMTk GC workers) vs 1-thread reference [infra-artifact]. *)
 
    linux;
    not-clang; (* Skip, clang is tested on macOS *)

@@ -235,16 +235,17 @@ CAMLprim value caml_uniform_array_make(value len, value init)
   }
   else if (size > Max_wosize) caml_invalid_argument("Array.make");
   else {
-    /* Large array: [res] is a mature/LOS block while [init] may be an MMTk-nursery
-       object, so [res[i] = init] creates a mature->nursery edge. Under always-on
-       MMTk [Is_young] is always false (the stock minor heap is gone), so we cannot
-       use it to argue the barrier away — we must record the edge in MMTk's
-       remembered set for generational plans. Use [caml_initialize] (a plain store
-       plus [caml_mmtk_region_barrier], a no-op for non-generational plans), exactly
-       as the other large-allocation fill paths do (caml_array_concat, caml_obj_dup).
-       (This was a latent missing-barrier bug under always-on MMTk; it is NOT the
-       open StickyImmix moving-GC crash, which persists with this fixed — see
-       gc/mmtk/NOTES.md.) */
+    /* Large array: [res] is a mature/LOS block while [init] may be an
+       MMTk-nursery object, so [res[i] = init] creates a mature->nursery edge.
+       Under always-on MMTk [Is_young] is always false (the stock minor heap is
+       gone), so we cannot use it to argue the barrier away -- we must record
+       the edge in MMTk's remembered set for generational plans. Use
+       [caml_initialize] (a plain store plus [caml_mmtk_region_barrier], a no-op
+       for non-generational plans), exactly as the other large-allocation fill
+       paths do (caml_array_concat, caml_obj_dup). (This was a latent
+       missing-barrier bug under always-on MMTk; it is NOT the open StickyImmix
+       moving-GC crash, which persists with this fixed -- see gc/mmtk/NOTES.md.)
+       */
     res = caml_alloc_shr(size, 0);
     for (mlsize_t i = 0; i < size; i++)
       caml_initialize(&Field(res, i), init);
@@ -754,18 +755,20 @@ CAMLprim value caml_uniform_array_fill(
      implementation of that function for a description of GC
      invariants we need to enforce.*/
   fp = &Field(array, ofs);
-  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the OLD
-     elements BEFORE overwriting them, so concurrent marking still reaches objects
-     reachable only through the edges this fill deletes. Must precede the fill loop
-     (post-fill the old referents are gone). Self-gated; no-op for other plans.
-     Both runtimes reach this barrier: Array.fill is the C primitive caml_array_fill
-     (stdlib/array.ml: external "caml_array_fill", NOT a %-builtin), so native code
-     also calls in here -- there is no inlined array-fill fast path to bypass it. */
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the
+     OLD elements BEFORE overwriting them, so concurrent marking still reaches
+     objects reachable only through the edges this fill deletes. Must precede
+     the fill loop (post-fill the old referents are gone). Self-gated; no-op for
+     other plans. Both runtimes reach this barrier: Array.fill is the C
+     primitive caml_array_fill (stdlib/array.ml: external "caml_array_fill", NOT
+     a %-builtin), so native code also calls in here -- there is no inlined
+     array-fill fast path to bypass it. */
   caml_mmtk_satb_barrier(fp, len);
-  /* MMTk owns the heap: fill the range, then (bytecode) remember it via the MMTk
-     region barrier for generational plans (no-op otherwise). OCaml's stock
+  /* MMTk owns the heap: fill the range, then (bytecode) remember it via the
+     MMTk region barrier for generational plans (no-op otherwise). OCaml's stock
      remembered-set / SATB fill is bypassed. Native takes no barrier here (see
-     write_barrier — a gap for native StickyImmix, fine for the default Immix). */
+     write_barrier -- a gap for native StickyImmix, fine for the default Immix).
+     */
   for (intnat i = 0; i < len; i++) fp[i] = val;
 #ifndef NATIVE_CODE
   caml_mmtk_region_barrier(fp, len);

@@ -9,7 +9,7 @@
    inert and MMTk's heap trigger is driven by Immix occupancy, not by custom-block
    dependent memory, so this allocation pattern triggers no MMTk collections and
    the test reports "Not enough GC cycles: 0, 0, 0". Gc.major/full_major DO force a
-   real MMTk collection (the count rises by one each) — this test simply never
+   real MMTk collection (the count rises by one each) -- this test simply never
    calls them in the loop and relies on automatic dependent-memory pacing MMTk
    does not provide. Re-enable only if MMTk grows custom-block dependent-memory
    accounting that paces collections. *)

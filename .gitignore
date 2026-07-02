@@ -338,8 +338,8 @@ META
 /yacc/version.h
 /yacc/.gdb_history
 
-# ── mmtk-ocaml fork additions ──────────────────────────────────────────────
-# Reference/study material only — never committed (see ONBOARDING / fork-handoff.md)
+# -- mmtk-ocaml fork additions -- Reference/study material only -- never
+# committed (see ONBOARDING / fork-handoff.md)
 /_references/
 # Rust build output for the in-tree MMTk binding (Cargo.lock IS committed for
 # reproducible distributable builds)

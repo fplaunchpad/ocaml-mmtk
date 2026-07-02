@@ -19,16 +19,18 @@ set -o pipefail
 [ -z "$*" ] && { echo "Usage: $0 libfoo.a" 1>&2; exit 2; }
 
 # mmtk-ocaml: the runtime archives now bundle the always-on MMTk staticlib's
-# Rust objects (Makefile.mmtk), which are emitted by the LLVM that ships with the
-# pinned Rust toolchain. On macOS the Xcode/Command-Line-Tools `nm` (Apple LLVM)
-# is OLDER than that LLVM and aborts on the Rust objects with
+# Rust objects (Makefile.mmtk), which are emitted by the LLVM that ships
+# with the pinned Rust toolchain. On macOS the Xcode/Command-Line-Tools
+# `nm` (Apple LLVM) is OLDER than that LLVM and aborts on the Rust objects
+# with
 #   nm: error: ...rcgu.o: Unknown attribute kind (NNN)
 #       (Producer: 'LLVMXX-rust-...' Reader: 'LLVM APPLE_...')
-# returning non-zero, which (via `set -o pipefail`) fails this whole check even
-# though every *.rcgu.o / compiler-builtins member is meant to be skipped below.
+# returning non-zero, which (via `set -o pipefail`) fails this whole check
+# even though every *.rcgu.o / compiler-builtins member is meant to be
+# skipped below.
 # Allow the caller to point at a version-matched nm (e.g. the `llvm-nm` from
-# `rustup component add llvm-tools`, which matches the toolchain that built the
-# objects) via $NM. Defaults to `nm`, so Linux/GNU-binutils behaviour is unchanged.
+# `rustup component add llvm-tools`, which matches the toolchain that built
+# the objects) via $NM. Defaults to `nm`; Linux/GNU-binutils is unchanged.
 "${NM:-nm}" -A -P "$@" | LC_ALL=C awk '
 # ignore caml_foo, camlFoo_bar, _caml_foo, _camlFoo_bar
 $2 ~ /^(\.refptr\.)?(_?__emutls_v\.)?(_?caml[_A-Z])/ { next }
@@ -38,10 +40,11 @@ $2 ~ /^(\.refptr\.)?(_?re_)/ { next }
 $2 ~ /^(\.refptr\.)?(environ)/ { next }
 # ignore symbols pulled in by SHGetKnownFolderPath
 $2 ~ /^\.refptr\.FOLDERID_[a-zA-Z]+/ { next }
-# mmtk-ocaml: the always-on MMTk staticlib (libmmtk_ocaml.a) is bundled object-by
-# -object into the runtime archives (Makefile.mmtk), so they carry thousands of
-# unprefixed Rust/std/compiler-builtins symbols. Skip those members: Rust codegen
-# -unit objects end in .rcgu.o, and the bare compiler-builtins asm objects are
+# mmtk-ocaml: the always-on MMTk staticlib (libmmtk_ocaml.a) is bundled
+# object-by-object into the runtime archives (Makefile.mmtk), so they carry
+# thousands of unprefixed Rust/std/compiler-builtins symbols. Skip those
+# members: Rust codegen-unit objects end in .rcgu.o, and the bare
+# compiler-builtins asm objects are
 # named <hash>-<name>.o. $1 is the nm -A "archive.a[member.o]:" field.
 $1 ~ /\.rcgu\.o\]:$/ { next }
 $1 ~ /\[[0-9a-f]+-[A-Za-z0-9_]+\.o\]:$/ { next }

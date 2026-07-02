@@ -75,9 +75,10 @@ typedef int st_retcode;
 
 /* Under always-on MMTk the per-domain backup thread has been retired (MMTk's
    stop_all_mutators is the sole all-domains rendezvous; a thread that releases
-   the domain lock is removed from the RUNNING set and not awaited), so acquiring
-   and releasing the domain lock is all these need to do. The
-   other_threads_waiting argument is unused now but kept for the masterlock ABI. */
+   the domain lock is removed from the RUNNING set and not awaited), so
+   acquiring and releasing the domain lock is all these need to do. The
+   other_threads_waiting argument is unused now but kept for the masterlock ABI.
+   */
 static void st_bt_lock_acquire(void) {
   caml_acquire_domain_lock();
   return;
@@ -705,14 +706,14 @@ caml_thread_start(void * v)
 
   /* MMTk STW safety (GH#17 Bug B): we acquired the master lock and are about to
      run OCaml on this domain WITHOUT going through caml_leave_blocking_section,
-     so the domain is not in MMTk's RUNNING set. If another thread on this domain
-     blocked it (e.g. the spawning thread is in Thread.join), MMTk would see the
-     domain as safe-stopped and scan THIS thread's live, still-mutating stack —
-     reading mutator-written words (e.g. tagged immediates) as return addresses,
-     so caml_find_frame_descr returns NULL (fiber.c CAMLassert(d) in debug; a
-     NULL frame_descr deref / SIGSEGV in release). Mark the domain RUNNING (and
-     cooperatively park if a collection is already in progress) before any OCaml
-     runs, mirroring what caml_leave_blocking_section does via
+     so the domain is not in MMTk's RUNNING set. If another thread on this
+     domain blocked it (e.g. the spawning thread is in Thread.join), MMTk would
+     see the domain as safe-stopped and scan THIS thread's live, still-mutating
+     stack -- reading mutator-written words (e.g. tagged immediates) as return
+     addresses, so caml_find_frame_descr returns NULL (fiber.c CAMLassert(d) in
+     debug; a NULL frame_descr deref / SIGSEGV in release). Mark the domain
+     RUNNING (and cooperatively park if a collection is already in progress)
+     before any OCaml runs, mirroring what caml_leave_blocking_section does via
      caml_mmtk_leave_blocking. */
   caml_mmtk_become_running((uintnat) Caml_state);
 
@@ -867,7 +868,7 @@ int caml_c_thread_register_in_domain_index(uintnat domain_index,
 
   thread_init_current(th);
 
-  /* MMTk STW safety (GH#17 Bug B): same gap as caml_thread_start — we hold the
+  /* MMTk STW safety (GH#17 Bug B): same gap as caml_thread_start -- we hold the
      master lock and are about to run/allocate OCaml without having gone through
      caml_leave_blocking_section, so the domain is not in MMTk's RUNNING set.
      Mark it RUNNING before the allocation below so the STW protocol cannot scan

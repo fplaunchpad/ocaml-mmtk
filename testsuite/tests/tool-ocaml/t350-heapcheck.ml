@@ -1,4 +1,4 @@
-(* MMTk DISABLED: stock Gc.stat + weak sync-timing under the bytecode interpreter; relies on stock Gc.stat counters and synchronous weak clearing on Gc.full_major [stock-counter]. *)
+(* MMTk DISABLED: relies on stock Gc.stat counters and synchronous weak clearing on Gc.full_major [stock-counter]. *)
 
 open Lib;;
 ignore (Gc.stat ());

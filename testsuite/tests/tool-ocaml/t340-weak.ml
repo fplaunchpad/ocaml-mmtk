@@ -1,4 +1,4 @@
-(* MMTk DISABLED: weak sync-clearing timing: dead weak-array keys are not cleared on the test's Gc.full_major under MMTk (verified: reachable keys survive 20/20; dead keys clear only under later allocation pressure) -> raises Not_found [semantic-timing]. *)
+(* MMTk DISABLED: dead weak keys not cleared on Gc.full_major (deferred to allocation pressure) -> Not_found [semantic-timing]. *)
 
 open Lib;;
 let x = Array.make 20 "" in

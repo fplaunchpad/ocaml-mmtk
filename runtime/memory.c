@@ -187,22 +187,24 @@ Caml_inline void write_barrier(
     CAMLassert (Is_block(obj)); */
   (void)old_val; (void)new_val;
 
-  /* MMTk owns the heap, so OCaml's stock write barrier (the minor remembered-set
-     update and the major SATB deletion barrier caml_darken) is gone — its GC state
-     is bypassed. Both the bytecode and native runtimes record the modified slot via
-     MMTk's region barrier instead: needed by the generational plans
-     (GenImmix/StickyImmix), a no-op for NoGC/MarkSweep/Immix. Op_val(obj)+field is
-     the slot address (for caml_modify, field is 0). The barrier itself no-ops for
-     non-generational plans and before init (it checks caml_mmtk_generational, 0
-     until a generational plan binds the mutator), so on the default native Immix
-     fast path the cost is a single predictable branch. */
+  /* MMTk owns the heap, so OCaml's stock write barrier (the minor
+     remembered-set update and the major SATB deletion barrier caml_darken) is
+     gone -- its GC state is bypassed. Both the bytecode and native runtimes
+     record the modified slot via MMTk's region barrier instead: needed by the
+     generational plans (GenImmix/StickyImmix), a no-op for
+     NoGC/MarkSweep/Immix. Op_val(obj)+field is the slot address (for
+     caml_modify, field is 0). The barrier itself no-ops for non-generational
+     plans and before init (it checks caml_mmtk_generational, 0 until a
+     generational plan binds the mutator), so on the default native Immix fast
+     path the cost is a single predictable branch. */
   caml_mmtk_region_barrier(Op_val(obj) + field, 1);
 
-  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix). write_barrier
-     runs BEFORE the actual store (see caml_modify), so the slot still holds the OLD
-     referent here: grey it so concurrent marking does not lose an object reachable
-     only through the edge we are about to overwrite. Self-gated; no-op for every
-     non-concurrent plan. Op_val(obj)+field is the slot (field==0 for caml_modify). */
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix).
+     write_barrier runs BEFORE the actual store (see caml_modify), so the slot
+     still holds the OLD referent here: grey it so concurrent marking does not
+     lose an object reachable only through the edge we are about to overwrite.
+     Self-gated; no-op for every non-concurrent plan. Op_val(obj)+field is the
+     slot (field==0 for caml_modify). */
   caml_mmtk_satb_barrier(Op_val(obj) + field, 1);
 }
 
@@ -216,7 +218,8 @@ CAMLexport CAMLweakdef void caml_modify (volatile value *fp, value val)
   caml_tsan_func_entry(__builtin_return_address(0));
 #endif
 
-  extern unsigned long caml_e1_modify;  /* E1: pointer-mutation counter (runtime/mmtk.c) */
+  /* E1: pointer-mutation counter (runtime/mmtk.c) */
+  extern unsigned long caml_e1_modify;
   caml_e1_modify++;
   write_barrier((value)fp, 0, *fp, val);
 
@@ -319,21 +322,24 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
      "unzeroed-minor-heap discipline" guarantees every field is written before
      the next GC-observable safepoint, so the GC never reads an uninitialised
      field. But that means a recycled Immix line legitimately still holds a
-     *stale pointer* from a previously-swept object at the moment caml_initialize
-     overwrites it. The slot is never read before the `*fp = val` below, so this
-     is correct — only the stock debug invariant ("prev value is a non-pointer
-     canary") no longer applies. Hence we cannot assert anything about *fp here.
-     (The earlier `|| *fp == 0` relaxation was wrong: it assumed zero-fill, which
-     only MarkCompact uses; under the no-zero plans *fp is an arbitrary stale
-     word, so the previous-value check must be dropped entirely. GH#17.) */
+     *stale pointer* from a previously-swept object at the moment
+     caml_initialize overwrites it. The slot is never read before the `*fp =
+     val` below, so this is correct -- only the stock debug invariant ("prev
+     value is a non-pointer canary") no longer applies. Hence we cannot assert
+     anything about *fp here. (The earlier `|| *fp == 0` relaxation was wrong:
+     it assumed zero-fill, which only MarkCompact uses; under the no-zero plans
+     *fp is an arbitrary stale word, so the previous-value check must be dropped
+     entirely. GH#17.) */
 #endif
-  extern unsigned long caml_e1_init;  /* E1: mature-init-write counter (runtime/mmtk.c) */
+  /* E1: mature-init-write counter (runtime/mmtk.c) */
+  extern unsigned long caml_e1_init;
   caml_e1_init++;
   *fp = val;
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
-     generational plans (no-op otherwise). Replaces the stock minor remembered-set
-     update, which is dead under always-on MMTk (major_ref is never consumed).
-     Both the bytecode and native runtimes record it (see write_barrier). */
+     generational plans (no-op otherwise). Replaces the stock minor
+     remembered-set update, which is dead under always-on MMTk (major_ref is
+     never consumed). Both the bytecode and native runtimes record it (see
+     write_barrier). */
   caml_mmtk_region_barrier(fp, 1);
 }
 
@@ -358,13 +364,14 @@ CAMLprim value caml_atomic_exchange_field (value obj, value vfield, value v)
 {
   value ret;
   intnat field = Long_val(vfield);
-  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the OLD
-     referent BEFORE the store, while the slot still holds it. Unlike caml_modify,
-     the atomic store below happens BEFORE write_barrier runs, so write_barrier's
-     own (slot-reading) SATB call would see the NEW value and miss the deleted edge.
-     Grey it here instead. Self-gated; no-op for every non-concurrent plan. The slot
-     read is conservative under a concurrent store from another domain (greying a
-     stale referent is harmless), and a single Atomic field is the sync point. */
+  /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the
+     OLD referent BEFORE the store, while the slot still holds it. Unlike
+     caml_modify, the atomic store below happens BEFORE write_barrier runs, so
+     write_barrier's own (slot-reading) SATB call would see the NEW value and
+     miss the deleted edge. Grey it here instead. Self-gated; no-op for every
+     non-concurrent plan. The slot read is conservative under a concurrent store
+     from another domain (greying a stale referent is harmless), and a single
+     Atomic field is the sync point. */
   caml_mmtk_satb_barrier(&Field(obj, field), 1);
   if (caml_domain_alone()) {
     ret = Field(obj, field);
@@ -391,10 +398,11 @@ CAMLprim value caml_atomic_cas_field (
     /* non-atomic CAS since only this thread can access the object */
     volatile value* p = &Field(obj, field);
     if (*p == oldval) {
-      /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey the
-         OLD referent (still in the slot) BEFORE the store; write_barrier below runs
-         AFTER the store and would miss it. Self-gated; no-op off the concurrent
-         plan. Only on a successful CAS -- a failed CAS deletes no edge. */
+      /* SATB deletion barrier for the concurrent plan (ConcurrentImmix): grey
+         the OLD referent (still in the slot) BEFORE the store; write_barrier
+         below runs AFTER the store and would miss it. Self-gated; no-op off the
+         concurrent plan. Only on a successful CAS -- a failed CAS deletes no
+         edge. */
       caml_mmtk_satb_barrier(p, 1);
       *p = newval;
       write_barrier(obj, field, oldval, newval);
@@ -403,11 +411,12 @@ CAMLprim value caml_atomic_cas_field (
       return Val_false;
     }
   } else {
-    /* need a real CAS. Snapshot the old referent for the concurrent SATB barrier
-       BEFORE the store; the atomic exchange below stores before write_barrier runs,
-       so write_barrier's slot-reading SATB call would see newval and miss the
-       deleted edge. The slot read is conservative under a concurrent store (greying
-       a stale referent is harmless). Self-gated; no-op off the concurrent plan. */
+    /* need a real CAS. Snapshot the old referent for the concurrent SATB
+       barrier BEFORE the store; the atomic exchange below stores before
+       write_barrier runs, so write_barrier's slot-reading SATB call would see
+       newval and miss the deleted edge. The slot read is conservative under a
+       concurrent store (greying a stale referent is harmless). Self-gated;
+       no-op off the concurrent plan. */
     atomic_value* p = &Op_atomic_val(obj)[field];
     caml_mmtk_satb_barrier((volatile value *)p, 1);
     int cas_ret = atomic_compare_exchange_strong(p, &oldval, newval);

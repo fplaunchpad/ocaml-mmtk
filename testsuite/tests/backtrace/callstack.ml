@@ -1,4 +1,4 @@
-(* MMTk DISABLED: finaliser calling-context: the finalizer-invoked backtrace differs because MMTk runs the finaliser from a different stack site than stock's synchronous Gc.full_major point [semantic-timing]. *)
+(* MMTk DISABLED: finaliser backtrace differs (runs from another stack site than stock's sync point) [semantic-timing]. *)
 (* Blank lines added here to preserve locations. *)
 
 

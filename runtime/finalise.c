@@ -49,22 +49,22 @@ static void alloc_todo (caml_domain_state* d, int size)
   }
 }
 
-/* ── M6: MMTk-native finaliser processing (experimental, MMTK_WEAK_REFS=1) ─────
-   The stock caml_final_update_first/last run inside the stock major cycle, using
-   the stock mark bits (is_unmarked) + caml_darken. Under MMTk we drive the same
-   logic from the binding's Scanning::process_weak_refs using MMTk reachability
-   (is_reachable), relocation (forward) and retention (retain). Differences from
-   the stock path:
+/* -- M6: MMTk-native finaliser processing (experimental, MMTK_WEAK_REFS=1)
+   ----- The stock caml_final_update_first/last run inside the stock major
+   cycle, using the stock mark bits (is_unmarked) + caml_darken. Under MMTk we
+   drive the same logic from the binding's Scanning::process_weak_refs using
+   MMTk reachability (is_reachable), relocation (forward) and retention
+   (retain). Differences from the stock path:
    - No minor/major split under MMTk, so we scan the WHOLE [0, young) range and
      leave both old==young afterwards (every survivor is treated as "old").
    - In MMTk weak-refs mode the root scan reports finaliser *functions* (and the
      run-queue) as roots but NOT the table *values* (do_final_val=0), so a value
      that became unreachable is detectable here. Surviving values are therefore
-     not roots, so we must forward them ourselves (caml_mmtk_final_forward).
-   See gc/mmtk/NOTES.md (M6 design). The callback typedefs are in caml/mmtk.h. */
+     not roots, so we must forward them ourselves (caml_mmtk_final_forward). See
+     gc/mmtk/NOTES.md (M6 design). The callback typedefs are in caml/mmtk.h. */
 
-/* Normalise a possibly-infix value to its block base (is_reachable/forward expect
-   an object start). Finaliser values are rarely infix, but be safe. */
+/* Normalise a possibly-infix value to its block base (is_reachable/forward
+   expect an object start). Finaliser values are rarely infix, but be safe. */
 Caml_inline value caml_mmtk_final_base(value v)
 {
   if (Is_block(v) && Tag_val(v) == Infix_tag) v -= Infix_offset_val(v);
@@ -72,13 +72,15 @@ Caml_inline value caml_mmtk_final_base(value v)
 }
 
 /* Move now-unreachable values of [final] to the run queue. For the `first` set
-   (retain_value=1) the value is resurrected (retain) and passed to the finaliser;
-   for the `last` set (retain_value=0) it is queued as Val_unit and may die. The
-   table is compacted to its survivors. Returns the number of values retained
-   (non-zero only for the `first` set — that is "progress" for the caller's mark
-   fixpoint, since resurrecting a value extends the live closure). */
+   (retain_value=1) the value is resurrected (retain) and passed to the
+   finaliser; for the `last` set (retain_value=0) it is queued as Val_unit and
+   may die. The table is compacted to its survivors. Returns the number of
+   values retained (non-zero only for the `first` set -- that is "progress" for
+   the caller's mark fixpoint, since resurrecting a value extends the live
+   closure). */
 static uintnat mmtk_final_update_one(caml_domain_state *d,
-                                     struct finalisable *final, int retain_value,
+                                     struct finalisable *final,
+                                     int retain_value,
                                      caml_mmtk_ephe_reachable_fn is_reachable,
                                      caml_mmtk_ephe_retain_fn retain, void *ctx)
 {
@@ -112,7 +114,7 @@ static uintnat mmtk_final_update_one(caml_domain_state *d,
     for (uintnat i = 0; i < k; i++) {
       /* Resurrect the value (and its closure) so it is valid when the finaliser
          runs; record its (possibly relocated) address. May already be live via
-         another table entry — retain is idempotent. */
+         another table entry -- retain is idempotent. */
       value v = fi->todo_tail->item[i].val;
       value base = caml_mmtk_final_base(v);
       fi->todo_tail->item[i].val = retain(ctx, base) + (v - base);
@@ -123,8 +125,8 @@ static uintnat mmtk_final_update_one(caml_domain_state *d,
 
 /* First-set update (Gc.finalise): retain dead values + queue them. Returns 1 if
    any value was retained (caller re-runs the mark fixpoint). Run only after the
-   ephemeron mark fixpoint converges, so a value reachable via a live ephemeron's
-   retained data is seen as live and not prematurely finalised. */
+   ephemeron mark fixpoint converges, so a value reachable via a live
+   ephemeron's retained data is seen as live and not prematurely finalised. */
 int caml_mmtk_final_update_first(uintptr_t domain_addr,
                                  caml_mmtk_ephe_reachable_fn is_reachable,
                                  caml_mmtk_ephe_retain_fn retain, void *ctx)
@@ -135,7 +137,7 @@ int caml_mmtk_final_update_first(uintptr_t domain_addr,
                                is_reachable, retain, ctx) > 0;
 }
 
-/* Cleanup pass (after the mark fixpoint): last-set update (Gc.finalise_last —
+/* Cleanup pass (after the mark fixpoint): last-set update (Gc.finalise_last --
    queue dead values as Val_unit, no resurrection) then forward every surviving
    table value, since survivors are not roots in weak-refs mode. */
 void caml_mmtk_final_cleanup(uintptr_t domain_addr,
@@ -171,7 +173,7 @@ caml_result caml_final_do_calls_res(void)
   struct caml_final_info *fi = Caml_state->final_info;
 
   if (fi->running_finalisation_function) return Result_unit;
-  /* Drain MMTk's custom-block finalizer queue (Custom_operations.finalize) — a
+  /* Drain MMTk's custom-block finalizer queue (Custom_operations.finalize) -- a
      no-op unless MMTK_WEAK_REFS is on. Independent of the OCaml finaliser table
      below. */
   caml_mmtk_run_custom_finalizers();

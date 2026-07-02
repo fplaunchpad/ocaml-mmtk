@@ -1,4 +1,4 @@
-(* MMTk DISABLED: runtime_events GC-event counters (minor/major collection events) are not emitted under MMTk; runtime_events GC-tracing unsupported [unsupported]. *)
+(* MMTk DISABLED: runtime_events GC events (minor/major) not emitted under MMTk [unsupported]. *)
 
 external start_runtime_events : unit -> unit = "start_runtime_events"
 external get_event_counts : unit -> (int * int) = "get_event_counts"

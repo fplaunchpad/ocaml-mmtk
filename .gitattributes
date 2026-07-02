@@ -256,5 +256,8 @@ testsuite/tests/parsetree/locations_test.ml text eol=lf
 # comments) plus Cargo/TOML metadata — OCaml's 80-column/ASCII/header rules do
 # not apply to it. The mmtk-core fork is a git submodule (never checked here).
 gc/mmtk/**/*.rs   typo.long-line=may typo.very-long-line=may typo.non-ascii=may typo.missing-header=may
+gc/mmtk/**/*.h    typo.long-line=may typo.very-long-line=may typo.non-ascii=may typo.missing-header=may
+gc/mmtk/**/*.ml   typo.missing-header=may
+gc/mmtk/**/*.c    typo.missing-header=may
 gc/mmtk/**/*.toml typo.long-line=may typo.non-ascii=may typo.missing-header=may
 gc/mmtk/**/*.lock typo.long-line=may typo.very-long-line=may typo.non-ascii=may typo.missing-header=may

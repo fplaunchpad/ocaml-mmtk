@@ -1,4 +1,4 @@
-(* MMTk DISABLED: finaliser sync-timing vs C allocation: the finaliser fires at a different poll point under MMTk than the test's stock expectation; #12c alloc_async known gap [semantic-timing]. *)
+(* MMTk DISABLED: finaliser fires at a different poll point than the stock expectation (12c alloc_async gap) [semantic-timing]. *)
 
 external test : int ref -> unit = "stub"
 external print_status : string -> int -> unit = "print_status_caml" [@@noalloc]

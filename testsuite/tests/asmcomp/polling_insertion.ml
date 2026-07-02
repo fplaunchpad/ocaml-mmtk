@@ -1,4 +1,4 @@
-(* MMTk DISABLED: stock-GC minor_collections counter: the test asserts minor_gcs() (the stock minor_collections stat) increments at specific poll points; MMTk does not increment that counter the same way [stock-counter]. *)
+(* MMTk DISABLED: asserts the stock minor_collections counter increments at specific poll points [stock-counter]. *)
 
 (* This set of tests examine poll insertion behaviour. We do this by requesting
    and checking the number of minor collections at various points to determine

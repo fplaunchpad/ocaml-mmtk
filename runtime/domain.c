@@ -327,8 +327,8 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   block (an Immix nursery block) that [caml_mmtk_refill_tlab] hands the domain;
   [young_start/young_end/young_ptr] alias that MMTk-owned block. Bytecode
   allocates straight into MMTk. Nothing is allocated in a reserved
-  [caml_minor_heaps_start, caml_minor_heaps_end) range — that range and its
-  per-domain segments no longer exist — so [Is_young] is always false
+  [caml_minor_heaps_start, caml_minor_heaps_end) range -- that range and its
+  per-domain segments no longer exist -- so [Is_young] is always false
   (address_class.h) and the reservation machinery
   (reserve/unreserve/resize_minor_heaps_reservation, the per-domain
   minor_heap_reservation_{start,end} fields, the [caml_mem_map]/[caml_mem_unmap]
@@ -340,7 +340,7 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   raises it with a plain store; no memory is reserved and no STW is taken.
 */
 
-/* Size of the (nominal) minor heap, per domain — a scalar cap; see above. */
+/* Size of the (nominal) minor heap, per domain -- a scalar cap; see above. */
 uintnat caml_minor_heap_max_wsz;
 
 Caml_inline void check_minor_heap(void) {
@@ -354,14 +354,14 @@ Caml_inline void check_minor_heap(void) {
       domain_state->young_end,
       domain_state->minor_heap_wsz);
 
-  /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix nursery),
-     not the stock per-domain minor arena. caml_mmtk_refill_tlab repoints
-     young_start/young_end/young_ptr at the MMTk-owned block, and after a minor
-     collection young_ptr is reset to young_start (not young_end). So the stock
-     "minor heap fully drained" invariant (young_ptr == young_end) does not hold
-     here, and there is no longer any reservation to bounds-check against. The
-     stock asserts are gone; the caml_gc_log above is kept for diagnostics.
-     (DEBUG-only; release and all-plans behaviour unchanged.) */
+  /* Under always-on MMTk the "minor heap" is an MMTk TLAB block (Immix
+     nursery), not the stock per-domain minor arena. caml_mmtk_refill_tlab
+     repoints young_start/young_end/young_ptr at the MMTk-owned block, and after
+     a minor collection young_ptr is reset to young_start (not young_end). So
+     the stock "minor heap fully drained" invariant (young_ptr == young_end)
+     does not hold here, and there is no longer any reservation to bounds-check
+     against. The stock asserts are gone; the caml_gc_log above is kept for
+     diagnostics. (DEBUG-only; release and all-plans behaviour unchanged.) */
 }
 
 
@@ -383,7 +383,8 @@ void caml_update_minor_heap_max(uintnat requested_wsz) {
      all-domains STW (stw_resize_minor_heaps_reservation) only emptied the minor
      heaps (GC-dead: MMTk's TLAB owns the nursery) and stored the cap under the
      final-domain barrier, so the lone observable effect is this store. No STW
-     needed; the former while-loop only retried on losing the STW leader race. */
+     needed; the former while-loop only retried on losing the STW leader race.
+     */
   if (requested_wsz > caml_minor_heap_max_wsz) {
     caml_minor_heap_max_wsz = requested_wsz;
   }
@@ -531,12 +532,13 @@ static void domain_create(uintnat initial_minor_heap_wsize,
     goto init_major_gc_failure;
   }
 
-  /* No stock minor-heap arena under always-on MMTk: the minor heap is an MMTk TLAB
-     block, set up by caml_mmtk_domain_init (below) via caml_mmtk_refill_tlab, which
-     points young_start/end/ptr at the MMTk-owned block. We only record the nominal
-     minor-heap size (reported by Gc.stat/Gc.get + used to size the minor tables);
-     young_* stay NULL until the refill, and nothing allocates an OCaml value in
-     between (the setup below is all caml_stat/mmap, no minor-heap allocation). */
+  /* No stock minor-heap arena under always-on MMTk: the minor heap is an MMTk
+     TLAB block, set up by caml_mmtk_domain_init (below) via
+     caml_mmtk_refill_tlab, which points young_start/end/ptr at the MMTk-owned
+     block. We only record the nominal minor-heap size (reported by
+     Gc.stat/Gc.get + used to size the minor tables); young_* stay NULL until
+     the refill, and nothing allocates an OCaml value in between (the setup
+     below is all caml_stat/mmap, no minor-heap allocation). */
   domain_state->minor_heap_wsz =
     caml_norm_minor_heap_size(initial_minor_heap_wsize);
 
@@ -719,14 +721,14 @@ enum domain_status { Dom_starting, Dom_started, Dom_failed };
 struct domain_ml_values {
   value callback;
   value term_sync;
-  /* The domain's `Finished(...)` result, kept alive as a generational global root
-     from the moment it is built (sync_and_terminate) until ml_values is freed
-     (after the joiner has consumed it). Global roots are scanned by EVERY MMTk
-     collection in scan_vm_specific_roots -- unconditionally, independent of which
-     domain triggered the GC and of mutator-park timing -- so this both keeps the
-     result alive across the terminating domain's nursery teardown AND lets the
-     coalescing-prone caml_mmtk_collect() promote it reliably (issue #31 / GH#3).
-     Val_unit until set in sync_and_terminate. */
+  /* The domain's `Finished(...)` result, kept alive as a generational global
+     root from the moment it is built (sync_and_terminate) until ml_values is
+     freed (after the joiner has consumed it). Global roots are scanned by EVERY
+     MMTk collection in scan_vm_specific_roots -- unconditionally, independent
+     of which domain triggered the GC and of mutator-park timing -- so this both
+     keeps the result alive across the terminating domain's nursery teardown AND
+     lets the coalescing-prone caml_mmtk_collect() promote it reliably (issue
+     #31 / GH#3). Val_unit until set in sync_and_terminate. */
   value result;
 };
 
@@ -746,31 +748,31 @@ static void init_domain_ml_values(struct domain_ml_values* ml_values,
   caml_register_generational_global_root(&ml_values->result);
 }
 
-/* [retire_after_gc] must be true on the terminating path (domain_thread_func) and
-   false on the spawn-failure path (caml_domain_spawn). See the GH#15 Bug B note
-   below the root removals. */
+/* [retire_after_gc] must be true on the terminating path (domain_thread_func)
+   and false on the spawn-failure path (caml_domain_spawn). See the GH#15 Bug B
+   note below the root removals. */
 static void free_domain_ml_values(struct domain_ml_values* ml_values,
                                   bool retire_after_gc)
 {
   caml_remove_generational_global_root(&ml_values->callback);
   caml_remove_generational_global_root(&ml_values->term_sync);
   caml_remove_generational_global_root(&ml_values->result);
-  /* GH#15 Bug B (use-after-free of a global root racing the GC root scan).
-     On the terminating path this domain has ALREADY been MMTk-deregistered by
+  /* GH#15 Bug B (use-after-free of a global root racing the GC root scan). On
+     the terminating path this domain has ALREADY been MMTk-deregistered by
      caml_domain_terminate, so it now runs concurrently with collections. A GC
-     that started AFTER caml_domain_terminate's own wait_collection_done can have
-     snapshotted these two global-root slots (&callback / &term_sync) into a
-     ProcessEdges packet while iterating caml_global_roots_old. Freeing ml_values
-     now would let that worker later load a freed/reused slot and hand garbage to
-     trace_object -> "cannot trace object" panic. Having removed the roots above
-     (so no NEW collection can snapshot them), wait out any in-flight collection's
-     grace period before the free: an RCU-style retire, the same guarantee
-     caml_mmtk_domain_terminate gives the domain's own stack/roots.
-       The spawn-failure caller passes retire_after_gc=false: there the freeing
-     thread is the parent, a registered RUNNING mutator, which is stopped across
-     any collection and so cannot reach this free while a GC still holds the
-     snapshot (no UAF) — and a blocking wait on a running mutator could deadlock
-     against stop_all_mutators. */
+     that started AFTER caml_domain_terminate's own wait_collection_done can
+     have snapshotted these two global-root slots (&callback / &term_sync) into
+     a ProcessEdges packet while iterating caml_global_roots_old. Freeing
+     ml_values now would let that worker later load a freed/reused slot and hand
+     garbage to trace_object -> "cannot trace object" panic. Having removed the
+     roots above (so no NEW collection can snapshot them), wait out any
+     in-flight collection's grace period before the free: an RCU-style retire,
+     the same guarantee caml_mmtk_domain_terminate gives the domain's own
+     stack/roots. The spawn-failure caller passes retire_after_gc=false: there
+     the freeing thread is the parent, a registered RUNNING mutator, which is
+     stopped across any collection and so cannot reach this free while a GC
+     still holds the snapshot (no UAF) -- and a blocking wait on a running
+     mutator could deadlock against stop_all_mutators. */
   if (retire_after_gc)
     caml_mmtk_wait_collection_done();
   caml_stat_free(ml_values);
@@ -900,13 +902,14 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      domain's young TLAB region. Stock OCaml's domain-terminate minor collection
      (caml_empty_minor_heap_promote) used to oldify all young survivors into the
      major heap, so the result was stable before teardown. Under always-on MMTk
-     that routine is neutered to a bare `young_ptr = young_start` discard (it does
-     NOT promote — see runtime/minor_gc.c), so without help the result stays YOUNG
-     while it is published to the joiner and the domain proceeds to deregister and
-     tear down its young region. A collection on another domain landing in that
-     window relocates/reclaims the result's young block out from under the joiner,
-     which then dereferences a corrupted `Finished` chain -> SIGSEGV in
-     Domain.join (issue #31; intermittent, all moving Immix-family plans).
+     that routine is neutered to a bare `young_ptr = young_start` discard (it
+     does NOT promote -- see runtime/minor_gc.c), so without help the result
+     stays YOUNG while it is published to the joiner and the domain proceeds to
+     deregister and tear down its young region. A collection on another domain
+     landing in that window relocates/reclaims the result's young block out from
+     under the joiner, which then dereferences a corrupted `Finished` chain ->
+     SIGSEGV in Domain.join (issue #31; intermittent, all moving Immix-family
+     plans).
 
      Forcing a collection here, while the result is rooted and this domain is
      still a registered, running STW participant, traces the result into stable
@@ -914,57 +917,61 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      After this the result survives the deregister/teardown edge. A MINOR
      collection suffices: `v` is a global root (below), and nursery GCs scan and
      promote global-root targets. The previous whole-heap (exhaustive) collect
-     here was measured to be the dominant multi-domain scaling pathology — one
+     here was measured to be the dominant multi-domain scaling pathology -- one
      full STW GC per Domain termination, i.e. per spawn on spawn-per-round
      programs (SCALABILITY.md UPDATE 4/5). Self-gated: caml_mmtk_collect_minor
      is a no-op for NoGC / when MMTk cannot collect.
 
      ROOT THE RESULT AS A GLOBAL ROOT FIRST (issue #31 / GH#3). A single
-     caml_mmtk_collect() against a CAMLlocal-only `v` does NOT reliably promote it
-     under heavy multi-domain join: the user collection request COALESCES onto a
-     peer domain's in-flight GC (gc_trigger request_flag), and per-domain
-     (mutator-local) root scanning is subject to park timing -- an in-flight GC can
-     have already scanned this domain before we park into it, so caml_mmtk_collect()
-     returns without having promoted `v` (the ~9% SIGSEGV in Domain.join on a
-     28-core spawn/terminate+join storm). Publishing it into ml_values->result --
-     a *generational global root* -- changes that: global roots are scanned by
-     EVERY collection in scan_vm_specific_roots, unconditionally and independent of
-     park timing, so the collection that caml_mmtk_collect() waits out promotes the
-     result via that path. The global root is also kept registered until ml_values
-     is freed (after the joiner has consumed the result), so even in the residual
-     edge where the awaited collection had already passed its global-root scan
-     before we stored `v`, the result is never reclaimed by the nursery teardown:
-     it stays live until the next collection promotes it, and thereafter survives
-     reachably via term_sync->state. A naive collect-retry loop instead livelocks
-     here (every collect coalesces under sustained contention); the global root is
-     the correct, livelock-free fix. */
+     caml_mmtk_collect() against a CAMLlocal-only `v` does NOT reliably promote
+     it under heavy multi-domain join: the user collection request COALESCES
+     onto a peer domain's in-flight GC (gc_trigger request_flag), and per-domain
+     (mutator-local) root scanning is subject to park timing -- an in-flight GC
+     can have already scanned this domain before we park into it, so
+     caml_mmtk_collect() returns without having promoted `v` (the ~9% SIGSEGV in
+     Domain.join on a 28-core spawn/terminate+join storm). Publishing it into
+     ml_values->result -- a *generational global root* -- changes that: global
+     roots are scanned by EVERY collection in scan_vm_specific_roots,
+     unconditionally and independent of park timing, so the collection that
+     caml_mmtk_collect() waits out promotes the result via that path. The global
+     root is also kept registered until ml_values is freed (after the joiner has
+     consumed the result), so even in the residual edge where the awaited
+     collection had already passed its global-root scan before we stored `v`,
+     the result is never reclaimed by the nursery teardown: it stays live until
+     the next collection promotes it, and thereafter survives reachably via
+     term_sync->state. A naive collect-retry loop instead livelocks here (every
+     collect coalesces under sustained contention); the global root is the
+     correct, livelock-free fix. */
   caml_modify_generational_global_root(&ml_values->result, v);
-  /* LXR (issue #31): the tracing/generational promotion below does NOT save the result
-     under the reference-counting plan. LXR is non-generational, so caml_mmtk_is_young is
-     always 0 -- the retry loop is a dead no-op -- and the forced caml_mmtk_collect
-     coalesces onto a peer GC that already passed its global-root scan, so it never
-     promotes `v`. The result's clean nursery block (BlockState::Unallocated, all-RC-zero)
-     is then reclaimed by the RC nursery sweep and reused before the joiner dereferences
-     term_sync.state -> SIGSEGV in Domain.join (rr-confirmed). RC-pin the whole
-     Finished(Ok v) chain HERE, synchronously and independent of any collection: it gives
-     `v` and its transitive children RC >= 1 (sparing their blocks) and marks them mature.
-     A no-op on the tracing/generational plans, where the collect + global root below is
-     the load-bearing promotion. Do it BEFORE the collect so a peer GC that snapshots this
-     domain's roots sees a consistent, RC-pinned result. */
+  /* LXR (issue #31): the tracing/generational promotion below does NOT save the
+     result under the reference-counting plan. LXR is non-generational, so
+     caml_mmtk_is_young is always 0 -- the retry loop is a dead no-op -- and the
+     forced caml_mmtk_collect coalesces onto a peer GC that already passed its
+     global-root scan, so it never promotes `v`. The result's clean nursery
+     block (BlockState::Unallocated, all-RC-zero) is then reclaimed by the RC
+     nursery sweep and reused before the joiner dereferences term_sync.state ->
+     SIGSEGV in Domain.join (rr-confirmed). RC-pin the whole Finished(Ok v)
+     chain HERE, synchronously and independent of any collection: it gives `v`
+     and its transitive children RC >= 1 (sparing their blocks) and marks them
+     mature. A no-op on the tracing/generational plans, where the collect +
+     global root below is the load-bearing promotion. Do it BEFORE the collect
+     so a peer GC that snapshots this domain's roots sees a consistent,
+     RC-pinned result. */
   caml_mmtk_keep_alive(v);
   caml_mmtk_collect_minor();
   /* Confirm the result is actually out of the nursery before publishing. The
      first caml_mmtk_collect() can coalesce onto a peer GC that had already run
      its global-root scan before we stored `v`, returning without promoting it.
      Because `v` is now a GLOBAL root it is kept alive regardless (so this can
-     never livelock the way a CAMLlocal-only retry does -- every collection scans
-     global roots, so each iteration converges), but it may still be young; loop a
-     bounded number of fresh collects until it is promoted. After the first collect
-     returns the GC request flag is clear, so the next caml_mmtk_collect() schedules
-     a FRESH collection whose global-root scan sees `v`. The bound is a safety
-     valve only; in practice this exits in 0-1 extra iterations. caml_mmtk_is_young
-     is false for non-generational plans / NoGC, so the loop is a no-op there (the
-     Immix-family result is made live in place by the collect + global root). */
+     never livelock the way a CAMLlocal-only retry does -- every collection
+     scans global roots, so each iteration converges), but it may still be
+     young; loop a bounded number of fresh collects until it is promoted. After
+     the first collect returns the GC request flag is clear, so the next
+     caml_mmtk_collect() schedules a FRESH collection whose global-root scan
+     sees `v`. The bound is a safety valve only; in practice this exits in 0-1
+     extra iterations. caml_mmtk_is_young is false for non-generational plans /
+     NoGC, so the loop is a no-op there (the Immix-family result is made live in
+     place by the collect + global root). */
   {
     int tries = 0;
     while (caml_mmtk_is_young(ml_values->result) && tries++ < 1000)
@@ -1019,8 +1026,9 @@ domain_thread_func(void* v)
 
   /* The child is now about to run OCaml: mark it a must-stop MMTk participant.
      leave_blocking waits out any in-progress collection first, so we never flip
-     RUNNING while a collection is scanning this domain (see caml/mmtk.h). It was
-     born STOPPED at bind (caml_mmtk_domain_init); this is its first RUNNING edge. */
+     RUNNING while a collection is scanning this domain (see caml/mmtk.h). It
+     was born STOPPED at bind (caml_mmtk_domain_init); this is its first RUNNING
+     edge. */
   caml_mmtk_leave_blocking((uintnat) domain_self->state);
 
   caml_gc_log("Domain starting (unique_id = %" CAML_PRIuNAT ")",
@@ -1109,8 +1117,9 @@ CAMLprim value caml_domain_spawn(value callback, value term_sync)
   err = caml_plat_thread_create(&th, 0, domain_thread_func, (void*)&p);
   if (err) {
     /* retire_after_gc=false: the parent (this thread) is a registered, running
-       mutator — stopped across any collection, so it cannot reach this free while
-       a GC still holds a snapshot of these roots; no UAF and no wait needed. */
+       mutator -- stopped across any collection, so it cannot reach this free
+       while a GC still holds a snapshot of these roots; no UAF and no wait
+       needed. */
     free_domain_ml_values(p.ml_values, /*retire_after_gc=*/false);
     caml_check_error(err, "failed to create domain thread: "
                      "caml_plat_thread_create");
@@ -1127,12 +1136,12 @@ CAMLprim value caml_domain_spawn(value callback, value term_sync)
   caml_plat_lock_blocking(&interruptor->lock);
   while (p.status == Dom_starting) {
     /* Idle-wait for the child. Mark this (parent) domain safe-stopped for MMTk
-       while we block here — otherwise a collection triggered by another domain
+       while we block here -- otherwise a collection triggered by another domain
        would wait for us forever, since we hold no safepoint in this wait (bug
        #3b). Use the blocking-section hooks (no pending-action processing, so no
        raise can escape mid-handshake). interruptor->lock is independent of
-       domain_lock (which the enter hook releases), so drop it around the section
-       and re-test p.status under it to avoid a lost wakeup. */
+       domain_lock (which the enter hook releases), so drop it around the
+       section and re-test p.status under it to avoid a lost wakeup. */
     caml_domain_state *self = domain_self->state;
     caml_plat_unlock(&interruptor->lock);
     caml_enter_blocking_section_hook();
@@ -1295,15 +1304,15 @@ void caml_poll_gc_work(void)
   /* TLAB mode: MMTk owns the entire heap, so there is no OCaml minor GC and no
      OCaml major slice. Consume any pending minor-GC / major-slice requests (so
      caml_reset_young_limit below doesn't immediately re-interrupt the domain),
-     reset the young_limit, and return. The young region is refilled on demand in
-     caml_alloc_small_dispatch, and MMTk collections fire from the refill / STW
-     path. */
+     reset the young_limit, and return. The young region is refilled on demand
+     in caml_alloc_small_dispatch, and MMTk collections fire from the refill /
+     STW path. */
   if (caml_mmtk_tlab) {
     d->requested_minor_gc = 0;
     d->requested_major_slice = 0;
     d->requested_global_major_slice = 0;
-    /* Ragged-safepoint ack (caml_mmtk_quiesce_running_domains): record that this
-       domain has passed a safepoint. Plain atomic store, no lock. */
+    /* Ragged-safepoint ack (caml_mmtk_quiesce_running_domains): record that
+       this domain has passed a safepoint. Plain atomic store, no lock. */
     caml_mmtk_quiesce_ack(d);
     caml_reset_young_limit(d);
     return;
@@ -1341,17 +1350,17 @@ void caml_poll_gc_work(void)
     d->requested_minor_gc = 0;
     /* excise Phase 3a: the all-domains minor-empty STW is gone. Reset THIS
        domain's young region directly (the STW's only load-bearing residue) and
-       run THIS domain's minor-cycle bookkeeping. Reached only in bytecode (native
-       takes the caml_mmtk_tlab early-return above and never gets here), so
-       bump_count=1 here is the single caml_minor_collections_count bump per minor
-       GC; native stays 0. */
+       run THIS domain's minor-cycle bookkeeping. Reached only in bytecode
+       (native takes the caml_mmtk_tlab early-return above and never gets here),
+       so bump_count=1 here is the single caml_minor_collections_count bump per
+       minor GC; native stays 0. */
     caml_minor_gc_reset_young_region(d);
     caml_minor_gc_domain_bookkeeping(d, /*bump_count=*/1);
   }
 
   if (d->requested_major_slice || d->requested_global_major_slice) {
-    /* No EV_MAJOR span here: under always-on MMTk caml_major_collection_slice is
-       inert (it only records this domain's major-slice epoch; MMTk owns
+    /* No EV_MAJOR span here: under always-on MMTk caml_major_collection_slice
+       is inert (it only records this domain's major-slice epoch; MMTk owns
        collection), so the span reported a fictional major-GC pause around a
        no-op to olly/runtime_events. */
     d->requested_major_slice = 0;
@@ -1359,9 +1368,9 @@ void caml_poll_gc_work(void)
   }
 
   if (d->requested_global_major_slice) {
-    /* Stock OCaml broadcast the major-slice request to all domains via an
-       async all-domains STW (stw_global_major_slice, which just set each peer's
-       local requested_major_slice). Under always-on MMTk caml_major_collection_slice
+    /* Stock OCaml broadcast the major-slice request to all domains via an async
+       all-domains STW (stw_global_major_slice, which just set each peer's local
+       requested_major_slice). Under always-on MMTk caml_major_collection_slice
        is inert (it only records this domain's major-slice epoch; MMTk owns
        collection), so the broadcast ran a no-op on every peer. The requesting
        domain's own slice already fired at the block above (line ~1950 tests
@@ -1398,7 +1407,7 @@ void caml_process_external_interrupt(void)
 CAMLexport intnat caml_domain_is_multicore (void)
 {
   /* True once more than one domain runs, or once any extra domain has ever
-     been spawned (latched, never cleared — so this stays true even after the
+     been spawned (latched, never cleared -- so this stays true even after the
      spawned domain terminates). The latch replaces the old per-domain
      backup-thread "running" flag that stock OCaml used for this. */
   return (!caml_domain_alone()
@@ -1469,14 +1478,15 @@ void caml_domain_terminate(bool last)
   while (!finished) {
     caml_finish_sweeping();
 
-    /* excise Phase 3a: the all-domains minor-empty STW is gone, so the terminate
-       flush no longer joins it (the surrounding loop's all_domains_lock /
-       interrupt-draining already handles any ongoing STW). Reset this domain's
-       young region directly and run its terminate bookkeeping explicitly, since
-       the STW no longer clears this domain's sampled_gc_stats slot. bump_count=0:
-       terminate must not bump caml_minor_collections_count (keeps native at 0).
-       caml_collect_gc_stats_sample_stw sees terminating==1 and zeroes the slot, as
-       the comment near caml_domain_terminate's stats teardown requires. */
+    /* excise Phase 3a: the all-domains minor-empty STW is gone, so the
+       terminate flush no longer joins it (the surrounding loop's
+       all_domains_lock / interrupt-draining already handles any ongoing STW).
+       Reset this domain's young region directly and run its terminate
+       bookkeeping explicitly, since the STW no longer clears this domain's
+       sampled_gc_stats slot. bump_count=0: terminate must not bump
+       caml_minor_collections_count (keeps native at 0).
+       caml_collect_gc_stats_sample_stw sees terminating==1 and zeroes the slot,
+       as the comment near caml_domain_terminate's stats teardown requires. */
     caml_minor_gc_reset_young_region(domain_state);
     caml_minor_gc_domain_bookkeeping(domain_state, /*bump_count=*/0);
 
@@ -1485,8 +1495,9 @@ void caml_domain_terminate(bool last)
 
     caml_finish_marking();
 
-    /* (Dropped the stock `caml_gc_phase != Phase_sweep_main` assert: MMTk is the only
-       collector and does not drive caml_gc_phase, so that invariant no longer applies.) */
+    /* (Dropped the stock `caml_gc_phase != Phase_sweep_main` assert: MMTk is
+       the only collector and does not drive caml_gc_phase, so that invariant no
+       longer applies.) */
     caml_orphan_ephemerons(domain_state);
     caml_orphan_finalisers(domain_state);
 
@@ -1507,24 +1518,30 @@ void caml_domain_terminate(bool last)
     /* No stock shared heap to orphan under always-on MMTk. */
     CAMLassert(marking_and_sweeping_done(domain_state));
 
-    /* GH#15 fix: leave MMTk's RUNNING set right HERE — after the flush body above
-       (which ran while RUNNING, so a concurrent collection waited for it and
-       scanned this domain's roots/minor-tables consistently) and right before the
-       UNBOUNDED block on all_domains_lock below. The all_domains_lock may be held
+    /* GH#15 fix: leave MMTk's RUNNING set right HERE -- after the flush body
+       above (which ran while RUNNING, so a concurrent collection waited for it
+       and scanned this domain's roots/minor-tables consistently) and right
+       before the UNBOUNDED block on all_domains_lock below. The
+       all_domains_lock may be held
        (transitively) by a spawning domain blocked on a terminating peer's
-       domain_lock, which that peer holds while waiting in mmtk_ocaml_wait_collection_done
-       for a collection that stop_all_mutators is wedging on US being RUNNING — the
-       4-way lock-order deadlock GH#15. Leaving RUNNING here breaks the cycle: the GC
-       stops awaiting us and finishes. We stay in the MUTATOR REGISTRY (roots still
-       scanned, and now stable — the flush is done, teardown hasn't started) until
-       caml_mmtk_domain_terminate deregisters us at the end. NB it must be HERE, not
-       at the top of caml_domain_terminate: marking STOPPED before the flush body
-       would leave this domain STOPPED-but-still-registered across the flush, adding
-       a window where a GC scans it while the flush mutates its minor tables. (That
-       is distinct from GH#15 "Bug B" -- a pre-existing terminating-domain root-scan
-       panic, 'cannot trace object', that fires during spawn/terminate independent of
-       this placement; fixing the lock cycle here UNMASKS it. Bug B is tracked in
-       GH#15 as the remaining blocker.) */
+                      domain_lock, which that peer holds while waiting in
+                      mmtk_ocaml_wait_collection_done for a collection that
+                      stop_all_mutators is wedging on US being RUNNING -- the
+                      4-way lock-order deadlock GH#15. Leaving RUNNING here
+                      breaks the cycle: the GC stops awaiting us and finishes.
+                      We stay in the MUTATOR REGISTRY (roots still scanned, and
+                      now stable -- the flush is done, teardown hasn't started)
+                      until caml_mmtk_domain_terminate deregisters us at the
+                      end. NB it must be HERE, not at the top of
+                      caml_domain_terminate: marking STOPPED before the flush
+                      body would leave this domain STOPPED-but-still-registered
+                      across the flush, adding a window where a GC scans it
+                      while the flush mutates its minor tables. (That is
+                      distinct from GH#15 "Bug B" -- a pre-existing
+                      terminating-domain root-scan panic, 'cannot trace object',
+                      that fires during spawn/terminate independent of this
+                      placement; fixing the lock cycle here UNMASKS it. Bug B is
+                      tracked in GH#15 as the remaining blocker.) */
     caml_mmtk_enter_blocking((uintnat) domain_state);
 
     /* Take the all_domains_lock to try and exit the STW participant set
@@ -1544,8 +1561,8 @@ void caml_domain_terminate(bool last)
       stop_active_domain(domain_self);
 
       /* No stock minor-heap arena to free under always-on MMTk: the domain's
-         young region is an MMTk TLAB block, returned to MMTk when the mutator is
-         deregistered (caml_mmtk_domain_terminate). */
+         young region is an MMTk TLAB block, returned to MMTk when the mutator
+         is deregistered (caml_mmtk_domain_terminate). */
 
       /* We must signal domain termination before releasing [all_domains_lock]:
          after that, this domain will no longer take part in STWs and emitting
@@ -1556,10 +1573,11 @@ void caml_domain_terminate(bool last)
   }
 
   /* Now the minor heap has been fully flushed (survivors promoted into MMTk via
-     a valid mutator) and the domain has left the STW participant set: deregister
-     it from MMTk so future collections don't wait for it. Must come AFTER the
-     flush loop above — the final caml_empty_minor_heaps_once promotes through
-     Caml_state->mmtk_mutator, so it must still be live there. */
+     a valid mutator) and the domain has left the STW participant set:
+     deregister it from MMTk so future collections don't wait for it. Must come
+     AFTER the flush loop above -- the final caml_empty_minor_heaps_once
+     promotes through Caml_state->mmtk_mutator, so it must still be live there.
+     */
   caml_mmtk_domain_terminate(domain_state);
 
   /* [domain_state] may be reused by a fresh domain here, now that we
@@ -1619,20 +1637,21 @@ void caml_domain_terminate(bool last)
 }
 
 /* Stop every domain other than the main one when the program exits with peers
-   still running (i.e. domains were never joined). This used to run a callback on
-   each domain via OCaml's all-domains STW (caml_try_run_on_all_domains +
+   still running (i.e. domains were never joined). This used to run a callback
+   on each domain via OCaml's all-domains STW (caml_try_run_on_all_domains +
    stw_terminate_domain). excise Phase 3b removes that: MMTk is the sole STW
    rendezvous, so caml_stop_all_domains no longer joins OCaml's STW. Instead the
    main domain iterates the running peers itself and forcibly cancels each one.
 
    We are not in a state where we can safely release a peer's resources: a
-   cancelled peer may have been anywhere (mid-allocation, holding its domain lock,
-   inside C). So, exactly as before (PR #12964), we do NOT touch a peer's heap or
-   roots and do NOT wait for it to terminate; the best we can do is cancel it.
-   The one thing we MUST do for each cancelled peer is deregister it from MMTk:
-   a pthread_cancel'd peer will never reach a GC safepoint again, so if it stayed
-   in MMTk's mutator registry / RUNNING set, a stop_all_mutators in flight (or the
-   one a final collection starts) would block forever on running.is_empty(). */
+   cancelled peer may have been anywhere (mid-allocation, holding its domain
+   lock, inside C). So, exactly as before (PR #12964), we do NOT touch a peer's
+   heap or roots and do NOT wait for it to terminate; the best we can do is
+   cancel it. The one thing we MUST do for each cancelled peer is deregister it
+   from MMTk: a pthread_cancel'd peer will never reach a GC safepoint again, so
+   if it stayed in MMTk's mutator registry / RUNNING set, a stop_all_mutators in
+   flight (or the one a final collection starts) would block forever on
+   running.is_empty(). */
 void caml_stop_all_domains(void)
 {
   /* Blocks any new domain spawn from here on (checked in caml_domain_spawn). */
@@ -1641,10 +1660,11 @@ void caml_stop_all_domains(void)
   /* all_domains_lock guards stw_domains membership and the interruptor.running
      flag transitions, so under it the active region [0, active_domains) is
      exactly the set of domains currently running OCaml. We never take an MMTk
-     lock -> all_domains_lock anywhere, and the MMTk deregister path never reaches
-     back into all_domains_lock (stop_all_mutators takes only MMTk locks and calls
-     into C solely via caml_mmtk_interrupt/uninterrupt, pure atomic stores), so
-     holding all_domains_lock here while deregistering cannot invert lock order. */
+     lock -> all_domains_lock anywhere, and the MMTk deregister path never
+     reaches back into all_domains_lock (stop_all_mutators takes only MMTk locks
+     and calls into C solely via caml_mmtk_interrupt/uninterrupt, pure atomic
+     stores), so holding all_domains_lock here while deregistering cannot invert
+     lock order. */
   caml_plat_lock_blocking(&all_domains_lock);
   for (int i = 0; i < stw_domains.active_domains; i++) {
     dom_internal *d = stw_domains.domains[i];
@@ -1656,16 +1676,16 @@ void caml_stop_all_domains(void)
     (void)caml_plat_thread_cancel(d->tid);
 
     /* Load-bearing: drop the peer from MMTk's mutator registry AND RUNNING set
-       BEFORE we stop waiting on it, so a collection's stop_all_mutators can reach
-       running.is_empty() instead of hanging on a thread that will never hit a
-       safepoint again. Deregister-only (no collection-done wait): we do not tear
-       the peer's roots down, so there is nothing to protect. */
+       BEFORE we stop waiting on it, so a collection's stop_all_mutators can
+       reach running.is_empty() instead of hanging on a thread that will never
+       hit a safepoint again. Deregister-only (no collection-done wait): we do
+       not tear the peer's roots down, so there is nothing to protect. */
     caml_mmtk_deregister_domain(d->state);
 
-    /* The peer was cancelled in an unknown state, so its domain_lock may be held
-       or half-released: mark it so caml_free_domains() does NOT free that lock. We
-       intentionally do not wait for the peer to terminate, do not decrement
-       caml_num_domains_running, and do not unlock its domain_lock. */
+    /* The peer was cancelled in an unknown state, so its domain_lock may be
+       held or half-released: mark it so caml_free_domains() does NOT free that
+       lock. We intentionally do not wait for the peer to terminate, do not
+       decrement caml_num_domains_running, and do not unlock its domain_lock. */
     d->domain_canceled = true;
   }
   caml_plat_unlock(&all_domains_lock);

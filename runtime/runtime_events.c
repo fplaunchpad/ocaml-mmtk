@@ -122,7 +122,7 @@ static caml_plat_mutex user_events_lock;
 /* Serialises start vs. destroy (and concurrent starts), now that neither runs
    under an all-domains STW. Held only across the bookkeeping (mmap/init/publish
    on start; the enabled-clear on destroy); the lock-free emitters never take it
-   — they self-gate on ring_is_active(). destroy releases it BEFORE calling
+   -- they self-gate on ring_is_active(). destroy releases it BEFORE calling
    caml_mmtk_quiesce_running_domains (which can take a while), having already
    published enabled=0, so a concurrent start re-publishes monotonically. */
 static caml_plat_mutex runtime_events_lifecycle_lock;
@@ -161,12 +161,13 @@ void caml_runtime_events_init(void) {
 
 /* Unmap/close the ring buffers and free the bookkeeping. The CALLER must have
    already published runtime_events_enabled=0 (release) and, when other domains
-   may be RUNNING, drained in-flight emitters via caml_mmtk_quiesce_running_domains
-   BEFORE calling this — so no domain can still be inside write_to_ring holding
-   the current_metadata we are about to munmap. (Formerly this ran under an
-   all-domains STW and cleared the enable flag itself, AFTER the munmap; that
-   order was a latent munmap-vs-write_to_ring UAF the moment the STW was removed,
-   so the flag-clear now happens in the caller, before this is reached.) */
+   may be RUNNING, drained in-flight emitters via
+   caml_mmtk_quiesce_running_domains BEFORE calling this -- so no domain can
+   still be inside write_to_ring holding the current_metadata we are about to
+   munmap. (Formerly this ran under an all-domains STW and cleared the enable
+   flag itself, AFTER the munmap; that order was a latent
+   munmap-vs-write_to_ring UAF the moment the STW was removed, so the flag-clear
+   now happens in the caller, before this is reached.) */
 static void runtime_events_unmap(int remove_file) {
 #ifdef _WIN32
     UnmapViewOfFile(current_metadata);
@@ -201,7 +202,7 @@ void caml_runtime_events_post_fork(void) {
     /* In the child we need to tear down the various structures used for the
     existing runtime_events from the parent. In doing so we need to make sure we
     don't remove the runtime_events file itself as that may still be used by
-    the parent. Single domain after fork, so no quiesce is needed — we are the
+    the parent. Single domain after fork, so no quiesce is needed -- we are the
     only possible reader. Clear the enable flag (the unmap helper no longer does
     it) before unmapping the parent's inherited mapping. */
     atomic_store_release(&runtime_events_enabled, 0);
@@ -248,13 +249,14 @@ void caml_runtime_events_destroy(void) {
     atomic_store_release(&runtime_events_enabled, 0);
 
     /* (b) Drain those in-flight emitters. On return every domain that was
-       RUNNING at the call has passed a safepoint (and so finished its
-       straight-line, safepoint-free write_to_ring and dropped current_metadata)
-       or has left RUNNING. We are RUNNING + hold our domain lock here, exactly
-       the context the primitive requires (it enters/leaves blocking internally).
-       Release the lifecycle lock first: the quiesce can take a while, and the
-       only thing it must order against (a concurrent start) is already gated by
-       the published enabled=0, which start re-publishes monotonically. */
+           RUNNING at the call has passed a safepoint (and so finished its
+           straight-line, safepoint-free write_to_ring and dropped
+           current_metadata) or has left RUNNING. We are RUNNING + hold our
+           domain lock here, exactly the context the primitive requires (it
+           enters/leaves blocking internally). Release the lifecycle lock first:
+           the quiesce can take a while, and the only thing it must order
+           against (a concurrent start) is already gated by the published
+           enabled=0, which start re-publishes monotonically. */
     caml_plat_unlock(&runtime_events_lifecycle_lock);
     caml_mmtk_quiesce_running_domains();
 
@@ -412,9 +414,9 @@ static void runtime_events_create_from_stw_single(void) {
        current_metadata (which was itself release-published before this point).
        Snapshot the user_events list and flip enabled=1 atomically under
        user_events_lock so a concurrent user_register either lands in this
-       snapshot or sees enabled=1 and registers into the ring itself — no event
-       is lost across the enable edge. Called with the lifecycle lock held (start)
-       or single-domain (init / post_fork), no longer from an STW. */
+       snapshot or sees enabled=1 and registers into the ring itself -- no event
+       is lost across the enable edge. Called with the lifecycle lock held
+       (start) or single-domain (init / post_fork), no longer from an STW. */
     caml_plat_lock_blocking(&user_events_lock);
     value current_user_event = user_events;
     atomic_store_release(&runtime_events_enabled, 1);
@@ -439,8 +441,8 @@ static void runtime_events_create_from_stw_single(void) {
    ring_is_active() and the enable is a monotonic off->on release publish, so no
    barrier is needed: a domain racing the enable either misses a few events
    before it observes enabled=1 (harmless for a flight recorder) or sees the
-   fully-initialised mapping. The lifecycle lock serialises concurrent starts and
-   start-vs-destroy, and runtime_events_create_from_stw_single's leading
+   fully-initialised mapping. The lifecycle lock serialises concurrent starts
+   and start-vs-destroy, and runtime_events_create_from_stw_single's leading
    enabled-check keeps start idempotent. */
 CAMLexport void caml_runtime_events_start(void) {
   if (atomic_load_acquire(&runtime_events_enabled)) return;

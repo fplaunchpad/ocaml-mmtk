@@ -117,12 +117,12 @@ void caml_set_minor_heap_size (asize_t wsize)
   caml_domain_state* domain_state = Caml_state;
   struct caml_minor_tables *r = domain_state->minor_tables;
 
-  /* Under always-on MMTk the minor heap is an MMTk TLAB block (Immix nursery), not
-     a resizable stock arena: Gc.set minor_heap_size cannot actually resize it. We
-     just record the nominal size (reported by Gc.stat/Gc.get and used to size the
-     minor tables) and re-size the tables. No stock-arena reallocation, and no
-     minor collection / young_ptr==young_end assert (which never holds under TLAB —
-     young_ptr sits mid-block). */
+  /* Under always-on MMTk the minor heap is an MMTk TLAB block (Immix nursery),
+     not a resizable stock arena: Gc.set minor_heap_size cannot actually resize
+     it. We just record the nominal size (reported by Gc.stat/Gc.get and used to
+     size the minor tables) and re-size the tables. No stock-arena reallocation,
+     and no minor collection / young_ptr==young_end assert (which never holds
+     under TLAB -- young_ptr sits mid-block). */
   domain_state->minor_heap_wsz = caml_norm_minor_heap_size(wsize);
   reset_minor_tables(r);
 }
@@ -176,19 +176,19 @@ static void nonatomic_increment_counter(atomic_uintnat* counter) {
   atomic_store_relaxed(counter, 1 + atomic_load_relaxed(counter));
 }
 
-/* Per-domain young-region reset — the sole load-bearing residue of the old
+/* Per-domain young-region reset -- the sole load-bearing residue of the old
    all-domains minor-empty STW (caml_empty_minor_heap_promote, excise Phase 3a).
    Runs on the TRIGGERING domain at its own safepoint (caml_poll_gc_work,
-   bytecode) and on the terminate flush — never on native (the caml_mmtk_tlab
+   bytecode) and on the terminate flush -- never on native (the caml_mmtk_tlab
    early-return in caml_poll_gc_work fires first, and the TLAB refill /
    caml_mmtk_uninterrupt already reset the young region there) and never on a GC
    worker. It only touches `domain`'s own state, so it needs no cross-domain
    rendezvous. This is the bytecode (`else`) branch of the old promote verbatim:
    discard the stock minor arena (young_ptr = young_end), re-arm the half-heap
    major-slice trigger, re-set the memprof trigger and the safepoint poison. The
-   per-domain stat_minor_words update is preserved; stat_promoted_words is dropped
-   (the old promote did `+= allocated_words - prev_alloc_words`, already 0 once
-   oldification was removed — nothing here mutates allocated_words). */
+   per-domain stat_minor_words update is preserved; stat_promoted_words is
+   dropped (the old promote did `+= allocated_words - prev_alloc_words`, already
+   0 once oldification was removed -- nothing here mutates allocated_words). */
 void caml_minor_gc_reset_young_region(caml_domain_state* domain)
 {
   uintnat minor_allocated_bytes =
@@ -207,17 +207,18 @@ void caml_minor_gc_reset_young_region(caml_domain_state* domain)
 
 /* Domain-LOCAL minor-cycle bookkeeping, re-homed off the all-domains minor STW
    (excise Phase 1). Runs on the TRIGGERING domain at its own safepoint
-   (caml_poll_gc_work, bytecode) and on the terminate flush path — NOT on a GC
+   (caml_poll_gc_work, bytecode) and on the terminate flush path -- NOT on a GC
    worker (that would be caml_mmtk_uninterrupt, which holds the worker-monitor
-   lock; see the resume_mutators self-deadlock fix cd62bd47f9). Each piece touches
-   only `domain`'s own state, so it needs no cross-domain rendezvous; this is what
-   lets Phase 3 delete the minor STW. Order matches the old STW body
-   (stats -> memprof -> finalisers -> table-clear). `bump_count` is 1 only on the
-   bytecode minor path (native keeps caml_minor_collections_count at 0; terminate
-   passes 0). */
+   lock; see the resume_mutators self-deadlock fix cd62bd47f9). Each piece
+   touches only `domain`'s own state, so it needs no cross-domain rendezvous;
+   this is what lets Phase 3 delete the minor STW. Order matches the old STW
+   body (stats -> memprof -> finalisers -> table-clear). `bump_count` is 1 only
+   on the bytecode minor path (native keeps caml_minor_collections_count at 0;
+   terminate passes 0). */
 void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain, int bump_count)
 {
-  caml_collect_gc_stats_sample_stw(domain);   /* writes this domain's own sample slot */
+  /* writes this domain's own sample slot */
+  caml_collect_gc_stats_sample_stw(domain);
   caml_memprof_after_minor_gc(domain);
   caml_final_update_last_minor(domain);
   caml_empty_minor_heap_domain_clear(domain); /* incl. caml_final_empty_young */
@@ -264,8 +265,9 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
         /* MMTk bug #4: this raise happens from inside caml_call_gc's saved-regs
            window (caml_garbage_collection -> here). Recycle the popped gc_regs
            bucket back to the free-list first, so the raise (which bypasses
-           caml_call_gc's RESTORE_ALL_REGS) does not leave gc_regs_buckets NULL and
-           crash the next caml_call_gc. See caml_mmtk_recycle_gc_regs_bucket. */
+           caml_call_gc's RESTORE_ALL_REGS) does not leave gc_regs_buckets NULL
+           and crash the next caml_call_gc. See
+           caml_mmtk_recycle_gc_regs_bucket. */
         caml_mmtk_recycle_gc_regs_bucket();
         caml_raise_out_of_memory();
       }

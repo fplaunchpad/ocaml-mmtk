@@ -203,9 +203,9 @@ CAMLextern wchar_t* caml_stat_wcsconcat(int n, ...);
 #ifdef DEBUG
 Caml_inline void DEBUG_clear(value result, mlsize_t wosize) {
   for (mlsize_t i=0; i<wosize; ++i) {
-    /* No Debug_free_minor assert: MMTk owns the heap (the stock minor heap is gone),
-       so freshly-handed-out blocks are not stock-poisoned. Just poison the slot as
-       uninitialised for the use-before-init debug check. */
+    /* No Debug_free_minor assert: MMTk owns the heap (the stock minor heap is
+       gone), so freshly-handed-out blocks are not stock-poisoned. Just poison
+       the slot as uninitialised for the use-before-init debug check. */
     Field(result, i) = Debug_uninit_minor;
   }
 }
@@ -247,7 +247,8 @@ enum caml_alloc_small_flags {
   Alloc_small_with_reserved(result, wosize, tag, GC, (uintnat)0)
 
 #ifndef NATIVE_CODE
-/* Bytecode small allocations go through MMTk — it owns the heap. See runtime/mmtk.c. */
+/* Bytecode small allocations go through MMTk -- it owns the heap. See
+   runtime/mmtk.c. */
 extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                    reserved_t reserved);
 /* An MMTk allocation may stop-the-world and scan roots at any point. In
@@ -255,7 +256,8 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
    stack (the bytecode interpreter keeps accu/env there and an unpublished sp),
    those must be made scannable before the allocation and restored after.
    interp.c overrides these to Setup_for_gc / Restore_after_gc; everywhere else
-   (C callers using CAMLparam roots, with sp already published) they are no-ops. */
+   (C callers using CAMLparam roots, with sp already published) they are no-ops.
+   */
 #ifndef CAML_MMTK_SETUP_ROOTS
 #define CAML_MMTK_SETUP_ROOTS    ((void)0)
 #define CAML_MMTK_RESTORE_ROOTS  ((void)0)
@@ -265,10 +267,11 @@ extern value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag,
                                                 CAMLassert ((wosize) >= 1); \
                                           CAMLassert ((tag_t) (tag) < 256); \
                                  CAMLassert ((wosize) <= Max_young_wosize); \
-  /* MMTk owns the heap; there is no stock minor slow path (the GC arg is        \
-     unused). Publish interp roots, allocate into a temp (the allocation may GC), \
-     restore roots, THEN assign result. The temp matters: when result is          \
-     `accu`/`env`, Restore_after_gc would otherwise clobber it. */                \
+  /* MMTk owns the heap; there is no stock minor slow path (the GC     \
+     arg is unused). Publish interp roots, allocate into a temp (the    \
+     allocation may GC), restore roots, THEN assign result. The temp    \
+     matters: when result is `accu`/`env`, Restore_after_gc would       \
+     otherwise clobber it. */                                           \
   value caml_mmtk_blk;                                                       \
   CAML_MMTK_SETUP_ROOTS;                                                     \
   caml_mmtk_blk = caml_mmtk_alloc_small((wosize), (tag), (reserved));        \

@@ -1430,35 +1430,40 @@ runtime/prims.$(O): runtime/build_config.h
 # MMTk (GH#10): every runtime static archive below references mmtk_ocaml_*
 # (runtime/mmtk.c is in the common runtime sources). After MKLIB builds each
 # archive we bundle in libmmtk_ocaml.a's objects (MMTK_BUNDLE, Makefile.mmtk) so
-# the GC symbols travel inside the archive the compiler always links — no bare
-# "-lmmtk_ocaml" in the published config (the old approach that broke third-party
-# dune-configurator probes). Each archive thus depends on $(MMTK_OBJS_STAMP) (the
-# staged objects). The runtime executables (ocamlrun*) link these archives, so
-# they get the GC symbols from the bundle; MMTK_LINK no longer carries $(MMTK_LIB)
-# (would double-define), only the system deps.
+# the GC symbols travel inside the archive the compiler always links -- no bare
+# "-lmmtk_ocaml" in the published config (the old approach that broke
+# third-party dune-configurator probes). Each archive thus depends on
+# $(MMTK_OBJS_STAMP) (the staged objects). The runtime executables (ocamlrun*)
+# link these archives, so they get the GC symbols from the bundle; MMTK_LINK no
+# longer carries $(MMTK_LIB) (would double-define), only the system deps.
 runtime/ocamlrun$(EXE): runtime/prims.$(O) runtime/libcamlrun.$(A)
-	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlrun.$(A) $(MMTK_LINK) $(BYTECCLIBS)
+	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlrun.$(A) \
+	  $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/ocamlruns$(EXE): runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A)
-	$(V_MKEXE)$(call MKEXE_VIA_CC,$@,runtime/prims.$(O) runtime/libcamlrun_non_shared.$(A) $(MMTK_LINK) $(BYTECCLIBS))
+	$(V_MKEXE)$(call MKEXE_VIA_CC,$@,runtime/prims.$(O) \
+	  runtime/libcamlrun_non_shared.$(A) $(MMTK_LINK) $(BYTECCLIBS))
 
 runtime/libcamlrun.$(A): $(libcamlrun_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrun_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
-runtime/libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS) $(MMTK_OBJS_STAMP)
+runtime/libcamlrun_non_shared.$(A): $(libcamlrun_non_shared_OBJECTS) \
+  $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrun_non_shared_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
 runtime/ocamlrund$(EXE): runtime/prims.$(O) runtime/libcamlrund.$(A)
-	$(V_MKEXE)$(MKEXE) $(MKEXEDEBUGFLAG) -o $@ runtime/prims.$(O) runtime/libcamlrund.$(A) $(MMTK_LINK) $(BYTECCLIBS)
+	$(V_MKEXE)$(MKEXE) $(MKEXEDEBUGFLAG) -o $@ runtime/prims.$(O) \
+	  runtime/libcamlrund.$(A) $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/libcamlrund.$(A): $(libcamlrund_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrund_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
 runtime/ocamlruni$(EXE): runtime/prims.$(O) runtime/libcamlruni.$(A)
-	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlruni.$(A) $(INSTRUMENTED_RUNTIME_LIBS) $(MMTK_LINK) $(BYTECCLIBS)
+	$(V_MKEXE)$(MKEXE) -o $@ runtime/prims.$(O) runtime/libcamlruni.$(A) \
+	  $(INSTRUMENTED_RUNTIME_LIBS) $(MMTK_LINK) $(BYTECCLIBS)
 
 runtime/libcamlruni.$(A): $(libcamlruni_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlruni_OBJECTS))
@@ -1468,15 +1473,16 @@ runtime/libcamlrun_pic.$(A): $(libcamlrunpic_OBJECTS) $(MMTK_OBJS_STAMP)
 	$(V_MKLIB)$(call MKLIB,$@, $(libcamlrunpic_OBJECTS))
 	$(call MMTK_BUNDLE,$@)
 
-# MMTk (GH#18): the shared runtime libraries reference mmtk_ocaml_* just like the
-# static archives, but unlike the .a rules above they were built from the *pic
-# objects ALONE — so libcamlrun_shared/libasmrun_shared shipped with undefined
-# mmtk_ocaml_* symbols, which broke any executable that links the shared runtime
-# (the opam/dune install path: `ld: undefined reference to mmtk_ocaml_*`). Bundle
-# the same staged MMTk objects into the .so (order-only $(MMTK_OBJS_STAMP) keeps
-# them staged), and add $(MMTK_LINK) so the .so resolves MMTk's transitive system
-# deps at link time (a .so resolves its own deps; a .a defers them to the final
-# link, which is why the archive rules don't need it).
+# MMTk (GH#18): the shared runtime libraries reference mmtk_ocaml_* just like
+# the static archives, but unlike the .a rules above they were built from the
+# *pic objects ALONE -- so libcamlrun_shared/libasmrun_shared shipped with
+# undefined mmtk_ocaml_* symbols, which broke any executable that links the
+# shared runtime (the opam/dune install path: `ld: undefined reference to
+# mmtk_ocaml_*`). Bundle the same staged MMTk objects into the .so (order-only
+# $(MMTK_OBJS_STAMP) keeps them staged), and add $(MMTK_LINK) so the .so
+# resolves MMTk's transitive system deps at link time (a .so resolves its own
+# deps; a .a defers them to the final link, which is why the archive rules don't
+# need it).
 runtime/libcamlrun_shared.$(SO): $(libcamlrunpic_OBJECTS) | $(MMTK_OBJS_STAMP)
 	$(V_MKDLL)$(MKDLL) -o $@ $^ $(MMTK_OBJS_DIR)/*.o $(MMTK_LINK) $(BYTECCLIBS)
 
@@ -1678,8 +1684,8 @@ stdlib/libcamlrun.$(A): runtime-all
 
 # MMTk (GH#10): no stdlib/libmmtk_ocaml.a symlink any more. The Rust staticlib's
 # objects are now bundled directly into the runtime archives (MMTK_BUNDLE), so
-# there is no bare "-lmmtk_ocaml" to resolve and the archive does not need to sit
-# on the compiler's Load_path. $(MMTK_LIB) is still built (the archive rules
+# there is no bare "-lmmtk_ocaml" to resolve and the archive does not need to
+# sit on the compiler's Load_path. $(MMTK_LIB) is still built (the archive rules
 # depend on $(MMTK_OBJS_STAMP), which extracts it).
 clean::
 	rm -f $(addprefix runtime/, *.o *.obj *.a *.lib *.so *.dll)
@@ -2886,11 +2892,11 @@ $(foreach runtime, $(runtime_PROGRAMS), \
 common-install::
 	$(call INSTALL_ITEMS, runtime/ld.conf $(runtime_BYTECODE_STATIC_LIBRARIES), \
 	  lib)
-# MMTk (GH#10): no longer install the bare libmmtk_ocaml.a — its objects are
+# MMTk (GH#10): no longer install the bare libmmtk_ocaml.a -- its objects are
 # bundled into the runtime static archives (lib{asm,caml}run*.a, installed above
 # and via the native-install rule), so an installed/relocated compiler resolves
-# mmtk_ocaml_* from those. Shipping the 130MB+ staticlib separately would be dead
-# weight (nothing links -lmmtk_ocaml any more).
+# mmtk_ocaml_* from those. Shipping the 130MB+ staticlib separately would be
+# dead weight (nothing links -lmmtk_ocaml any more).
 
 $(foreach shared_runtime, $(runtime_BYTECODE_SHARED_LIBRARIES), \
   $(eval $(call INSTALL_RUNTIME_LIB,$(shared_runtime),BYTECODE)))

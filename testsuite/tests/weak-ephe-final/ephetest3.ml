@@ -1,4 +1,4 @@
-(* MMTk DISABLED: finaliser/ephemeron sync-timing: finalise_last flag not flipped on the test's Gc.full_major under MMTk; deferred not synchronous [semantic-timing]. *)
+(* MMTk DISABLED: finalise_last flag not flipped on the test's Gc.full_major; deferred not sync [semantic-timing]. *)
 
 (** This test weak table by application to the memoization of collatz
     (also known as syracuse) algorithm suite computation *)

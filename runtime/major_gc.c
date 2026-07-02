@@ -110,8 +110,9 @@ struct global_heap_state caml_global_heap_state = {
 };
 
 /* Atoms: the shared headers used for zero-length blocks (caml_atom(tag) returns
-   a pointer just past atoms[tag], i.e. a zero-size value of that tag). Relocated
-   here from the deleted shared_heap.c; still used by the allocators. */
+   a pointer just past atoms[tag], i.e. a zero-size value of that tag).
+   Relocated here from the deleted shared_heap.c; still used by the allocators.
+   */
 static const header_t atoms[256] = {
 #define A(i) Make_header(0, i, NOT_MARKABLE)
 A(0),A(1),A(2),A(3),A(4),A(5),A(6),A(7),A(8),A(9),A(10),
@@ -437,8 +438,8 @@ void caml_orphan_ephemerons (caml_domain_state* domain_state)
 {
   /* Stock-GC phase invariant: under always-on MMTk the stock major collector no
      longer drives caml_gc_phase (it stays at its initial Phase_sweep_main), so
-     the "not mid-sweep" assert does not hold. The ephemeron lists are empty under
-     MMTk weak processing, so the body below is a no-op early return. */
+     the "not mid-sweep" assert does not hold. The ephemeron lists are empty
+     under MMTk weak processing, so the body below is a no-op early return. */
 
   struct caml_ephe_info* ephe_info = domain_state->ephe_info;
   if (ephe_info->todo == 0 &&
@@ -553,21 +554,22 @@ void caml_orphan_finalisers (caml_domain_state* domain_state)
   }
 }
 
-/* ── M6: adopt orphaned finalisers into a live domain (MMTK_WEAK_REFS) ─────────
-   A terminating domain hands its [final_info] to [orph_structs] (above). The
-   stock GC drained that inside the major cycle (the deleted [adopt_orphaned_work]);
-   under MMTk nothing did, so finalisers registered on a domain that then
-   terminates never ran — their values become unreachable but no live domain's
-   table holds them. Re-attach the orphaned structures to [domain_addr] (a live
-   domain), so the binding's process_weak_refs then processes them through the
-   normal MMTk finaliser pass (caml_mmtk_final_update_first / _cleanup).
+/* -- M6: adopt orphaned finalisers into a live domain (MMTK_WEAK_REFS)
+   --------- A terminating domain hands its [final_info] to [orph_structs]
+   (above). The stock GC drained that inside the major cycle (the deleted
+   [adopt_orphaned_work]); under MMTk nothing did, so finalisers registered on a
+   domain that then terminates never ran -- their values become unreachable but
+   no live domain's table holds them. Re-attach the orphaned structures to
+   [domain_addr] (a live domain), so the binding's process_weak_refs then
+   processes them through the normal MMTk finaliser pass
+   (caml_mmtk_final_update_first / _cleanup).
 
    Called from process_weak_refs, once per GC, on the GC worker with mutators
    stopped; the lock only guards against concurrent orphaning (impossible during
    STW, but cheap). [retain] traces an object (keeping it live) and returns its
-   forwarded address — used for the already-queued run-queue entries, which are
-   not roots of this GC. Draining [orph_structs.final_info] to NULL makes repeated
-   calls within one GC's mark fixpoint no-ops. */
+   forwarded address -- used for the already-queued run-queue entries, which are
+   not roots of this GC. Draining [orph_structs.final_info] to NULL makes
+   repeated calls within one GC's mark fixpoint no-ops. */
 void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
                                          caml_mmtk_ephe_retain_fn retain,
                                          void *ctx)
@@ -624,24 +626,27 @@ void caml_mmtk_adopt_orphaned_finalisers(uintptr_t domain_addr,
   }
 }
 
-/* ── Scan orphaned finalisers as roots (fixes finaliser_handover use-after-free) ──
-   Finaliser values handed off by a terminated domain sit in [orph_structs.final_info]
-   between orphaning and adoption (caml_mmtk_adopt_orphaned_finalisers, above). Until
-   adopted they are referenced only from those orphaned tables, which no domain root
-   scan covers — so the nursery objects they point at are neither rooted nor forwarded
-   by the GCs that run in between, and the copy-nursery is recycled over them. A
-   queued finaliser then runs against aliased garbage (the finaliser_handover SIGSEGV).
+/* -- Scan orphaned finalisers as roots (fixes finaliser_handover
+   use-after-free) -- Finaliser values handed off by a terminated domain sit in
+   [orph_structs.final_info] between orphaning and adoption
+   (caml_mmtk_adopt_orphaned_finalisers, above). Until adopted they are
+   referenced only from those orphaned tables, which no domain root scan covers
+   -- so the nursery objects they point at are neither rooted nor forwarded by
+   the GCs that run in between, and the copy-nursery is recycled over them. A
+   queued finaliser then runs against aliased garbage (the finaliser_handover
+   SIGSEGV).
 
-   Mirror caml_final_do_roots (runtime/finalise.c) over every orphaned struct so the
-   binding can report these slots as roots in scan_vm_specific_roots, exactly as a
-   *live* domain's finalisers are rooted via caml_do_roots. The tables are
-   caml_stat_alloc'd C-heap arrays (like global roots), so we pass each slot's
-   address and the moving GC updates it in place. [do_val] gates rooting first/last
-   *values*: with MMTK_WEAK_REFS on it must be 0 (matching caml_do_roots) so dead
-   finalisable values can be detected and their finalisers fire; the run-queue
-   (todo) values are unconditionally rooted — they are already scheduled to run, so
-   they MUST survive (this is the crash case). The orphaned_lock guards against a
-   concurrent orphaning (cheap; we are under STW). */
+   Mirror caml_final_do_roots (runtime/finalise.c) over every orphaned struct so
+   the binding can report these slots as roots in scan_vm_specific_roots,
+   exactly as a *live* domain's finalisers are rooted via caml_do_roots. The
+   tables are caml_stat_alloc'd C-heap arrays (like global roots), so we pass
+   each slot's address and the moving GC updates it in place. [do_val] gates
+   rooting first/last *values*: with MMTK_WEAK_REFS on it must be 0 (matching
+   caml_do_roots) so dead finalisable values can be detected and their
+   finalisers fire; the run-queue
+   (todo) values are unconditionally rooted -- they are already scheduled to
+          run, so they MUST survive (this is the crash case). The orphaned_lock
+          guards against a concurrent orphaning (cheap; we are under STW). */
 #define Call_action(act,fdata,x) ((*(act)) ((fdata), (x), &(x)))
 void caml_mmtk_scan_orphaned_finalisers(scanning_action act,
                                         scanning_action_flags fflags,
@@ -757,8 +762,8 @@ update_major_slice_work(intnat howmuch,
   uintnat heap_words, heap_size, heap_sweep_words, total_cycle_work;
   uintnat percent_free;
 
-  /* The per-slice runtime_events counters this block gated have been removed (the
-     phantom CAML_EV_C_MAJOR_* writes); the parameter is retained for the
+  /* The per-slice runtime_events counters this block gated have been removed
+     (the phantom CAML_EV_C_MAJOR_* writes); the parameter is retained for the
      call-site ABI and intentionally ignored. */
   (void)log_events;
 
@@ -938,9 +943,9 @@ update_major_slice_work(intnat howmuch,
  * Mark stack (allocated/freed per domain; never populated under MMTk)
  ******************************************************************************/
 
-/* The mark stack is no longer used for tracing under always-on MMTk — MMTk owns
-   marking. The structure is still allocated in caml_init_major_gc and freed in
-   caml_teardown_major_gc, so its definition is retained. */
+/* The mark stack is no longer used for tracing under always-on MMTk -- MMTk
+   owns marking. The structure is still allocated in caml_init_major_gc and
+   freed in caml_teardown_major_gc, so its definition is retained. */
 
 #define MARK_STACK_INIT_SIZE (1 << 12)
 
@@ -966,8 +971,8 @@ void caml_darken_cont(value cont)
 
 void caml_darken(void* state, value v, volatile value* ignored) {
   /* Inert under always-on MMTk: MMTk owns tracing, and weak/ephemeron/finaliser
-     liveness is handled by process_weak_refs. Darkening here would push to a stack
-     nobody processes and corrupt the stock GC phase counters. No-op.
+     liveness is handled by process_weak_refs. Darkening here would push to a
+     stack nobody processes and corrupt the stock GC phase counters. No-op.
      Still called from finalise.c, memory.c, weak.c. */
   (void)state; (void)v; (void)ignored;
 }

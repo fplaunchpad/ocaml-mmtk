@@ -1,4 +1,4 @@
-(* MMTk DISABLED: bytecode signal-vs-allocation poll ordering: deterministic 01243 vs stock 01234 — the SIGUSR1 handler is delivered at a different allocation/poll point in the bytecode interpreter under MMTk (native passes) [behavioral-diff]. *)
+(* MMTk DISABLED: bytecode signal poll ordering 01243 vs stock 01234 (deterministic; native passes) [behavioral-diff]. *)
 
 external raise_sigusr1 : unit -> unit = "raise_sigusr1"
 

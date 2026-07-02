@@ -1,4 +1,4 @@
-(* MMTk DISABLED: #12c alignment-aware allocation: the test asserts NOT all Atomic.t are 16-byte aligned; MMTk's allocator aligns them all, so the assertion fails [unsupported-12c]. *)
+(* MMTk DISABLED: asserts NOT all Atomic.t are 16-byte aligned; MMTk aligns them all [unsupported-12c]. *)
 
 external is_aligned : 'a Atomic.t -> bool = "caml_atomic_is_aligned"
 let test_is_aligned () =

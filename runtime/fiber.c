@@ -438,22 +438,24 @@ void caml_scan_stack(
    exception is raised from *inside* caml_call_gc's saved-registers window.
 
    caml_call_gc (amd64.S) does SAVE_ALL_REGS, which POPS a bucket from
-   Caml_state->gc_regs_buckets (the free-list head) into Caml_state->gc_regs, and
-   relies on RESTORE_ALL_REGS pushing it back on return. Under MMTk's TLAB nursery
-   the allocation slow path (caml_alloc_small_dispatch) can fail to refill and call
-   caml_raise_out_of_memory() from *within* this window: the raise (caml_raise ->
-   caml_raise_exception) longjmps straight to the OCaml exception handler, never
-   returning to caml_call_gc, so RESTORE_ALL_REGS never runs and the popped bucket
-   is never pushed back. With a single bucket on the free-list (the steady state for
-   a single-domain native program), gc_regs_buckets is then left NULL while OCaml
-   code runs again (if Out_of_memory is caught) -- violating the fiber.h invariant
-   "at least one free bucket whenever running OCaml". The next allocation's
-   caml_call_gc SAVE then dereferences a NULL free-list head and SIGSEGVs.
+   Caml_state->gc_regs_buckets (the free-list head) into Caml_state->gc_regs,
+   and relies on RESTORE_ALL_REGS pushing it back on return. Under MMTk's TLAB
+   nursery the allocation slow path (caml_alloc_small_dispatch) can fail to
+   refill and call caml_raise_out_of_memory() from *within* this window: the
+   raise (caml_raise -> caml_raise_exception) longjmps straight to the OCaml
+   exception handler, never returning to caml_call_gc, so RESTORE_ALL_REGS never
+   runs and the popped bucket is never pushed back. With a single bucket on the
+   free-list (the steady state for a single-domain native program),
+   gc_regs_buckets is then left NULL while OCaml code runs again (if
+   Out_of_memory is caught) -- violating the fiber.h invariant "at least one
+   free bucket whenever running OCaml". The next allocation's caml_call_gc SAVE
+   then dereferences a NULL free-list head and SIGSEGVs.
 
-   Recycle the in-use bucket (Caml_state->gc_regs) back onto the free-list, exactly
-   as RESTORE_ALL_REGS would have. The saved register values in it are discarded --
-   correct, since the exception abandons that computation. Idempotent and cheap; a
-   no-op if a free bucket already exists or no bucket is in use. */
+   Recycle the in-use bucket (Caml_state->gc_regs) back onto the free-list,
+   exactly as RESTORE_ALL_REGS would have. The saved register values in it are
+   discarded -- correct, since the exception abandons that computation.
+   Idempotent and cheap; a no-op if a free bucket already exists or no bucket is
+   in use. */
 void caml_mmtk_recycle_gc_regs_bucket(void)
 {
   caml_domain_state *dom = Caml_state;
@@ -650,19 +652,21 @@ CAMLprim value caml_continuation_use_noexc (value cont)
   /* MMTk concurrent plan (ConcurrentImmix): a GC worker may be scanning this
      continuation's suspended fiber stack RIGHT NOW (binding scan_object ->
      caml_scan_stack) while we are about to take that stack and switch onto it.
-     Acquire the per-continuation scan lock (blocking) so the take below cannot run
-     concurrently with that scan; a worker holds the lock for the duration of its
-     scan, so this waits it out. This re-creates vanilla's NOT_MARKABLE header lock
-     (caml_darken_cont, now inert under MMTk) using an MMTk-side lock. Self-gated:
-     a no-op unless the concurrent plan is active. We hold it across the field-0
-     take; once field 0 is NULL the worker's continuation_stack() reads NULL and
-     scans nothing, so it is safe to release immediately after. */
+     Acquire the per-continuation scan lock (blocking) so the take below cannot
+     run concurrently with that scan; a worker holds the lock for the duration
+     of its scan, so this waits it out. This re-creates vanilla's NOT_MARKABLE
+     header lock (caml_darken_cont, now inert under MMTk) using an MMTk-side
+     lock. Self-gated: a no-op unless the concurrent plan is active. We hold it
+     across the field-0 take; once field 0 is NULL the worker's
+     continuation_stack() reads NULL and scans nothing, so it is safe to release
+     immediately after. */
   caml_mmtk_cont_lock(cont);
 
-  /* Snapshot this continuation's stack into the SATB buffer before we delete the
-     cont->stack edge below (the field-0 CAS bypasses the write barrier). Mirrors
-     vanilla caml_darken_cont scanning the stack on resume. No-op off the concurrent
-     marking window. Done under the lock so no GC worker scans concurrently. */
+  /* Snapshot this continuation's stack into the SATB buffer before we delete
+     the cont->stack edge below (the field-0 CAS bypasses the write barrier).
+     Mirrors vanilla caml_darken_cont scanning the stack on resume. No-op off
+     the concurrent marking window. Done under the lock so no GC worker scans
+     concurrently. */
   caml_mmtk_cont_snapshot(cont);
 
   v = Field(cont, 0);

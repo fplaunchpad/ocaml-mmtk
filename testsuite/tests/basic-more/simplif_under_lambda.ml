@@ -1,5 +1,5 @@
 (* MMTk DISABLED: Gc.finalise_last does not fire on the test's Gc.full_major under MMTk (native +
-   bytecode) — "collected" is never printed before "ok". finalise_last works in general (default-on);
+   bytecode) -- "collected" is never printed before "ok". finalise_last works in general (default-on);
    this specific full_major-triggered last-finaliser timing needs investigation. *)
 let f () =
   let junk = ref 42 in

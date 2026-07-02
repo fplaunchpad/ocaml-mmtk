@@ -180,15 +180,16 @@ CAMLexport void caml_enter_blocking_section(void)
     caml_leave_blocking_section_hook ();
   }
   /* Now committed to the blocking section: safe for MMTk STW. Pass the domain
-     identity captured above — the hook released the domain lock, so Caml_state
-     is NULL here and must not be read (see caml/mmtk.h: a NULL read here skipped
-     the safe-stopped accounting, desyncing MMTk's stop barrier). */
+     identity captured above -- the hook released the domain lock, so Caml_state
+     is NULL here and must not be read (see caml/mmtk.h: a NULL read here
+     skipped the safe-stopped accounting, desyncing MMTk's stop barrier). */
   caml_mmtk_enter_blocking((uintnat) domain);
 }
 
 CAMLexport void caml_enter_blocking_section_no_pending(void)
 {
-  /* Capture the domain before the hook releases the lock and nulls Caml_state. */
+  /* Capture the domain before the hook releases the lock and nulls Caml_state.
+     */
   uintnat domain = (uintnat) Caml_state;
   caml_enter_blocking_section_hook ();
   caml_mmtk_enter_blocking(domain);
