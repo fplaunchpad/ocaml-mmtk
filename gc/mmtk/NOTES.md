@@ -40,7 +40,7 @@ protocol conflict (ConcurrentImmix's bulk set/clear of unlog bits is NOT used). 
 filtered at every marking-queue entry point (barrier, `scan_and_enqueue`, `trace_object`) because the
 nursery moves at every pause — a queued young ref would dangle.
 
-**Two bring-up bugs worth remembering (both = live mature objects swept at FinalMark):**
+**Three bring-up bugs worth remembering (all = live mature objects swept at FinalMark):**
 1. *allocate-as-live must be armed in `prepare(InitialMark)`, not `end_of_gc`* (ConcurrentImmix arms it
    at end_of_gc because it has no in-pause allocation): InitialMark's own Closure promotes the whole live
    nursery; `post_copy` born-black-marks the objects but with `MARK_LINE_AT_SCAN_TIME` their LINES are
@@ -56,10 +56,47 @@ nursery moves at every pause — a queued young ref would dangle.
    FinalMark — the FinalMark remark also makes marking complete even if a future seeding gap appears
    (defence in depth, near-zero cost when concurrent coverage is complete).
 
-**Validated so far (macOS/M4):** alloc-heavy binarytrees-style native test at 48–64 MiB heap, 5 repeated
-runs + bytecode, output identical to GenImmix; pause mix 46 Nursery / 7 InitialMark / 7 FinalMark / 1 Full
-(the explicit `Gc.full_major`); STW GC time 70 ms vs GenImmix 94 ms on that test; `parser.ml` canonical
-compile repro clean; `sanity` feature clean. Testsuite + quick-panel benchmarks vs vanilla: next.
+3. *`ProcessEdgesWork`'s blanket `GCWork::do_work` called `flush()` only when `nodes` was non-empty* —
+   but the pause-aware trace buffers more than nodes (the InitialMark `mark_seed`). A remset packet
+   (`ProcessRegionModBuf`) whose slots all point at already-mature objects promotes nothing (nodes
+   empty) yet seeds thousands of mature objects — all silently dropped: **~70% of the snapshot's seeds**
+   on a bytecode `ocamlc` workload (`seeded=73306` vs `enqueued=21644`, found with the
+   `plan::concurrent::diag` counters + a Drop-side backtrace). Mature objects reachable only through
+   remset-adjacent subgraphs were never marked → swept live (deterministic SIGSEGV compiling
+   `patmatch.ml` with the BYTECODE compiler; native survived because the interpreter's much heavier
+   remset traffic is what starves the seed set). Fix: blanket `do_work` always flushes (no-op on empty),
+   plus a Drop-side `flush_mark_seed()` safety net for `with_tracer`-style callers that drop the trace
+   without `flush()`. Diagnosed with `sanity`+`vo_bit` (the checker now prints owning space, mark bit,
+   line-mark state, header and the referring slot on a VO-bit miss).
+
+**Validation (macOS/M4, 2026-07-02):**
+- **Testsuite**: `make -C testsuite parallel TIMEOUT=120` under `MMTK_PLAN=Bactrian`: **1441 passed /
+  53 skipped / 2 failed — both failures also fail under GenImmix on this host** (`native-debugger/
+  macos-lldb-arm64`, `output-complete-obj`), i.e. zero plan-specific failures; equal to the GenImmix
+  baseline.
+- Alloc-heavy binarytrees-style native test at 48–64 MiB heap, 5 repeated runs + bytecode: output
+  identical to GenImmix; pause mix 46 Nursery / 7 InitialMark / 7 FinalMark / 1 Full (the explicit
+  `Gc.full_major`); STW GC time 70 ms vs GenImmix 94 ms. `parser.ml` + `patmatch.ml` compile repros
+  clean (native + bytecode); `par_binarytrees` correct at 2/4/8 domains; `sanity`+`vo_bit` clean.
+- **Quick panel (perf sizes, 1 domain, dynamic heap, reps 3, vs vanilla 5.5.0): Bactrian is within 5%
+  of vanilla on 7 of 8 sequential benches** — binarytrees **1.05×** (GenImmix 1.18×, the delta is the
+  concurrent major replacing STW full retraces), nbody 1.01×, fannkuchredux 1.03×, spectralnorm 1.05×,
+  mandelbrot 0.99×, matmul **0.89×**, LU **1.05×** (GenImmix 1.09×), kb **1.20×** (= GenImmix 1.20×,
+  the per-minor-GC framework floor; NOTES 2026-06-24). RSS premium remains (binarytrees 242 MiB vs
+  vanilla 92 — the dynamic live×2.2 trigger + Immix mature).
+- **Parallel**: par_spectralnorm/par_matmul ≈ GenImmix scaling (better than ConcurrentImmix at 8
+  domains). par_binarytrees still anti-scales and is WORSE than GenImmix mid-cycle (d=8: 4496 ms vs
+  GenImmix 2723 vs vanilla 465) — the multi-domain STW coordination cost (SCALABILITY.md) compounds
+  with cycle pauses; this is now the clearest algorithm-matched exhibit of the framework's
+  multi-domain gap.
+
+**RQ7 first readout (the point of the plan):** matching stock's collector architecture moves MMTk from
+GenImmix's 1.1–1.2× band to **~1.0–1.05× of vanilla single-domain throughput** on 7/8 benches — i.e.
+most of the previously-measured gap was *algorithmic* (STW full-heap major vs concurrent major), not
+MMTk abstraction overhead. What remains attributable to the framework at matched algorithm: the
+per-minor-GC pause floor (kb-style remset/minor-frequency-bound workloads, ~1.2×), the memory premium,
+and the multi-domain STW coordination (par_binarytrees). Those three are now the quantified
+"framework cost" targets.
 
 **Debug knobs:** `BACTRIAN_TRACE=1` (eprintln pause tracing — release builds strip `log`),
 `BACTRIAN_NO_CONCURRENT=1` (degrade cycle requests to STW Full = GenImmix-equivalent; useful both for

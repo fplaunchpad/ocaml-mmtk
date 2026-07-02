@@ -498,10 +498,14 @@ The active research/measurement threads behind the M8 milestone — the index; d
   STW-evacuated Immix mature (ConcurrentImmix) + slot-granular SATB deletion barrier, composed as
   `MMTK_PLAN=Bactrian` in the mmtk-core fork (submodule branch `bactrian`). Every pause except `Full` is
   nursery-anchored (InitialMark = minor GC + snapshot seeding; FinalMark = minor GC + remark + sweep);
-  GH#5 mature pressure starts a concurrent cycle, user GCs stay STW Full. Validated: alloc-heavy
-  native+bytecode smoke identical to GenImmix, parser.ml repro, sanity-clean; testsuite + benchmark
-  campaign vs vanilla are the next step. Remaining RQ7 sub-questions: slice-paced incrementality and
-  concurrent sweep. → RESEARCH_QUESTIONS RQ7; NOTES 2026-07-02.
+  GH#5 mature pressure starts a concurrent cycle, user GCs stay STW Full. Validated: testsuite 1441
+  passed / 2 failed with both failures shared with the GenImmix baseline (zero plan-specific);
+  sanity+vo_bit clean. **First RQ7 readout: quick panel has Bactrian within ~5% of vanilla on 7/8
+  sequential benches (binarytrees 1.05× vs GenImmix's 1.18×)** — most of the previously-measured gap
+  was algorithmic (STW major vs concurrent major), not MMTk abstraction overhead; the quantified
+  residual framework costs are the per-minor-GC pause floor (kb 1.20×), the RSS premium, and
+  multi-domain STW coordination (par_binarytrees anti-scaling). Remaining RQ7 sub-questions:
+  slice-paced incrementality and concurrent sweep. → RESEARCH_QUESTIONS RQ7; NOTES 2026-07-02.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write
