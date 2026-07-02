@@ -134,8 +134,9 @@ mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) als
 ### GC plans
 
 `MMTK_PLAN` selects the collector at startup (default **`GenImmix`** — generational, copying nursery over
-an Immix mature, the stock-OCaml-faithful fit for OCaml's short-lived allocation). **10** of 0.32's 11
-plans are wired in bytecode; **7** run native (those whose allocator the inlined TLAB can alias).
+an Immix mature, the stock-OCaml-faithful fit for OCaml's short-lived allocation). **11** plans are wired
+in bytecode (10 of 0.32's 11 + the fork's own `Bactrian`); **8** run native (those whose allocator the
+inlined TLAB can alias).
 
 | Plan | Description | Runtimes |
 |------|-------------|----------|
@@ -149,6 +150,7 @@ plans are wired in bytecode; **7** run native (those whose allocator the inlined
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
 | `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
+| `Bactrian` | generational + concurrent: copying nursery, SATB-marked Immix mature | bytecode + native (RQ7 stock-faithful research plan, branch `bactrian`) |
 
 `ConcurrentImmix` is the low-latency **research** plan: concurrent marking + SATB write barrier
 (bytecode + native), clean on `lazy` and effect-handler continuations (subtle cases in

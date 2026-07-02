@@ -493,10 +493,15 @@ The active research/measurement threads behind the M8 milestone — the index; d
   GenImmix/StickyImmix/GenCopy; weak-ephe-final 10/14 on all four of GenImmix/Immix/StickyImmix/GenCopy
   (GenImmix was 8/14); binarytrees throughput at Immix parity. `finaliser_handover` SIGSEGV was the
   separate #55 sub-bug (now passing). → FAQ Q11; NOTES 2026-06-29; GitHub #5.
-- **RQ7 — `Bactrian` hybrid (flagship research direction).** The faithful MMTk realization of
-  OCaml's collector: copying nursery (GenImmix) + concurrently-marked, STW-evacuated Immix mature
-  (ConcurrentImmix) + SATB barrier. Both halves are landed natively; composing them with a (near-)non-moving,
-  incremental mature is the open mmtk-core-fork work. → RESEARCH_QUESTIONS RQ7.
+- **RQ7 — `Bactrian` hybrid (flagship research direction) — v1 LANDED (2026-07-02, branch `bactrian`).**
+  The faithful MMTk realization of OCaml's collector: copying nursery (GenImmix) + concurrently-marked,
+  STW-evacuated Immix mature (ConcurrentImmix) + slot-granular SATB deletion barrier, composed as
+  `MMTK_PLAN=Bactrian` in the mmtk-core fork (submodule branch `bactrian`). Every pause except `Full` is
+  nursery-anchored (InitialMark = minor GC + snapshot seeding; FinalMark = minor GC + remark + sweep);
+  GH#5 mature pressure starts a concurrent cycle, user GCs stay STW Full. Validated: alloc-heavy
+  native+bytecode smoke identical to GenImmix, parser.ml repro, sanity-clean; testsuite + benchmark
+  campaign vs vanilla are the next step. Remaining RQ7 sub-questions: slice-paced incrementality and
+  concurrent sweep. → RESEARCH_QUESTIONS RQ7; NOTES 2026-07-02.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write

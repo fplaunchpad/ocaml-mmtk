@@ -5,6 +5,75 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## RQ7 `Bactrian` v1 LANDED — copying nursery + concurrently-marked, STW-evacuated Immix mature + SATB, as one plan (2026-07-02)
+
+**What landed (branch `bactrian`, submodule branch `bactrian`, mmtk-core commit `2d40032a24`):**
+`MMTK_PLAN=Bactrian`, the faithful MMTk realization of stock OCaml 5's collector and the RQ7
+apples-to-apples vehicle: same GC architecture as vanilla (generational, copying minor, mostly-concurrent
+SATB-marked non-moving-in-practice major, deletion barrier, no read barrier), so Bactrian-vs-vanilla
+measures framework/implementation overhead rather than collector-design difference. Composition of the two
+already-landed halves: `CommonGenPlan`'s copying nursery + ConcurrentImmix's SATB machinery.
+
+**Pause structure — every pause except `Full` is a nursery collection** (stock parity: vanilla's major
+phase changes ride on STW sections that empty the minor heaps):
+- `Nursery` — GenImmix's minor GC, allowed mid-cycle;
+- `InitialMark` — minor GC fused with the snapshot: the (pause-aware) nursery trace seeds the
+  `Concurrent` bucket with every mature object it touches (roots, remset targets, mature children of
+  promoted objects). Emptying the nursery here makes ALL young objects post-snapshot, which is the
+  soundness basis for the marker skipping young references entirely;
+- `FinalMark` — minor GC + **remark** (the same pause-aware trace marks anything concurrent marking
+  missed, so mark state is complete at this pause no matter what — the classic SATB final-remark
+  structure; it is also what lets weak/ephemeron/finaliser "retain" resurrect mature objects correctly)
+  + weak processing over complete marks + mature sweep;
+- `Full` — GenImmix's STW full-heap (defrag-capable) path, reserved for user-forced GCs
+  (`Gc.full_major`/`compact` — `user_triggered && next_gc_full_heap` → Full) and emergencies. The GH#5
+  mature-pressure/cadence trigger (`force_full_heap_collection` without a user trigger) instead STARTS A
+  CONCURRENT CYCLE — that is what a "major collection" is in this design, as in stock; a completed cycle
+  counts in `last_collection_full_heap()` (so `Gc.major_collections` advances per cycle and the GH#5
+  baseline resets at FinalMark).
+
+**Barrier** (`BactrianBarrier`, both C flags on: `caml_mmtk_generational` && `caml_mmtk_concurrent`):
+generational half = GenImmix's object/region remembering, unchanged, sole owner of the unlog bit; SATB
+half = slot-granular, gated on marking-active, no dedup bit, young referents skipped — exactly stock's
+`caml_darken(old)` deletion barrier. This division dissolves the ObjectBarrier-vs-SATBBarrier log-bit
+protocol conflict (ConcurrentImmix's bulk set/clear of unlog bits is NOT used). Young references are
+filtered at every marking-queue entry point (barrier, `scan_and_enqueue`, `trace_object`) because the
+nursery moves at every pause — a queued young ref would dangle.
+
+**Two bring-up bugs worth remembering (both = live mature objects swept at FinalMark):**
+1. *allocate-as-live must be armed in `prepare(InitialMark)`, not `end_of_gc`* (ConcurrentImmix arms it
+   at end_of_gc because it has no in-pause allocation): InitialMark's own Closure promotes the whole live
+   nursery; `post_copy` born-black-marks the objects but with `MARK_LINE_AT_SCAN_TIME` their LINES are
+   only marked by the copy allocator's eager `allocate_as_live` path. Unarmed ⇒ every InitialMark
+   promotion was line-unmarked ⇒ freed by FinalMark's line-granular sweep (crash signature: channel
+   custom block overwritten → `Fatal error during try_lock: Invalid argument` / SEGV in
+   `caml_ml_output_bytes`).
+2. *the remset scan must use the pause-aware trace*: `ProcessModBuf`/`ProcessRegionModBuf` packets are
+   typed at barrier-flush time; with plain `GenNurseryProcessEdges` the InitialMark remset scan promoted
+   young targets WITHOUT seeding the marker, so mature objects reachable only through remset-promoted
+   subgraphs were never marked ⇒ swept live. Fixed by one unified `BactrianNurseryProcessEdges` (used by
+   ALL nursery-anchored pauses and the barrier packets) that seeds at InitialMark and remarks at
+   FinalMark — the FinalMark remark also makes marking complete even if a future seeding gap appears
+   (defence in depth, near-zero cost when concurrent coverage is complete).
+
+**Validated so far (macOS/M4):** alloc-heavy binarytrees-style native test at 48–64 MiB heap, 5 repeated
+runs + bytecode, output identical to GenImmix; pause mix 46 Nursery / 7 InitialMark / 7 FinalMark / 1 Full
+(the explicit `Gc.full_major`); STW GC time 70 ms vs GenImmix 94 ms on that test; `parser.ml` canonical
+compile repro clean; `sanity` feature clean. Testsuite + quick-panel benchmarks vs vanilla: next.
+
+**Debug knobs:** `BACTRIAN_TRACE=1` (eprintln pause tracing — release builds strip `log`),
+`BACTRIAN_NO_CONCURRENT=1` (degrade cycle requests to STW Full = GenImmix-equivalent; useful both for
+bisection and for isolating the concurrency contribution in the RQ7 comparison).
+
+**Known deviations from stock (v1, deliberate):** marking is concurrent but not paced as bounded
+mutator slices (stock's `major_slice`); sweep is STW at FinalMark (stock sweeps incrementally); weak
+processing at mid-cycle nursery pauses treats mature referents as live (stock minor rule; complete marks
+are only consulted at FinalMark/Full — binding's `NURSERY_GC` flag refined with
+`current_pause_finishes_mark()`). These are the RQ7 "incremental vs mostly-concurrent" open sub-question,
+not accidents.
+
+---
+
 ## GH#3 / #31 Domain.join result-UAF — promotion made reliable (global root), BUT residual is a SEPARATE post-publish term_sync->state corruption (2026-06-29)
 
 **The prior diagnosis was half right.** `1d2504ab4f` fixed #31 by forcing `caml_mmtk_collect()` in

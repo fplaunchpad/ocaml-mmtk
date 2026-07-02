@@ -374,11 +374,22 @@ impl Scanning<OCamlVM> for VMScanning {
         // is stale and must not drive weak/ephemeron clearing (mirrors stock's
         // minor rule). false for full GCs and non-generational plans. process_weak_refs
         // runs on a single GC worker during STW, so a plain relaxed store is enough.
+        //
+        // Bactrian refinement: its FinalMark pause is nursery-anchored
+        // (is_current_gc_nursery() is true — the modbuf/promotion machinery needs
+        // that), but by the time this weak stage runs the concurrent marking cycle
+        // has fully drained, so mature mark state IS complete and mature-dead
+        // weaks/ephemerons must be judged (and cleared) normally — that is the whole
+        // point of the cycle. current_pause_finishes_mark() distinguishes the
+        // cycle-completing pause from a mid-cycle nursery pause (stale marks).
+        let plan = crate::mmtk().get_plan();
+        let marks_complete = plan
+            .concurrent()
+            .map_or(false, |c| c.current_pause_finishes_mark());
         NURSERY_GC.store(
-            crate::mmtk()
-                .get_plan()
-                .generational()
-                .map_or(false, |g| g.is_current_gc_nursery()),
+            plan.generational()
+                .map_or(false, |g| g.is_current_gc_nursery())
+                && !marks_complete,
             Ordering::Relaxed,
         );
         let domains = domain_addrs();

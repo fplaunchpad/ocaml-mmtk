@@ -145,8 +145,10 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 ## GC plan & env knobs
 
-- `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
-  Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix.
+- `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `Bactrian` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
+  Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix/Bactrian.
+  `Bactrian` (RQ7, branch `bactrian`) = copying nursery + concurrently-marked STW-evacuated Immix mature + SATB —
+  the stock-OCaml-faithful plan; debug knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
 - `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
   full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 16 MiB..physical-RAM, so
   RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set

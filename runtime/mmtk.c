@@ -145,10 +145,15 @@ void caml_mmtk_init(void)
   mmtk_ocaml_init(heap_bytes, plan);
   caml_mmtk_initialised = 1;
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
+  /* Bactrian (RQ7) is BOTH: a copying nursery (generational barrier) and a
+     concurrently-marked mature space (SATB deletion barrier + continuation
+     snapshot/lock machinery). Both flags on arms both halves of write_barrier(). */
   caml_mmtk_generational = (strcmp(plan, "GenImmix") == 0
                            || strcmp(plan, "StickyImmix") == 0
-                           || strcmp(plan, "GenCopy") == 0);
-  caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0);
+                           || strcmp(plan, "GenCopy") == 0
+                           || strcmp(plan, "Bactrian") == 0);
+  caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0
+                          || strcmp(plan, "Bactrian") == 0);
 
   /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
      plan including ConcurrentImmix. OCaml fully initializes every block before the
@@ -161,6 +166,9 @@ void caml_mmtk_init(void)
          marked, and the concurrent marker does NOT field-scan freshly-allocated
          (black) objects, so the header-written / fields-unwritten window is never
          traced. Hence no-zero is safe here too.
+       - Bactrian: both arguments compose. Young objects are never traced by the
+         concurrent marker (it skips the nursery), nursery collection is STW at a
+         safepoint, and mature allocations during marking are born live/black.
      Set before any allocation (this runs at init, before any domain/mutator is
      bound).
      EXCEPTION: MarkCompact must keep zeroing ON. It is a Lisp-2 sliding-compaction
@@ -242,7 +250,7 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
   } else {
     caml_fatal_error(
       "MMTk native code requires a plan whose Default allocator is an Immix or "
-      "bump allocator (Immix/StickyImmix/GenImmix/GenCopy/SemiSpace/NoGC); "
+      "bump allocator (Immix/StickyImmix/GenImmix/Bactrian/GenCopy/SemiSpace/NoGC); "
       "MMTK_PLAN=%s has no bump/Immix Default allocator (e.g. MarkSweep's "
       "free-list or MarkCompact's per-object-header bump allocator)",
       getenv("MMTK_PLAN") ? getenv("MMTK_PLAN") : "Immix");
