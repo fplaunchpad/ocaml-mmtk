@@ -581,6 +581,21 @@ MPLR/ISMM.
 
 ### RQ10 — What is the right minor-collection architecture for OCaml-on-MMTk? Keep stock's scalable minor, or make MMTk's STW the sole rendezvous? *(architecture; motivated by the multi-domain anti-scaling finding)*
 
+**UPDATE (2026-07-02 — now DIRECTLY MEASURED, cross-host; the answer is sharp).** The residual is a *direct
+STW-wall* effect. `gc_time_ms` is the STW pause-wall (single `Instant` span `stop_all_mutators`→`resume_mutators`),
+so **STW-wall fraction = gc_time/wall** is measurable — and it **scales with domain count**: GenImmix climbs to
+**~94%** (par_binarytrees d1→d28, turing 28c + M4 8c), i.e. at high domains the program is almost entirely
+stopped-the-world and cannot use more cores. This confirms the design axis is the sole determinant:
+**ConcurrentImmix** (off-STW concurrent mark) holds STW **flat ~7–15%** and scales — and its old continuation-scan
+hang is now FIXED (GH#4/#14 closed), so it is **correctness-ready** as the parallel default. **LXR** (incremental RC)
+is faster than GenImmix at every domain count but does NOT escape it — its RC inc/dec *pause* is itself STW and
+climbs to **~74%**. Controls falsify the alternatives: a bigger nursery makes it *worse* (not starvation), and
+`MMTK_THREADS=1` makes it *worse* (not GC-worker contention). **RQ10 verdict: not fundamental / fixable** — the STW
+*minor* barrier is baked in (it caps even stock at ~0.49 efficiency on 8 cores, so *stock parity* — not linear — is
+the ceiling), but the *anti-scaling* is entirely the on-STW MATURE reclamation, removable by making it concurrent
+(SATB mark — read-barrier-free in OCaml per RQ1's init-write-dominated finding; or concurrent RC-pause processing).
+Full data + tables: `SCALABILITY.md` UPDATE 3.
+
 **Hook (the empirical trigger).** The 2026-06 scalability study (`SCALABILITY.md`) found that the fork's
 default (GenImmix) is **mildly sublinear** across domains on allocation-heavy parallel work — *not* the
 dramatic "anti-scaling" the first runs reported. On a clean, core-pinned re-run (turing 28-core,

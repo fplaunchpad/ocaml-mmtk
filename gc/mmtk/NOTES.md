@@ -5,6 +5,25 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## LXR chameneos SIGSEGV root-caused: unguarded RC slot-unlog on mmap'd fiber-stack slots (2026-07-02)
+
+The `chameneos_redux` SIGSEGV under LXR (single-domain, any heap; fires whenever a **continuation block is
+RC-promoted** — heap-dependent, NOT size-dependent) is root-caused (lldb): `plan/lxr/rc.rs:221` in
+`ProcessIncs::scan_nursery_object`'s `iterate_fields` closure does `slot.to_address().unlog_field_relaxed::<VM>()`
+**UNGUARDED**. On promoting a continuation block (`Cont_tag`) the binding's `scan_object` → `caml_scan_stack`
+(`runtime/fiber.c`) → `visit_cont_stack_slot` (`scanning.rs:233`) feeds **fiber-stack slot addresses** into the
+visitor. Fiber stacks are `mmap`/`caml_stat_alloc`'d — **NOT in MMTk spaces** — so the UNLOG side-metadata page
+for that address is unmapped → EXC_BAD_ACCESS. The twin unlog at `rc.rs:621` (recursive keep-alive scan) is the
+same hazard. Same bug CLASS as the GH#15 `FieldSlot::load` fix (RC indexes raw side-metadata and must re-check
+`is_in_mmtk_spaces`; tracing plans survive via SFT-bounds-aware trace). ConcurrentImmix survives identical stacks
+because its concurrent-mark path does NO per-slot unlog. **FIX:** guard both slot-unlogs with `is_in_mmtk_spaces`
+(skip non-heap stack slots — they are not field-barrier-tracked). Needs staticlib rebuild + relink + bench rebuild
+to validate (LXR chameneos → exit 0 / checksum 16000000; mmtk `sanity` small-heap binarytrees clean). This is the
+residual "open LXR limitation" from 2026-07-01 trap #2, now root-caused. Found by the #30 investigation agent —
+which also established **`#30` is the deferred ConcurrentImmix UNLOG-bit barrier-gate PERF item (internal, not a GH
+issue, not a blocker)**, and that **ConcurrentImmix's continuation-scan hang GH#4/#14 is already FIXED** (verified
+2026-07-02: ~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB) → ConcurrentImmix is correctness-ready.
+
 ## Parallel-scaling gap ROOT CAUSE: STW mature/full-GC FREQUENCY scales with domain count (2026-07-01)
 
 Analysed WHY every MMTk plan scales far worse than stock OCaml on alloc-heavy parallel workloads (binarytrees:
@@ -15,14 +34,18 @@ concurrently live at each STW minor GC → promotion scales ~N → the Immix mat
 mature-pressure full-GC trigger (`binding/src/collection.rs` `MATURE_PRESSURE_OVERHEAD_PCT=120`, `stop_all_mutators`)
 fires ~N× more → ~N× more whole-mature-heap STW traces. Decomposition (d1→d8, fixed total alloc): **full-GCs ×2.4–5.0,
 total-GCs only ×1.48, GC-time tracks full-GC count.** Stock absorbs the same promotion as CONCURRENT major work
-(off-STW), so it doesn't grow the pause. Corroboration: ConcurrentImmix (off-STW trace, copied=0) & LXR (incremental
-RC, GC-time ~constant 575→541ms) both out-scale GenImmix; nursery-size control refutes starvation; GC-light matmul
-scales fine on all plans. **RQ10:** the bottleneck is the STW-mature *design choice* / integration boundary, not the
-GenImmix algorithm — swap the mature-reclamation discipline (concurrent trace / RC) at the same nursery+rendezvous and
-scaling returns. Caveats: `gc_time_ms` is aggregate CPU not pause-wall (full-GC *count* scaling is the unambiguous
-evidence; a per-domain STW-vs-mutator wall decomposition via `perf`/`bpftrace` is the open confirmation), and the
-analysis workflow's independent adversarial-verify layer did not run (schema bug) — synthesis was self-verified +
-code-checked only. Ranked remedies in SCALABILITY.md UPDATE 3 / §7 (finish ConcurrentImmix = highest).
+(off-STW), so it doesn't grow the pause. Corroboration (STW-wall FRACTION, cross-host turing 28c + M4, d1→d28,
+UPDATE 3): **ConcurrentImmix stays FLAT ~7–15% — the clean fix; GenImmix climbs to 94%; LXR climbs to ~74%** (its RC
+increment/decrement *pause* is itself STW and its volume scales with domains — NOT flat, correcting an earlier
+"LXR GC-time ~constant 575→541ms" claim; LXR still beats GenImmix in absolute wall). Nursery-size control refutes
+starvation; GC-light matmul scales fine on all plans. **RQ10:** the bottleneck is the STW-mature *design choice* /
+integration boundary, not the GenImmix algorithm — swap the mature-reclamation discipline (concurrent trace / RC) at
+the same nursery+rendezvous and scaling improves. **Caveat CLOSED:** `gc_time_ms` turned out to BE the STW pause-wall
+(single `Instant` span stop_all_mutators→resume_mutators, `collection.rs:328`), NOT aggregate CPU — the decomposition
+is direct and cross-host-confirmed. (The analysis workflow's independent adversarial-verify layer did not run —
+schema bug — so synthesis was self-verified + code-checked + independently re-measured.) Ranked remedies in
+SCALABILITY.md UPDATE 3 / §7 — **ConcurrentImmix is the fix and its continuation-scan hang is already FIXED (GH#4/#14
+closed), so it is correctness-ready today; the residual is the LXR fiber-stack-slot SIGSEGV (rc.rs:221/:621, below).**
 
 ## LXR parallel-scaling panel: RC does NOT rescue the multi-domain anti-scaling (2026-07-01)
 

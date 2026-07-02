@@ -79,9 +79,12 @@
 > `runtime/major_gc.c` is bypassed). Stock absorbs the extra promotion as *concurrent* mature work overlapping the
 > mutators; MMTk GenImmix does it as *synchronous STW*, then scales that pause's frequency with N. **That design
 > choice — where mature reclamation runs, on-STW vs concurrent — is the sole determinant of scaling here.**
-> Corroboration: **ConcurrentImmix** (off-STW trace) keeps GC-time nearly flat & copied=0 and out-scales GenImmix;
-> **LXR** (incremental RC, no STW mature trace) has **GC-time ~constant** across the sweep (575→541 ms) and is the
-> best MMTk plan. The **nursery-size control** refutes starvation (128 MiB @d8 cuts GC count but makes wall *worse*
+> Corroboration: **ConcurrentImmix** (off-STW trace) keeps GC-time nearly flat & copied=0 and out-scales GenImmix.
+> **LXR** (incremental RC) is fastest single-domain and beats GenImmix at every domain count, **but its RC-pause STW
+> is NOT flat** — it climbs 9→74% with domains (see the STW-fraction table below; this corrects an earlier
+> "LXR GC-time ~constant" claim), because RC increment/decrement *pause* processing is itself stop-the-world and its
+> volume scales with mutation/allocation ∝ domains. So only ConcurrentImmix keeps STW flat. The **nursery-size
+> control** refutes starvation (128 MiB @d8 cuts GC count but makes wall *worse*
 > 2.66→3.21 s → it's per-collection STW *cost*, not thrash). `par_matmul` (GC-light) scales fine on every plan —
 > the gap appears *only* under mature promotion, exactly as predicted.
 >
@@ -98,7 +101,9 @@
 > artifact of on-STW mature reclamation (removable). What IS baked-in is OCaml 5's global STW-minor barrier, which
 > caps even the best case at stock's ~0.49 efficiency — reaching stock parity, not linear speedup, is the target.
 > Fix path (ranked): (1) **ConcurrentImmix + native SATB** — concurrent MARK is read-barrier-free in OCaml (RQ1:
-> init-write-dominated), the cheap high-impact win, unblock #30; (2) **domain-aware full-GC trigger**
+> init-write-dominated), the cheap high-impact win; its continuation-scan hang (GH#4/#14) is **already fixed** and
+> it is **correctness-ready as the parallel default** (only the deferred UNLOG-bit barrier-gate PERF item `#30`
+> remains, not a blocker); (2) **domain-aware full-GC trigger**
 > (`MATURE_PRESSURE_OVERHEAD_PCT` is domain-blind → fires ~N× more) to cut frequency; (3) **LXR** as the
 > read-barrier-free *moving*-reclamation research vehicle (concurrent EVACUATION is the hard part — needs a read
 > barrier or RC); (4) non-gen **Immix** as the pragmatic interim parallel default.
@@ -117,16 +122,22 @@
 >
 > | domains | 1 | 2 | 4 | 8 | 16 | 28 |
 > |---|--:|--:|--:|--:|--:|--:|
-> | **GenImmix** (M4 Pro, 8c) | 60 | 80 | 90 | 94 | — | — |
-> | **GenImmix** (turing, 28c) | 65 | 73 | 81 | 90 | 93 | **94** |
-> | **ConcurrentImmix** (turing, 28c) | 11 | 12 | 9 | 16 | 17 | 17 |
+> | **GenImmix** (turing, 28c) | 73 | 76 | 83 | 91 | 93 | **94** |
+> | **ConcurrentImmix** (turing, 28c) | 12 | 7 | 11 | 13 | 14 | **15** |
+> | **LXR** (turing, 28c, 1 GiB) | 9 | 15 | 27 | 51 | 74 | **71** |
+> | GenImmix (M4 Pro, 8c) | 60 | 80 | 90 | 94 | — | — |
 >
+> (turing rows: one clean build `a52e3a776`, MMTK_THREADS=domains, single rep — the monotone trend is robust.)
 > GenImmix's STW fraction climbs and **plateaus ~94%** — at high domain count the program is almost entirely
 > stopped-the-world, so there is no mutator parallelism left to gain (its wall bottoms at d4 then *rises* d8→d28) →
-> anti-scaling. Off-STW **ConcurrentImmix stays flat at ~10–17%** across d1→d28 at both hosts — isolating the
-> STW-mature trace as THE cause and confirming the fix holds at scale. (ConcurrentImmix's own mild residual wall
-> sublinearity is small and NOT STW — a separate mutator/concurrent-worker matter.) The M4 and turing GenImmix
-> curves agree (60→94 vs 65→94), so it is not a host artifact. Method note: the 6 structured lenses of the analysis
+> anti-scaling. **Only off-STW ConcurrentImmix stays flat (~7–15%)** across d1→d28 → it is THE clean fix, and it
+> holds at scale. **LXR does NOT stay flat** (this corrects an earlier over-optimistic "LXR GC-time ~constant"
+> claim): its STW fraction climbs 9→**74%**, because LXR's **RC increment/decrement *pause* processing is itself
+> stop-the-world and its volume scales with domains** (dec-buffer size ∝ mutation/alloc ∝ domains; par_binarytrees
+> is acyclic so ~0 backup traces — this is pure RC pause work). LXR is still markedly better than GenImmix — lower
+> STW-plateau (74% vs 94%) and ~2× lower absolute wall (d8 2.3 s vs 5.8 s) — but it does *not* escape the
+> "on-STW work scales with domains" trap; **only making the reclamation concurrent (ConcurrentImmix) does.** The
+> M4 and turing GenImmix curves agree (60→94 vs 73→94), so it is not a host artifact. Method note: the 6 structured lenses of the analysis
 > workflow failed on an output-schema bug; synthesis was self-verified + code-checked and the STW-wall
 > decomposition is now cross-host-confirmed — but the independent adversarial-verify layer did NOT run, so treat the
 > mechanism as strong + measured and the ranked remedies as one-analyst.

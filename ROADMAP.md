@@ -330,8 +330,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    Promotion fixes only move the rate; **GH#3 stays OPEN** for the residual (next: rr the deterministic `0x400`
    write). → NOTES 2026-06-29 (newest entry).
    Phase 3 **structurally eliminated the bug#3c/dual-STW deadlock class** (no second barrier for a
-   terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
-   continuation-scan hang. Kept (as plain spawn/terminate state, not barriers): `all_domains_lock` +
+   terminating RUNNING domain to lead). The separate ConcurrentImmix chameneos continuation-scan hang is
+   **also FIXED** (GH#4 + GH#14 closed; mmtk-core `88ab2f5ea5` lost-wakeup fix at the Concurrent→FinalMark
+   bucket boundary + `72ee627050` + cont_lock yield-spin; fork bump `3f6f10072`) — re-verified 2026-07-02
+   (~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB, byte-identical checksum), so ConcurrentImmix
+   is correctness-ready. (The residual effect/fiber bug is now **LXR-only**: an unguarded RC slot-unlog on
+   mmap'd fiber-stack slots, `plan/lxr/rc.rs:221`/`:621` — see NOTES 2026-07-02.) Kept (as plain
+   spawn/terminate state, not barriers): `all_domains_lock` +
    `stw_domains` (now a plain spawn/terminate mutex) and the `young_limit`-poison (MMTk's STW reuses it);
    the backup thread is systhreads-entangled, so its deletion is deferred to **#20**. The multi-domain exit
    caller (`caml_stop_all_domains`) now `remove_running`+deregisters each cancelled peer so the sole
