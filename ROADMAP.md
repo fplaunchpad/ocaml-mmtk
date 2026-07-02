@@ -509,7 +509,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
   (GenImmix was 8/14); binarytrees throughput at Immix parity. `finaliser_handover` SIGSEGV was the
   separate #55 sub-bug (now passing). → FAQ Q11; NOTES 2026-06-29; GitHub #5.
 - **RQ7 — `Bactrian` hybrid (flagship research direction) — v1 LANDED (2026-07-02, branch `bactrian`).**
-  The faithful MMTk realization of OCaml's collector: copying nursery (GenImmix) + concurrently-marked,
+  The stock-architecture MMTk plan (architecture-matched, not implementation-matched — gc/mmtk/BACTRIAN.md): copying nursery (GenImmix) + concurrently-marked,
   STW-evacuated Immix mature (ConcurrentImmix) + slot-granular SATB deletion barrier, composed as
   `MMTK_PLAN=Bactrian` in the mmtk-core fork (submodule branch `bactrian`). Every pause except `Full` is
   nursery-anchored (InitialMark = minor GC + snapshot seeding; FinalMark = minor GC + remark + sweep);

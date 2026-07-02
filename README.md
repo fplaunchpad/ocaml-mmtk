@@ -84,8 +84,10 @@ Wall (× vs vanilla) / max RSS (MiB):
 | LU_decomposition | 1.00× / 17 | 1.03× / 99 | 1.28× / 98 | 1.30× / 107 | 1.04× / 99 | 1.17× / 258 |
 | kb | 1.00× / 8 | 1.23× / 95 | 1.06× / 103 | 0.94× / 147 | 1.22× / 95 | 1.59× / 199 |
 
-**Wall.** **`Bactrian` (RQ7) — the stock-OCaml-faithful plan (copying nursery + concurrently-marked,
-STW-evacuated Immix mature + SATB deletion barrier, i.e. vanilla's own collector architecture in MMTk) —
+**Wall.** **`Bactrian` (RQ7) — the stock-*architecture* plan (copying nursery + concurrently-marked,
+(near-)non-moving Immix mature + SATB deletion barrier — vanilla's collector *architecture*, though not
+its implementation: vanilla marks AND sweeps in mutator slices with only tiny colour-flip STW sections,
+while Bactrian marks on GC workers and still sweeps STW at FinalMark) —
 tracks vanilla within ~6% on 7 of 8 benches** (`binarytrees` 1.06× where GenImmix is 1.26×; `LU` 1.04×;
 `spectralnorm` 0.99×; `matmul` 0.87×), with `kb` the lone loss (1.22×, = GenImmix — the per-minor-GC
 framework floor, see NOTES 2026-06-24/07-02). That is the RQ7 apples-to-apples readout: **most of the
@@ -100,7 +102,12 @@ the generational plans pay the minor-GC pause floor.
 vanilla's 2) and ~1.5× the tracing plans on the alloc-heavy ones. This is the RQ1 trade-off — RC buys
 throughput on acyclic churn at a real memory cost. `Bactrian`'s footprint matches GenImmix's (same nursery
 + mature spaces; its concurrent cycles add no measurable RSS on the sequential panel). Every MMTk plan
-still carries a multiple of vanilla's RSS at the default triggers — the open memory-premium tail (M8).
+still carries a multiple of vanilla's RSS: the compute-bench numbers are exactly each plan's
+**program-independent startup floor** (an empty program measures 26 MiB under GenImmix/Bactrian,
+42 under Immix, 46 under ConcurrentImmix vs vanilla's ~2 — side-metadata tables mapped at init plus
+initial chunk commits; the plan deltas are their extra metadata, e.g. LXR's ~48 MiB RC_TABLE), and the
+alloc-heavy benches add the live×2.2 dynamic-heap headroom + Immix block slack on top — the open
+memory-premium tail (M8).
 
 **Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 3
 stdlib-only `Domain.spawn` benches, domains 1→8 on the M4 Pro (8 performance cores). Tracing plans run
@@ -196,7 +203,7 @@ allocator the inlined TLAB can alias, incl. LXR and Bactrian).
 | `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
 | `PageProtect` | one page per object (debugging) | bytecode |
 | `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
-| `Bactrian` | generational + concurrent: copying nursery, SATB-marked Immix mature | bytecode + native (RQ7 stock-faithful research plan; within ~5% of vanilla on 7/8 seq benches) |
+| `Bactrian` | generational + concurrent: copying nursery, SATB-marked Immix mature | bytecode + native (RQ7 stock-*architecture* research plan; within ~6% of vanilla on 7/8 seq benches — residual deltas vs vanilla: STW sweep at FinalMark, GC-worker (not mutator-slice) marking; [`gc/mmtk/BACTRIAN.md`](gc/mmtk/BACTRIAN.md)) |
 | `LXR` | reference counting (in-place, on Immix) + concurrent backup trace for cycles | bytecode + native — **experimental (research plan): single- and multi-domain validated (par_binarytrees D=1..32). Requires a pinned `MMTK_HEAP_SIZE_MB`.** |
 
 `ConcurrentImmix` is the low-latency **research** plan: concurrent marking + SATB write barrier

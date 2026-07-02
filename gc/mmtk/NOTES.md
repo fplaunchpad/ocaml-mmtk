@@ -8,7 +8,8 @@ Each entry is dated and self-contained. Newest first.
 ## RQ7 `Bactrian` v1 LANDED — copying nursery + concurrently-marked, STW-evacuated Immix mature + SATB, as one plan (2026-07-02)
 
 **What landed (branch `bactrian`, submodule branch `bactrian`, mmtk-core commit `2d40032a24`):**
-`MMTK_PLAN=Bactrian`, the faithful MMTk realization of stock OCaml 5's collector and the RQ7
+`MMTK_PLAN=Bactrian`, the stock-architecture MMTk plan (the axis-by-axis stock comparison lives in
+`gc/mmtk/BACTRIAN.md`; deviations summarized below) and the RQ7
 apples-to-apples vehicle: same GC architecture as vanilla (generational, copying minor, mostly-concurrent
 SATB-marked non-moving-in-practice major, deletion barrier, no read barrier), so Bactrian-vs-vanilla
 measures framework/implementation overhead rather than collector-design difference. Composition of the two
@@ -102,12 +103,22 @@ and the multi-domain STW coordination (par_binarytrees). Those three are now the
 `BACTRIAN_NO_CONCURRENT=1` (degrade cycle requests to STW Full = GenImmix-equivalent; useful both for
 bisection and for isolating the concurrency contribution in the RQ7 comparison).
 
-**Known deviations from stock (v1, deliberate):** marking is concurrent but not paced as bounded
-mutator slices (stock's `major_slice`); sweep is STW at FinalMark (stock sweeps incrementally); weak
-processing at mid-cycle nursery pauses treats mature referents as live (stock minor rule; complete marks
-are only consulted at FinalMark/Full — binding's `NURSERY_GC` flag refined with
-`current_pause_finishes_mark()`). These are the RQ7 "incremental vs mostly-concurrent" open sub-question,
-not accidents.
+**Known deviations from stock (v1, deliberate) — Bactrian is architecture-matched, NOT
+implementation-matched (KC, 2026-07-02):** vanilla 5.x's major GC does BOTH marking and sweeping as
+incremental slices ON THE MUTATOR DOMAINS, paced by allocated work, with only tiny STW sections at
+phase changes (the colour flip riding the domain barrier); its major heap is non-moving, with STW
+compaction only on rare explicit `Gc.compact`. Bactrian differs concretely in:
+1. *mark executor/pacing* — GC worker threads racing mutators, not mutator-paced slices (different CPU
+   accounting and cycle-turnaround model);
+2. *sweep* — STW at FinalMark (`ImmixSpace::release` sweep packets run inside the pause); vanilla
+   sweeps concurrently. This also makes Bactrian's cycle-end pause (minor GC + remark + weak/finaliser
+   processing + mature sweep) categorically bigger than vanilla's colour flip;
+3. *weak timing* — mid-cycle nursery pauses treat mature referents as live (stock minor rule; complete
+   marks consulted only at FinalMark/Full — binding `NURSERY_GC` + `current_pause_finishes_mark()`);
+4. *moving* — Immix defrag at STW `Full` only, roughly analogous to stock's rare STW compaction.
+Items 1-2 are the RQ7 open sub-questions (mutator-driven mark slices e.g. via the poll hook;
+lazy/concurrent line sweeping) — and note the parity result was measured WHILE still paying the STW
+sweep vanilla doesn't pay.
 
 ---
 ## LXR chameneos SIGSEGV root-caused: unguarded RC slot-unlog on mmap'd fiber-stack slots (2026-07-02)
