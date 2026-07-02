@@ -47,6 +47,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         if: github.event_name == 'pull_request'
 
+      # The fork pins autoconf 2.72 (see CLAUDE.md); ubuntu-latest ships 2.71, so
+      # build 2.72 from the GNU mirror (fast -- autoconf is m4/perl only). Without
+      # this, check-configure.sh's regeneration uses 2.71 and always differs from
+      # the committed 2.72-generated configure.
+      - name: Install autoconf 2.72
+        run: |
+          curl -sL https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.gz | tar xz
+          (cd autoconf-2.72 && ./configure --prefix=/usr/local >/dev/null \
+             && make >/dev/null && sudo make install >/dev/null)
+          rm -rf autoconf-2.72
+          autoconf --version | head -1
+
       - name: configure correctly generated
         run: >-
           tools/ci/actions/check-configure.sh

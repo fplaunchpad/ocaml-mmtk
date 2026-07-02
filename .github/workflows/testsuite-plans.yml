@@ -49,13 +49,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All 11 mmtk-core 0.32 plans. Five are wired up in our binding (Immix,
-        # StickyImmix, GenImmix, MarkSweep, NoGC); the other six (SemiSpace, GenCopy,
-        # PageProtect, MarkCompact, Compressor, ConcurrentImmix) are not yet — they
-        # are included so the CI surfaces exactly that (expected to fail at startup),
-        # and flags immediately if any starts working.
+        # All 11 mmtk-core 0.32 plans PLUS the fork's own two research plans:
+        # LXR (reference counting, RQ1 — needs a pinned heap, which this workflow's
+        # MMTK_HEAP_SIZE_MB provides) and Bactrian (generational + concurrent, RQ7 —
+        # the stock-OCaml-faithful plan). Most stock plans are wired in the binding
+        # (see README "GC plans" for the current table); the unwired ones are included
+        # so CI surfaces exactly that (expected to fail at startup) and flags
+        # immediately if any starts working.
         plan: [Immix, StickyImmix, GenImmix, MarkSweep, NoGC,
-               SemiSpace, GenCopy, PageProtect, MarkCompact, Compressor, ConcurrentImmix]
+               SemiSpace, GenCopy, PageProtect, MarkCompact, Compressor, ConcurrentImmix,
+               Bactrian, LXR]
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4

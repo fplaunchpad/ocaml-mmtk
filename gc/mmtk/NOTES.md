@@ -1090,7 +1090,7 @@ binding `resume_mutators` (collection.rs:280) → `caml_mmtk_uninterrupt` (mmtk.
 `request_schedule_collection` → **`WorkerMonitor::make_request` re-takes the same lock** → the worker blocks on
 a lock it already holds. Core state: `GC_ACTIVE=1`, `GC_COUNT=0`, parker `{worker_count:28, parked_workers:28}`,
 `goals.current = Some(Gc)`, sync mutex `futex=2` (held). 27 workers wait on the condvar; the mutator waits on
-`gc_active` (never cleared). 
+`gc_active` (never cleared).
 
 **The bug:** `caml_mmtk_uninterrupt` eagerly refilled the TLAB at resume as an fft poll-trap micro-optimization,
 with the comment *"driving the allocator is safe here, all mutators are stopped."* That is safe w.r.t. mutators

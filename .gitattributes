@@ -251,3 +251,10 @@ testsuite/tests/translprim/module_coercion.ml text eol=lf
 # This is forced to \n to allow the Cygwin testsuite to pass on a
 # Windows-checkout
 testsuite/tests/parsetree/locations_test.ml text eol=lf
+
+# gc/mmtk: the MMTk binding is Rust (rustfmt style: 100-column lines, unicode in
+# comments) plus Cargo/TOML metadata — OCaml's 80-column/ASCII/header rules do
+# not apply to it. The mmtk-core fork is a git submodule (never checked here).
+gc/mmtk/**/*.rs   typo.long-line=may typo.very-long-line=may typo.non-ascii=may typo.missing-header=may
+gc/mmtk/**/*.toml typo.long-line=may typo.non-ascii=may typo.missing-header=may
+gc/mmtk/**/*.lock typo.long-line=may typo.very-long-line=may typo.non-ascii=may typo.missing-header=may
