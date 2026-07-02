@@ -168,6 +168,13 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 ## Gotchas (hard-won — don't rediscover these)
 
+- **macOS `make world.opt` spins forever in `make ocaml` (100% CPU, log stuck at
+  `GEN runtime/primitives`).** After editing runtime C files, `runtime/primitives`'s
+  move-if-change recipe (gen_primitives.sh deliberately does not update the file's
+  mtime when the primitives table is unchanged) sends macOS's ancient GNU make 3.81
+  into an infinite re-evaluation loop (Linux's make 4.x copes, so CI never sees it).
+  Fix: kill the make and `touch runtime/primitives`, then rebuild — no `make clean`
+  needed.
 - **ASLR mmap flake.** MMTk can abort at startup with
   `failed to mmap meta memory: File exists`. Run under **`setarch x86_64 -R`**
   (disables ASLR). Needed for reliable repros and for multi-process builds
