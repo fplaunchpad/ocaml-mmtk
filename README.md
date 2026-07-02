@@ -127,8 +127,9 @@ frequency scales with domains → STW-wall fraction ~94%; a bigger nursery does 
 collector algorithm. LXR also pays a memory tax: its
 ~48 MiB RC-metadata (`RC_TABLE`) counts in RSS but is not usable heap, so at strict RSS parity (pinning
 `par_binarytrees` at GenImmix's 448 MiB footprint) it **thrashes to 0.28×**; a 768 MiB heap restores the
-1.26× shown, at the higher RSS. `chameneos_redux` (effect-handler/fiber alloc) SIGSEGVs under LXR — a
-separate, single-domain RC bug (see `gc/mmtk/NOTES.md`) — so it is excluded here. `SCALABILITY.md` has the
+1.26× shown, at the higher RSS. `chameneos_redux` (effect-handler/fiber alloc): its
+single-domain LXR SIGSEGV is now **fixed** (a fiber-stack slot-unlog guard, `gc/mmtk/NOTES.md`), but a racy
+*multidomain* LXR crash (continuation RC race) remains, so it is excluded from the LXR parallel panel here. `SCALABILITY.md` has the
 mechanism; the macro-bench campaign (`PERFORMANCE.md`) is authoritative.
 
 ## Building

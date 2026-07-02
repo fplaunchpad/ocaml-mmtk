@@ -16,10 +16,14 @@ visitor. Fiber stacks are `mmap`/`caml_stat_alloc`'d — **NOT in MMTk spaces** 
 for that address is unmapped → EXC_BAD_ACCESS. The twin unlog at `rc.rs:621` (recursive keep-alive scan) is the
 same hazard. Same bug CLASS as the GH#15 `FieldSlot::load` fix (RC indexes raw side-metadata and must re-check
 `is_in_mmtk_spaces`; tracing plans survive via SFT-bounds-aware trace). ConcurrentImmix survives identical stacks
-because its concurrent-mark path does NO per-slot unlog. **FIX:** guard both slot-unlogs with `is_in_mmtk_spaces`
-(skip non-heap stack slots — they are not field-barrier-tracked). Needs staticlib rebuild + relink + bench rebuild
-to validate (LXR chameneos → exit 0 / checksum 16000000; mmtk `sanity` small-heap binarytrees clean). This is the
-residual "open LXR limitation" from 2026-07-01 trap #2, now root-caused. Found by the #30 investigation agent —
+because its concurrent-mark path does NO per-slot unlog. **FIXED — mmtk-core `807b090b18` (submodule bumped):**
+guard both slot-unlogs with `is_in_mmtk_spaces` (skip non-heap stack slots — not field-barrier-tracked; matches
+rc.rs:252/276/596). Validated: **single-domain** LXR chameneos now exits 0 / checksum **16000000** byte-identical to
+GenImmix/Immix (was deterministic SIGSEGV); LXR binarytrees regression clean. **RESIDUAL (multidomain d≥4): a
+SEPARATE, racy crash** — an `Address::load` garbage-ref (EXC_BAD_ACCESS, thread #2), continuation-specific (LXR
+par_binarytrees d1→d28 is clean), **pre-existing + MASKED** by this unlog crash (execution now reaches it). Matches
+the known [[lxr-multidomain-status]] garbage-ref RC race → needs rr-on-Linux. So the single-domain half of the
+2026-07-01 trap #2 limitation is CLOSED; the multidomain half is the known hard RC race. Found by the #30 investigation agent —
 which also established **`#30` is the deferred ConcurrentImmix UNLOG-bit barrier-gate PERF item (internal, not a GH
 issue, not a blocker)**, and that **ConcurrentImmix's continuation-scan hang GH#4/#14 is already FIXED** (verified
 2026-07-02: ~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB) → ConcurrentImmix is correctness-ready.
