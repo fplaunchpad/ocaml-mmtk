@@ -139,7 +139,7 @@ uv run quick/quickbench.py [seq|par|all] [options]
 
 | Option | Meaning |
 |---|---|
-| `--plans P1,P2,...` | MMTk plans (default `GenImmix`); `"A,B"` or `"A B"` both work. **`LXR`** (reference counting, RQ1) runs both **seq AND par** (multidomain-validated via the terminate-UAF fix) but **requires a pinned heap** (`--heap <MB>` or `--heap parity`; the harness rejects `--heap dynamic`). `chameneos_redux` SIGSEGVs under LXR (a separate single-domain fiber-alloc bug) — exclude it with `--benches` when running LXR par |
+| `--plans P1,P2,...` | MMTk plans (default `GenImmix`); `"A,B"` or `"A B"` both work. **`LXR`** (reference counting, RQ1) runs both **seq AND par** (multidomain-validated via the terminate-UAF fix) but **requires a pinned heap** (`--heap <MB>` or `--heap parity`; the harness rejects `--heap dynamic`). `chameneos_redux` under LXR: single-domain is now **fixed** (fiber-stack slot-unlog guard, mmtk-core `807b090b18`) but **multidomain still racy-crashes** (continuation RC race) — exclude it with `--benches` when running LXR par |
 | `--benches B1,B2,...` | restrict to these benches (comma/space list); default = all for the mode. Use to drop `chameneos_redux` from an LXR par run |
 | `--vanilla DIR` | also run a vanilla baseline (a dir of native binaries) — the ratio baseline |
 | `--bin-a DIR --label-a S` | the MMTk-built bench dir (× plans); label default `mmtk` |
