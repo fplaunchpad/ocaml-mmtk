@@ -294,8 +294,17 @@
 > 111 ms). The binarytrees ÷9 in *copied objects* is the buried lede: the bigger per-domain budget
 > lets short-lived allocation DIE YOUNG instead of being promoted at the next (too-early) shared
 > fill — culprit 1 wasn't just pause *frequency*, it was **premature promotion feeding culprit 2's
-> mature trace work**. Full panel + turing d=24 rerun still owed; the residual after this is the
-> per-pause rendezvous cost itself (still ~1 ms × fewer pauses) and genuinely-live trace work.
+> mature trace work**. The residual after this is the per-pause rendezvous cost itself (still ~1 ms ×
+> fewer pauses) and genuinely-live trace work.
+>
+> **Full-panel confirmation (M4, 5 reps, same day):** `par_binarytrees` GenImmix S(8) 1.02 → **5.62**
+> with absolute wall **395 ms vs vanilla's 406 ms** — the generational anti-scaling story is over on
+> this panel; Bactrian 0.67 → **3.40** (RSS@8 561 MiB). Compute benches: GenImmix/Bactrian
+> par_spectralnorm 2.4 → **3.4** (RSS 87 → 318 MiB, the capacity trade); the 2.8–3.8× band vs
+> vanilla's 5–6.7× is the minor-rendezvous floor (culprit 1's *architecture* half). Sequential panel
+> unchanged (scale=1 no-op). New coverage: `chameneos_redux` now runs on ALL plans (LXR fiber guards
+> landed) and is pathological everywhere (GenImmix d=8 wall 12.3 s vs vanilla 0.32 s, RSS 1.7 GB) —
+> the fiber/continuation scan path is the sharpest open workload class. Turing d=24 revalidation owed.
 
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains

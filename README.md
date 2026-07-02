@@ -76,14 +76,14 @@ ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --
 
 | bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
 |---|--:|--:|--:|--:|--:|--:|
-| binarytrees | 1.00× / 92 | 1.37× / 213 | 2.26× / 190 | 0.88× / 289 | 1.08× / 258 | 0.72× / 309 |
-| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.00× / 46 | 1.00× / 26 | 1.02× / 73 |
-| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.00× / 46 | 1.00× / 26 | 1.02× / 74 |
-| spectralnorm | 1.00× / 5 | 1.01× / 82 | 1.14× / 94 | 1.16× / 90 | 1.01× / 82 | 1.11× / 218 |
-| mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.00× / 42 | 1.01× / 46 | 1.01× / 26 | 1.10× / 73 |
-| matrix_multiplication | 1.00× / 19 | 0.86× / 38 | 0.87× / 70 | 0.88× / 78 | 0.86× / 38 | 0.88× / 122 |
-| LU_decomposition | 1.00× / 17 | 1.04× / 99 | 1.26× / 99 | 1.31× / 107 | 1.04× / 99 | 1.16× / 259 |
-| kb | 1.00× / 8 | 1.20× / 95 | 1.08× / 103 | 0.94× / 143 | 1.21× / 95 | 1.60× / 199 |
+| binarytrees | 1.00× / 92 | 1.40× / 213 | 2.32× / 190 | 0.91× / 288 | 1.08× / 257 | 0.76× / 309 |
+| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.00× / 46 | 1.00× / 26 | 1.03× / 73 |
+| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.01× / 46 | 1.00× / 26 | 1.03× / 73 |
+| spectralnorm | 1.00× / 5 | 0.96× / 82 | 1.11× / 94 | 1.13× / 90 | 0.97× / 83 | 1.10× / 218 |
+| mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.01× / 42 | 1.01× / 46 | 1.01× / 26 | 1.11× / 73 |
+| matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.87× / 38 | 0.88× / 122 |
+| LU_decomposition | 1.00× / 17 | 1.04× / 99 | 1.26× / 98 | 1.30× / 106 | 1.04× / 99 | 1.17× / 258 |
+| kb | 1.00× / 8 | 1.20× / 95 | 1.08× / 103 | 0.94× / 147 | 1.22× / 95 | 1.76× / 199 |
 
 </details>
 
@@ -91,12 +91,12 @@ ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --
 (near-)non-moving Immix mature + SATB deletion barrier — vanilla's collector *architecture*, though not
 its implementation: vanilla marks AND sweeps in mutator slices with only tiny colour-flip STW sections,
 while Bactrian marks on GC workers and still sweeps STW at FinalMark) —
-tracks vanilla within ~8% on 7 of 8 benches** (`binarytrees` 1.08× where GenImmix is 1.37×; `LU` 1.04×;
-`spectralnorm` 1.01×; `matmul` 0.86×), with `kb` the lone loss (1.21×, = GenImmix — the per-minor-GC
+tracks vanilla within ~8% on 7 of 8 benches** (`binarytrees` 1.08× where GenImmix is 1.40×; `LU` 1.04×;
+`spectralnorm` 0.97×; `matmul` 0.87×), with `kb` the lone loss (1.22×, = GenImmix — the per-minor-GC
 framework floor, see NOTES 2026-06-24/07-02). That is the RQ7 apples-to-apples readout: **most of the
 MMTk-vs-stock gap measured on the other plans is collector-design difference, not MMTk framework
-overhead.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.72× — in-place
-RC avoids the copying-nursery and re-marking costs) but **slowest on `kb`** (1.60× — the cyclic garbage
+overhead.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.76× — in-place
+RC avoids the copying-nursery and re-marking costs) but **slowest on `kb`** (1.76× — the cyclic garbage
 its backup trace must sweep). On `kb`, ConcurrentImmix is now at 0.94× (marking off the critical path);
 the generational plans pay the minor-GC pause floor.
 
@@ -112,18 +112,22 @@ initial chunk commits; the plan deltas are their extra metadata, e.g. LXR's ~48 
 alloc-heavy benches add the live×2.2 dynamic-heap headroom + Immix block slack on top — the open
 memory-premium tail (M8).
 
-**Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 3
-stdlib-only `Domain.spawn` benches, domains 1→8 on the M4 Pro (8 performance cores). Tracing plans run
-their dynamic heap; `LXR` is pinned per bench at an adequate (non-thrashing) heap, with its peak RSS
-reported alongside.
+**Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 4
+stdlib-only `Domain.spawn` benches (now including effect-handler `chameneos_redux`), domains 1→8 on the
+M4 Pro (8 performance cores). Tracing plans run their dynamic heap; `LXR` is pinned per bench at an
+adequate (non-thrashing) heap, with its peak RSS reported alongside.
 
 ![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
 
-**Why the parallel gap exists — measured, then fixed, then re-measured** (turing, 28 cores;
-`SCALABILITY.md` UPDATEs 4–5): vanilla completes **zero major cycles** on every one of these runs, while
-MMTk's old pacing *manufactured* domain-scaled major-GC work (one exhaustive full GC per `Domain`
-termination, plus a fixed-cadence trigger) and paid for it stop-the-world. The **allocation-paced
-trigger** (2026-07-02, with the lost-remembered-set fix it exposed, GH issue 3) de-manufactures it:
+**Why the parallel gap existed — measured, then fixed twice, then re-measured** (`SCALABILITY.md`
+UPDATEs 4–6): vanilla completes **zero major cycles** on these runs, while MMTk (a) *manufactured*
+domain-scaled major-GC work (one exhaustive full GC per `Domain` termination + a fixed-cadence trigger
+— fixed by the **allocation-paced trigger**, with the lost-remembered-set fix it exposed, GH issue 3),
+and (b) ran all domains against a **flat shared nursery budget**, so minor-GC frequency scaled with the
+aggregate allocation rate and short-lived data was promoted at every too-early shared fill — fixed by
+**per-domain nursery scaling** (stock parity: the default budget is now N×2–N×64 MiB, latched lazily at
+domain spawn/termination). The second fix is the decisive one: it cut `par_binarytrees` GenImmix copied
+objects **9×** and made the generational plans scale:
 
 ![GC work manufactured vs domains — before/after](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/gcwork_domains.png)
 
@@ -132,36 +136,40 @@ trigger** (2026-07-02, with the lost-remembered-set fix it exposed, GH issue 3) 
 
 | bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
 |---|--:|--:|--:|--:|--:|--:|
-| par_matmul | 6.74 / 20 | 3.58 / 105 | 3.20 / 77 | 2.66 / 80 | 3.63 / 105 | 3.66 / 123 |
-| par_spectralnorm | 5.13 / 21 | 2.42 / 87 | 3.08 / 98 | 2.10 / 97 | 2.40 / 87 | 2.88 / 225 |
-| par_binarytrees | 3.91 / 521 | 1.02 / 554 | **3.20 / 359** | 0.29 / 533 | 0.67 / 504 | 0.29 / 573 |
+| par_matmul | 6.75 / 20 | 3.46 / 108 | 3.44 / 78 | 3.75 / 79 | 3.52 / 107 | 3.45 / 123 |
+| par_spectralnorm | 5.04 / 21 | 3.41 / 318 | 2.89 / 98 | 2.07 / 97 | 3.38 / 319 | 2.79 / 225 |
+| par_binarytrees | 3.98 / 519 | **5.62 / 550** | 3.20 / 356 | 0.31 / 516 | 3.40 / 561 | 0.27 / 574 |
+| chameneos_redux | 4.35 / 294 | 0.47 / 1707 | 0.30 / 335 | 0.32 / 331 | 0.45 / 1724 | 0.39 / 389 |
 
 </details>
 
-**Stock OCaml still scales best.** Vanilla 5.5.0's purpose-built multicore GC (stop-the-world minor +
-concurrent major) reaches 3.9–6.7× at 8 domains; **every MMTk plan scales worse**, and the gap widens with
-allocation intensity. On the compute-bound benches the MMTk plans sit in the 2.1–3.7× band — on zero-GC
-`par_matmul` the pacing fix removed the per-domain termination GCs entirely (fulls: one per spawned domain
-→ **0**; turing d=24 wall 0.66→0.32 s, now within 1.6× of vanilla). On allocation-heavy `par_binarytrees`
-the fix eliminated GenImmix's anti-scaling (0.89× → 1.02×; turing d=8/d=24 wall −22/−25% with fulls
-83→20 and 160→22) — but flat is not scaling: plain `Immix` (non-generational, no per-minor STW cadence)
-remains the only MMTk plan that genuinely scales there (3.20×), so the attribution stands — it is the
-*STW-pause frequency*, not tracing itself, that blocks scaling. With the manufactured majors gone, the
-measured residual is (a) legitimate domain-scaled trace work on the alloc-heavy benches and (b) the
-**minor-pause rendezvous floor**: at 24 domains `par_spectralnorm` still spends ~1.3 s in ~1300 STW
-minor pauses (~1 ms each, mostly 24-way synchronisation) — the next structural target.
+**The generational anti-scaling is gone — GenImmix now matches vanilla's absolute wall on the
+alloc-heavy bench.** On `par_binarytrees` at 8 domains GenImmix runs **395 ms vs vanilla's 406 ms**
+(speedup 5.62× vs its own d=1 — super-linear because the per-domain nursery lets short-lived allocation
+die young: copied objects fell 9×, and per-domain scaling *grows the total budget* the way stock's
+per-domain 2 MiB arenas do). `Bactrian` scales too (0.67 → 3.40×, RSS capped at 561 MiB — down from
+1689 before the paced trigger). The residual gaps, in order: (1) the **minor-pause rendezvous floor**
+on compute benches — the MMTk plans sit in the 2.8–3.8× band vs vanilla's 5–6.7× because every minor
+pause is still a global mutators+workers rendezvous (~1 ms at high domain counts vs stock's light
+barrier; `SCALABILITY.md` culprits list); (2) plans without a scalable nursery story: `ConcurrentImmix`
+(0.31×) and `LXR` (0.27×) still anti-scale on alloc-heavy work — mature reclamation is stop-the-world
+in this fork regardless of collector algorithm, and reference counting does not rescue it (RQ1); and
+(3) **effect-handler fiber churn** — new on the panel now that `chameneos_redux` runs on every plan:
+*all* MMTk plans are pathological there (0.3–0.5× at 8 domains; GenImmix wall 12.3 s vs vanilla's
+0.32 s, RSS 1.7 GB) — heavy `perform`/`continue` traffic allocates and scans fiber stacks in ways the
+binding's continuation path does not yet handle efficiently. That is the sharpest open workload class
+(the fiber/continuation scan path, not the collector core).
 
-**RQ1/RQ7 (parallel).** Reference counting does *not* rescue the multi-domain scaling: `LXR` wins
-`binarytrees` sequentially (0.72×) but anti-scales in parallel (0.29× at 8 domains) — mature reclamation
-is stop-the-world in this fork regardless of collector algorithm. Nor does matching stock's architecture:
-`Bactrian` — whose *sequential* profile is at vanilla parity — still anti-scales there (0.67×; its
-promotion pressure now trips the allocation-paced full-GC trigger, which caps its mid-cycle floating
-garbage — peak RSS at 8 domains fell 1689 → 504 MiB — at the cost of paying those pauses on the wall).
-The multi-domain STW coordination cost is now the clearest quantified framework gap (SCALABILITY.md has
-the mechanism and the before/after; the macro-bench campaign in `PERFORMANCE.md` is authoritative). `chameneos_redux` (effect-handler/fiber
-alloc): its single-domain LXR SIGSEGV is fixed (fiber-stack slot-unlog guard, `gc/mmtk/NOTES.md`), but a
-racy *multidomain* LXR crash (continuation RC race) remains, so it is excluded from the LXR parallel
-panel here.
+**RQ1/RQ7 (parallel).** With architecture matched (`Bactrian`) *and* nursery capacity matched
+(per-domain scaling), the generational MMTk plans now reproduce stock's alloc-heavy scaling on this
+panel — strong evidence the remaining framework gap is concentrated in the **pause rendezvous
+machinery** (worker-pool wake/park per pause) and the **fiber scan path**, not in tracing or barriers.
+`LXR` remains the sequential binarytrees winner (0.76×) but pays for STW mature reclamation in
+parallel. Turing d=24 revalidation of the scaling fix is owed (SCALABILITY.md has the M4 A/B and the
+mechanism; the macro-bench campaign in `PERFORMANCE.md` is authoritative). `chameneos_redux` now runs on
+**every** plan including LXR (the fiber-stack slot-unlog guards are landed; only a rare, rr-resistant
+LXR race at d≥8 remains open — `gc/mmtk/NOTES.md`), which is what put the fiber-churn pathology on the
+panel where it belongs.
 
 ## Building
 
