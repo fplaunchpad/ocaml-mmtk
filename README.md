@@ -116,14 +116,15 @@ Speedup T(1)/T(8) / peak RSS at 8 domains (MiB):
 major) reaches 3.7–6.4× at 8 domains; **every MMTk plan scales worse**, and the gap widens with allocation
 intensity. On the compute-bound benches (`par_matmul`, `par_spectralnorm`) `LXR`'s reference counting scales
 on par with GenImmix (3.37 vs 3.31; 2.62 vs 2.22). On allocation-heavy `par_binarytrees` GenImmix
-**anti-scales** (0.90× — *slower* at 8 domains than 1, dominated by the per-collection stop-the-world cost
-and per-domain TLAB fragmentation); ConcurrentImmix and LXR only weakly recover (1.11×, 1.26× — LXR peaks
-1.68× at 4 domains, then falls).
+**anti-scales** (0.90× — *slower* at 8 domains than 1: its stop-the-world **mature-GC frequency** grows with
+domains until the STW-wall fraction reaches ~94%, measured — see `SCALABILITY.md`); ConcurrentImmix and LXR
+only weakly recover (1.11×, 1.26× — LXR peaks 1.68× at 4 domains, then falls).
 
 **RQ1 (parallel): reference counting does *not* rescue the multi-domain anti-scaling.** LXR has the best
 *single-domain* throughput (it wins `binarytrees` sequentially at 0.70× vanilla) but in parallel it behaves
-like the tracing plans — the bottleneck is the MMTk↔OCaml multi-domain integration (STW coordination, TLAB
-fragmentation, `Domain.spawn`/`join` cost), not the collector algorithm. LXR also pays a memory tax: its
+like the tracing plans — the bottleneck is that the fork does all mature reclamation **stop-the-world** (its
+frequency scales with domains → STW-wall fraction ~94%; a bigger nursery does *not* fix it), not the
+collector algorithm. LXR also pays a memory tax: its
 ~48 MiB RC-metadata (`RC_TABLE`) counts in RSS but is not usable heap, so at strict RSS parity (pinning
 `par_binarytrees` at GenImmix's 448 MiB footprint) it **thrashes to 0.28×**; a 768 MiB heap restores the
 1.26× shown, at the higher RSS. `chameneos_redux` (effect-handler/fiber alloc) SIGSEGVs under LXR — a
