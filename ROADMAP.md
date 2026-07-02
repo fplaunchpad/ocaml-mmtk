@@ -327,8 +327,11 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    instrumentation proved the residual is a SEPARATE, deeper bug:** the result is provably promoted+published
    (mature `v` written, `state_before=0x1`) yet the joiner still reads `term_sync->state==0x400` — a post-publish
    corruption of the correctly-published mature slot (cross-domain `caml_modify` + GC mis-forward/remembered-set).
-   Promotion fixes only move the rate; **GH#3 stays OPEN** for the residual (next: rr the deterministic `0x400`
-   write). → NOTES 2026-06-29 (newest entry).
+   **#31/GH#3 CLOSED (2026-07-02, `aa60e04407` / mainline `33ae0009f8`):** the residual was **remembered-set
+   buffers lost at mutator deregistration** — the dying domain's un-flushed modbufs dropped old→young edges, so
+   the next minor GC swept live young objects (the earlier exhaustive termination full-GCs had *masked* it: a
+   full trace needs no remset). Fix: flush the mutator before deregistering. 20/20 joinstorm clean; unmasked by
+   (and landed with) the allocation-paced-trigger work. → NOTES 2026-07-02.
    Phase 3 **structurally eliminated the bug#3c/dual-STW deadlock class** (no second barrier for a
    terminating RUNNING domain to lead). The separate ConcurrentImmix chameneos continuation-scan hang is
    **also FIXED** (GH#4 + GH#14 closed; mmtk-core `88ab2f5ea5` lost-wakeup fix at the Concurrent→FinalMark
@@ -508,6 +511,12 @@ The active research/measurement threads behind the M8 milestone — the index; d
   GenImmix/StickyImmix/GenCopy; weak-ephe-final 10/14 on all four of GenImmix/Immix/StickyImmix/GenCopy
   (GenImmix was 8/14); binarytrees throughput at Immix parity. `finaliser_handover` SIGSEGV was the
   separate #55 sub-bug (now passing). → FAQ Q11; NOTES 2026-06-29; GitHub #5.
+  **RETUNED 2026-07-02 (`33ae0009f8` — allocation-paced trigger):** the 2026-06-29 trigger's fixed floor +
+  flat cadence *manufactured* domain-scaled full-GC work (spectralnorm d24: 807 fulls vs vanilla's 0;
+  SCALABILITY.md UPDATEs 4–5). Now: pressure floor `max(32 MiB, nursery)` of newly-promoted pages, cadence
+  `8 × ndomains` (d=1 semantics unchanged — `weaklifetime` still green), and domain termination runs a
+  *minor* (not exhaustive) collection — which unmasked GH#3 (fixed, see #16/#31). After: fulls 807→39,
+  par_binarytrees d8/d24 wall −22/−25%, GenImmix S(8) 0.89→1.02.
 - **RQ7 — `Bactrian` hybrid (flagship research direction) — v1 LANDED (2026-07-02, branch `bactrian`).**
   The stock-architecture MMTk plan (architecture-matched, not implementation-matched — gc/mmtk/BACTRIAN.md): copying nursery (GenImmix) + concurrently-marked,
   STW-evacuated Immix mature (ConcurrentImmix) + slot-granular SATB deletion barrier, composed as
@@ -515,12 +524,16 @@ The active research/measurement threads behind the M8 milestone — the index; d
   nursery-anchored (InitialMark = minor GC + snapshot seeding; FinalMark = minor GC + remark + sweep);
   GH#5 mature pressure starts a concurrent cycle, user GCs stay STW Full. Validated: testsuite 1441
   passed / 2 failed with both failures shared with the GenImmix baseline (zero plan-specific);
-  sanity+vo_bit clean. **First RQ7 readout: quick panel has Bactrian within ~5% of vanilla on 7/8
-  sequential benches (binarytrees 1.05× vs GenImmix's 1.18×)** — most of the previously-measured gap
+  sanity+vo_bit clean. **First RQ7 readout: quick panel has Bactrian within ~8% of vanilla on 7/8
+  sequential benches (binarytrees 1.08× vs GenImmix's 1.37×)** — most of the previously-measured gap
   was algorithmic (STW major vs concurrent major), not MMTk abstraction overhead; the quantified
-  residual framework costs are the per-minor-GC pause floor (kb 1.20×), the RSS premium, and
-  multi-domain STW coordination (par_binarytrees anti-scaling). Remaining RQ7 sub-questions:
-  slice-paced incrementality and concurrent sweep. → RESEARCH_QUESTIONS RQ7; NOTES 2026-07-02.
+  residual framework costs are the per-minor-GC pause floor (kb 1.21×), the RSS premium, and
+  multi-domain STW coordination. **Closing-step 1 (allocation-paced cycle trigger) DONE 2026-07-02**
+  (`33ae0009f8`; SCALABILITY.md UPDATE 5): manufactured majors de-manufactured, GenImmix
+  par_binarytrees anti-scaling eliminated (S(8) 0.89→1.02), Bactrian no longer permanently mid-cycle
+  (8-domain RSS 1689→504 MiB, though its S(8) is 0.67 — it now pays paced full pauses instead of
+  floating garbage). Remaining RQ7 sub-questions: mutator-paced mark slices, concurrent sweep, and the
+  STW minor-pause rendezvous floor. → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write
