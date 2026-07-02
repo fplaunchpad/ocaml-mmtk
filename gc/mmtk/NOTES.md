@@ -110,6 +110,138 @@ are only consulted at FinalMark/Full — binding's `NURSERY_GC` flag refined wit
 not accidents.
 
 ---
+## LXR chameneos SIGSEGV root-caused: unguarded RC slot-unlog on mmap'd fiber-stack slots (2026-07-02)
+
+The `chameneos_redux` SIGSEGV under LXR (single-domain, any heap; fires whenever a **continuation block is
+RC-promoted** — heap-dependent, NOT size-dependent) is root-caused (lldb): `plan/lxr/rc.rs:221` in
+`ProcessIncs::scan_nursery_object`'s `iterate_fields` closure does `slot.to_address().unlog_field_relaxed::<VM>()`
+**UNGUARDED**. On promoting a continuation block (`Cont_tag`) the binding's `scan_object` → `caml_scan_stack`
+(`runtime/fiber.c`) → `visit_cont_stack_slot` (`scanning.rs:233`) feeds **fiber-stack slot addresses** into the
+visitor. Fiber stacks are `mmap`/`caml_stat_alloc`'d — **NOT in MMTk spaces** — so the UNLOG side-metadata page
+for that address is unmapped → EXC_BAD_ACCESS. The twin unlog at `rc.rs:621` (recursive keep-alive scan) is the
+same hazard. Same bug CLASS as the GH#15 `FieldSlot::load` fix (RC indexes raw side-metadata and must re-check
+`is_in_mmtk_spaces`; tracing plans survive via SFT-bounds-aware trace). ConcurrentImmix survives identical stacks
+because its concurrent-mark path does NO per-slot unlog. **FIXED — mmtk-core `807b090b18` (submodule bumped):**
+guard both slot-unlogs with `is_in_mmtk_spaces` (skip non-heap stack slots — not field-barrier-tracked; matches
+rc.rs:252/276/596). Validated: **single-domain** LXR chameneos exits 0 / checksum **16000000** byte-identical to
+GenImmix/Immix (was deterministic SIGSEGV); binarytrees regression clean.
+
+**rr-on-turing follow-up (2026-07-02) — the "multidomain residual" was a THIRD unguarded unlog, now FIXED
+(`6f26298cc3`).** rr `record`/`replay` on turing pinned the multidomain crash DETERMINISTICALLY: `process_slot`'s
+`EDGE_KIND_MATURE` unlog (`rc.rs:280`) — NOT a garbage-ref `Address::load` as first guessed from the macOS inlined
+bt. A `Cont_tag`'s fiber-stack slots reach `process_slot` as mature edges → `unlog_field_relaxed` → `side_metadata`
+store on an unmapped page → SIGSEGV. Guarded it with `is_in_mmtk_spaces` (the 3rd slot-unlog site). Now **d=4 20/20
+correct** (was ~3/6 crash), d=1 10/10, d=16 clean. **TRUE residual: a much RARER high-domain (d≥8) crash** (~1–2/12
+at heap 128 MiB; d≤16/small-heaps clean) that rr did NOT catch in 40 record attempts (`-c` swept) — an rr-resistant
+timing race, mechanism unconfirmed; needs a hotter repro or a long rr/chaos campaign. So the single-domain half of
+the 2026-07-01 trap #2 limitation is CLOSED and low-domain multidomain works; only the rare high-domain race is open
+([[lxr-multidomain-status]]). **rr lesson:** a deterministic-enough site (rc.rs:280) rr-cracks immediately; the
+rarer race stays hidden — matching the "multidomain timing races hide under rr" note.
+
+Found by the #30 investigation agent — Found by the #30 investigation agent —
+which also established **`#30` is the deferred ConcurrentImmix UNLOG-bit barrier-gate PERF item (internal, not a GH
+issue, not a blocker)**, and that **ConcurrentImmix's continuation-scan hang GH#4/#14 is already FIXED** (verified
+2026-07-02: ~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB) → ConcurrentImmix is correctness-ready.
+
+## Parallel-scaling gap ROOT CAUSE: STW mature/full-GC FREQUENCY scales with domain count (2026-07-01)
+
+Analysed WHY every MMTk plan scales far worse than stock OCaml on alloc-heavy parallel workloads (binarytrees:
+vanilla 3.68× vs GenImmix 0.90× / ConcurrentImmix 1.11× / LXR 1.26× at 8 domains). Full write-up: **SCALABILITY.md
+UPDATE 3**. Root cause (code-verified): the fork **deleted stock's mostly-concurrent major GC in M9** (`dcb35ef00`,
+`shared_heap.c` gone) so ALL mature reclamation runs inside MMTk's global STW. With N domains, ~N trees are
+concurrently live at each STW minor GC → promotion scales ~N → the Immix mature space fills ~N× faster → the
+mature-pressure full-GC trigger (`binding/src/collection.rs` `MATURE_PRESSURE_OVERHEAD_PCT=120`, `stop_all_mutators`)
+fires ~N× more → ~N× more whole-mature-heap STW traces. Decomposition (d1→d8, fixed total alloc): **full-GCs ×2.4–5.0,
+total-GCs only ×1.48, GC-time tracks full-GC count.** Stock absorbs the same promotion as CONCURRENT major work
+(off-STW), so it doesn't grow the pause. Corroboration (STW-wall FRACTION, cross-host turing 28c + M4, d1→d28,
+UPDATE 3): **ConcurrentImmix stays FLAT ~7–15% — the clean fix; GenImmix climbs to 94%; LXR climbs to ~74%** (its RC
+increment/decrement *pause* is itself STW and its volume scales with domains — NOT flat, correcting an earlier
+"LXR GC-time ~constant 575→541ms" claim; LXR still beats GenImmix in absolute wall). Nursery-size control refutes
+starvation; GC-light matmul scales fine on all plans. **RQ10:** the bottleneck is the STW-mature *design choice* /
+integration boundary, not the GenImmix algorithm — swap the mature-reclamation discipline (concurrent trace / RC) at
+the same nursery+rendezvous and scaling improves. **Caveat CLOSED:** `gc_time_ms` turned out to BE the STW pause-wall
+(single `Instant` span stop_all_mutators→resume_mutators, `collection.rs:328`), NOT aggregate CPU — the decomposition
+is direct and cross-host-confirmed. (The analysis workflow's independent adversarial-verify layer did not run —
+schema bug — so synthesis was self-verified + code-checked + independently re-measured.) Ranked remedies in
+SCALABILITY.md UPDATE 3 / §7 — **ConcurrentImmix is the fix and its continuation-scan hang is already FIXED (GH#4/#14
+closed), so it is correctness-ready today; the residual is the LXR fiber-stack-slot SIGSEGV (rc.rs:221/:621, below).**
+
+## LXR parallel-scaling panel: RC does NOT rescue the multi-domain anti-scaling (2026-07-01)
+
+Added LXR to the quick panel's **parallel** domain sweep (the guard that forced LXR to seq-only was stale
+after the terminate-UAF fix; `quickbench.py` now runs LXR in `par` mode, `--benches` filter added). Ran
+3 stdlib-only `Domain.spawn` strong-scaling benches (par_matmul/par_spectralnorm/par_binarytrees),
+domains 1→8, M4 Pro (8 P-cores), median-5. Tracing plans dynamic heap; LXR pinned at an adequate heap.
+Speedup T(1)/T(8) — vanilla / GenImmix / ConcurrentImmix / LXR:
+- par_matmul: 6.38 / 3.31 / 4.08 / **3.37**   (RSS@8: 20/108/79/123 MiB)
+- par_spectralnorm: 4.77 / 2.22 / 1.83 / **2.62**   (21/93/101/236)
+- par_binarytrees: 3.68 / 0.90 / 1.11 / **1.26**   (484/439/530/585)
+
+**Finding (RQ1 parallel):** stock OCaml's multicore GC scales best (3.7–6.4×); every MMTk plan scales
+worse and the gap widens with allocation intensity. LXR (RC) — which has the *best single-domain*
+throughput (wins binarytrees seq at 0.70×) — scales in parallel **like the tracing plans**, NOT better:
+on par with GenImmix on the compute benches, weak on alloc-heavy binarytrees (GenImmix anti-scales 0.90×;
+LXR peaks 1.68× at d4 then falls to 1.26× at d8). So the multi-domain bottleneck is the **MMTk↔OCaml
+integration** (STW coordination, per-domain TLAB fragmentation, spawn/join), not the collector algorithm —
+RC does not escape it. Publishable framing: the parallel-scaling gap is structural to the integration.
+
+**Two traps hit + documented (don't rediscover):**
+1. **RSS-parity heap starves LXR's GC.** Pinning LXR at a tracing plan's RSS footprint is UNFAIR: LXR's
+   ~48 MiB RC_TABLE counts in RSS but is not usable heap. par_binarytrees at 448 MiB (GenImmix's d8
+   footprint) → LXR **thrashes** to 0.28× (54 GCs at d8); 768 MiB → 1.26× (`PARITY_HEAPS` keeps 448 for
+   the caveat; the panel uses the adequate 768). Measure RC scalability at an adequate heap, report the
+   (higher) RSS separately — pinning to equal RSS measures heap-starvation, not scalability.
+2. **chameneos_redux SIGSEGVs under LXR — a SEPARATE bug, not the terminate-UAF.** It crashes even
+   single-domain (d=1) at the large size (500000) but runs at the small size (50000); tracing plans
+   (GenImmix/Immix) run it fine. So it's a distinct high-volume effect/fiber (continuation) RC bug,
+   unrelated to Domain.join scaling — excluded from the LXR par panel, tracked as an open LXR limitation.
+
+## LXR reference-counting plan: single-domain VALIDATED + RQ1 answered; multidomain primary crash fixed, residual open (2026-06-30)
+
+LXR (reference counting on Immix; Zhao/Blackburn/McKinley PLDI'22) is now a selectable plan
+(`MMTK_PLAN=LXR`, experimental, requires a pinned `MMTK_HEAP_SIZE_MB`) and is merged to mainline as the
+flagship of **RQ1** (RC barrier cost + tail latency vs GenImmix at memory parity). Built up from the base
+Immix plan (not down from the reference's 1268-line global.rs). Submodule branch `lxr-p3-activate`.
+
+**Validated single-domain:** correct checksums vs Immix (binarytrees d14–d20); sanity-clean (54 full-GC
+re-traces, 0 dangling-edge/premature-free violations; `objects copied: 0` — true in-place); nursery +
+mature reclamation both work; **memory parity** with Immix (par_binarytrees d20 floor h64, d21 h128). A
+**cycle-collecting backup trace** closes pure-RC's cyclic-garbage leak (kb: OOM→runs at h32), and its
+trigger is **RC-effectiveness-based** (fires only when an RC pause under-reclaims, measured post-sweep —
+NOT pause-start occupancy, which is always ~full), so it is near-free on acyclic code (binarytrees 0
+backups, throughput == pure RC).
+
+**RQ1 findings:** (1) the coalescing field barrier is essentially free — `MMTK_BARRIER_COUNT` shows 6/8
+quick-panel benches do ≤2497 pointer mutations over the whole run (4 do literally 2), and the one
+mutation-heavy bench (matmul, 1.18M fires) costs 1.02×; confirms OCaml is init-write-dominated (why
+`caml_modify` is out-of-line in C). (2) In-place RC wins on acyclic high-churn alloc and is memory-robust:
+binarytrees fastest at every heap, 5.7× faster than Immix at iso-RSS (0 copies vs GenImmix's 6.09M
+nursery-survivor copies; RC pause 681ms vs Immix full-mark 2902ms). (3) RC's fixed metadata tax ≈48 MB
+(RC_TABLE whole-heap). Knobs: `MMTK_RC_DEBUG`, `MMTK_RC_NO_CM`/`NO_BACKUP_TRACE`, `MMTK_RC_BACKUP_LO_PCT`,
+`MMTK_BARRIER_COUNT`. Harness + data: scratch `rq1-design.md`.
+
+**Multidomain (WIP):** GenImmix/Immix/StickyImmix run par_binarytrees N-domain fine; LXR did not. TWO
+crashes, both rr-traced on turing. PRIMARY (D≥4) — **FIXED**: a field-barrier-logged slot re-pointed by
+Domain spawn/join teardown to a `.data` `Stdlib.Domain` static (outside any MMTk space) passed
+`FieldSlot::load`'s GH#15 immediate/null re-check and reached `rc.inc` → unmapped RC_TABLE metadata →
+SIGSEGV (tracing plans survive via SFT-bounds-aware `trace_object`; RC indexes raw). Fix = re-check
+`is_in_mmtk_spaces` in `FieldSlot::load` + `process_inc`/`process_slot` guards. Item #1 (non-atomic
+decrement kill → atomic CAS) also merged. RESIDUAL (D≥8) — **FIXED** (rr-confirmed, trace
+`pbt-RESIDUAL-d24`): the `Finished(Ok v)` join result has **RC=0 from birth** under LXR — (a) the
+`term_sync->state` `caml_modify` inc is buffered but `caml_mmtk_domain_terminate` never flushes the
+mutator barrier; (b) the deferred `ml_values->result` global-root inc never fires because the terminate
+`caml_mmtk_collect()` COALESCES onto a peer GC that already ran its global-root scan; and (c) the
+`while (caml_mmtk_is_young(result))` retry loop (domain.c:954) meant to catch that is a **dead no-op under
+LXR** (`is_young` → `plan.generational()` = `None` for LXR, always 0). So v's still-`Unallocated` block is
+nursery-swept (`state==Unallocated && rc_dead()`) and bump-reused before `Domain.join` reads it. The earlier
+`flush_terminating_mutator` drain failed because it was never wired AND a bare `rc.inc(v)` does not
+recurse (the inner `Ok`/payload blocks stay RC=0 → swept → SIGSEGV reading `Ok`). **Fix**: a synchronous,
+RECURSIVE RC-pin at terminate — `caml_mmtk_keep_alive(v)` in `sync_and_terminate` (domain.c, after the
+global-root store, before the collect) → `mmtk_ocaml_lxr_keep_alive` → `lxr_keep_alive_recursive` (rc.rs):
+SFT-guard → `rc.inc` → `set_as_in_place_promoted`+`promote_with_size` → recurse over fields, pinning all
+three chain blocks with RC≥1 (spares them from the `rc_dead()` AND-guarded sweep), independent of any
+collection. No-op for non-LXR plans. Validated par_binarytrees D=1..32 ×6 all pass (was 0/8 at D=24).
+Bounded over-retention: one result chain per terminated domain, reclaimed when `term_sync` dies.
 
 ## GH#3 / #31 Domain.join result-UAF — promotion made reliable (global root), BUT residual is a SEPARATE post-publish term_sync->state corruption (2026-06-29)
 

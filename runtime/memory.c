@@ -216,6 +216,8 @@ CAMLexport CAMLweakdef void caml_modify (volatile value *fp, value val)
   caml_tsan_func_entry(__builtin_return_address(0));
 #endif
 
+  extern unsigned long caml_e1_modify;  /* E1: pointer-mutation counter (runtime/mmtk.c) */
+  caml_e1_modify++;
   write_barrier((value)fp, 0, *fp, val);
 
   /* See Note [MM] above */
@@ -307,15 +309,26 @@ CAMLno_tsan /* Avoid instrumenting initializing writes with TSan: they should
 CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
 {
 #ifdef DEBUG
-  /* Previous value should not be a pointer.
-     In the debug runtime, it can be either a TMC placeholder,
-     or an uninitialized value canary (Debug_uninit_{major,minor}).
-     Under MMTk, fresh blocks are zero-initialised rather than canary-filled,
-     so the field may legitimately be 0 here. */
-  CAMLassert(Is_long(*fp) || *fp == Debug_uninit_major
-             || *fp == Debug_uninit_minor
-             || *fp == 0);
+  /* In stock OCaml the previous value of a freshly-allocated field is never a
+     pointer: a new block is either canary-filled (Debug_uninit_{major,minor})
+     or, for a TMC placeholder, an immediate. This assertion checked that.
+
+     Under always-on MMTk that precondition does NOT hold. For the Immix family
+     (GenImmix/Immix/StickyImmix/GenCopy and ConcurrentImmix) allocation-time
+     zero-fill is turned OFF (runtime/mmtk.c, mmtk_ocaml_set_alloc_zeroed): the
+     "unzeroed-minor-heap discipline" guarantees every field is written before
+     the next GC-observable safepoint, so the GC never reads an uninitialised
+     field. But that means a recycled Immix line legitimately still holds a
+     *stale pointer* from a previously-swept object at the moment caml_initialize
+     overwrites it. The slot is never read before the `*fp = val` below, so this
+     is correct — only the stock debug invariant ("prev value is a non-pointer
+     canary") no longer applies. Hence we cannot assert anything about *fp here.
+     (The earlier `|| *fp == 0` relaxation was wrong: it assumed zero-fill, which
+     only MarkCompact uses; under the no-zero plans *fp is an arbitrary stale
+     word, so the previous-value check must be dropped entirely. GH#17.) */
 #endif
+  extern unsigned long caml_e1_init;  /* E1: mature-init-write counter (runtime/mmtk.c) */
+  caml_e1_init++;
   *fp = val;
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
      generational plans (no-op otherwise). Replaces the stock minor remembered-set

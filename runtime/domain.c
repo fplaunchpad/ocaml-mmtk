@@ -936,6 +936,19 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      here (every collect coalesces under sustained contention); the global root is
      the correct, livelock-free fix. */
   caml_modify_generational_global_root(&ml_values->result, v);
+  /* LXR (issue #31): the tracing/generational promotion below does NOT save the result
+     under the reference-counting plan. LXR is non-generational, so caml_mmtk_is_young is
+     always 0 -- the retry loop is a dead no-op -- and the forced caml_mmtk_collect
+     coalesces onto a peer GC that already passed its global-root scan, so it never
+     promotes `v`. The result's clean nursery block (BlockState::Unallocated, all-RC-zero)
+     is then reclaimed by the RC nursery sweep and reused before the joiner dereferences
+     term_sync.state -> SIGSEGV in Domain.join (rr-confirmed). RC-pin the whole
+     Finished(Ok v) chain HERE, synchronously and independent of any collection: it gives
+     `v` and its transitive children RC >= 1 (sparing their blocks) and marks them mature.
+     A no-op on the tracing/generational plans, where the collect + global root below is
+     the load-bearing promotion. Do it BEFORE the collect so a peer GC that snapshots this
+     domain's roots sees a consistent, RC-pinned result. */
+  caml_mmtk_keep_alive(v);
   caml_mmtk_collect();
   /* Confirm the result is actually out of the nursery before publishing. The
      first caml_mmtk_collect() can coalesce onto a peer GC that had already run

@@ -39,6 +39,12 @@ extern void caml_mmtk_collect(void);
  * domain-termination result handoff to confirm promotion (issue #31). */
 extern int caml_mmtk_is_young(value v);
 
+/* LXR (issue #31): durably RC-pin the domain result chain `v` (and its transitive
+ * children) at domain termination so it survives this domain's own nursery-block
+ * sweep until the joiner reads it. No-op on non-LXR plans and when MMTk cannot
+ * collect. See runtime/mmtk.c and gc/mmtk-core lxr_keep_alive_recursive. */
+extern void caml_mmtk_keep_alive(value v);
+
 /* Initialise MMTk once for the process. Reads the plan from the MMTK_PLAN
  * environment variable (default "NoGC") and the heap size from
  * MMTK_HEAP_SIZE_MB (default 1024 MiB). Idempotent. */

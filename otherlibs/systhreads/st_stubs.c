@@ -55,6 +55,7 @@ SetThreadDescription(HANDLE hThread, PCWSTR lpThreadDescription);
 #include "caml/memory.h"
 #include "caml/misc.h"
 #include "caml/mlvalues.h"
+#include "caml/mmtk.h"
 #include "caml/printexc.h"
 #include "caml/roots.h"
 #include "caml/signals.h"
@@ -702,6 +703,19 @@ caml_thread_start(void * v)
 
   thread_init_current(th);
 
+  /* MMTk STW safety (GH#17 Bug B): we acquired the master lock and are about to
+     run OCaml on this domain WITHOUT going through caml_leave_blocking_section,
+     so the domain is not in MMTk's RUNNING set. If another thread on this domain
+     blocked it (e.g. the spawning thread is in Thread.join), MMTk would see the
+     domain as safe-stopped and scan THIS thread's live, still-mutating stack —
+     reading mutator-written words (e.g. tagged immediates) as return addresses,
+     so caml_find_frame_descr returns NULL (fiber.c CAMLassert(d) in debug; a
+     NULL frame_descr deref / SIGSEGV in release). Mark the domain RUNNING (and
+     cooperatively park if a collection is already in progress) before any OCaml
+     runs, mirroring what caml_leave_blocking_section does via
+     caml_mmtk_leave_blocking. */
+  caml_mmtk_become_running((uintnat) Caml_state);
+
   clos = Start_closure(Active_thread->descr);
   caml_modify(&(Start_closure(Active_thread->descr)), Val_unit);
   caml_callback_exn(clos, Val_unit);
@@ -852,6 +866,14 @@ int caml_c_thread_register_in_domain_index(uintnat domain_index,
   if (th == NULL) goto out_err;
 
   thread_init_current(th);
+
+  /* MMTk STW safety (GH#17 Bug B): same gap as caml_thread_start — we hold the
+     master lock and are about to run/allocate OCaml without having gone through
+     caml_leave_blocking_section, so the domain is not in MMTk's RUNNING set.
+     Mark it RUNNING before the allocation below so the STW protocol cannot scan
+     this thread's live stack. (We re-block the regular way via
+     caml_enter_blocking_section_no_pending at the end.) */
+  caml_mmtk_become_running((uintnat) Caml_state);
 
   /* We can now allocate the thread descriptor on the major heap */
   value res = caml_thread_new_descriptor_exn(Val_unit);  /* no closure */

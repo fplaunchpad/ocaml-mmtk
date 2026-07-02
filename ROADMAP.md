@@ -18,8 +18,13 @@ there**), [`fork-handoff.md`](fork-handoff.md) (original rationale).
 MMTk is **always-on and the only collector** — no opt-out; the stock minor *and*
 major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix`).
 Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it requires a
-plan whose Default allocator is a bump/Immix region (the seven:
-`Immix`/`StickyImmix`/`ConcurrentImmix`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan. Run
+plan whose Default allocator is a bump/Immix region (the eight:
+`Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan.
+**`LXR`** is our reference-counting **research plan** (PLDI'22 RC-on-Immix): single-domain validated
+(correct, sanity-clean, at memory parity with Immix; the field barrier is near-free on OCaml's
+init-write-dominated code; a backup trace reclaims cycles) — **experimental; single- AND multi-domain
+validated** (par_binarytrees D=1..32); requires a
+pinned `MMTK_HEAP_SIZE_MB` and is **not** in the CI plan matrix. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
 clamped 32 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
@@ -325,8 +330,13 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    Promotion fixes only move the rate; **GH#3 stays OPEN** for the residual (next: rr the deterministic `0x400`
    write). → NOTES 2026-06-29 (newest entry).
    Phase 3 **structurally eliminated the bug#3c/dual-STW deadlock class** (no second barrier for a
-   terminating RUNNING domain to lead) — but **not** the separate ConcurrentImmix chameneos
-   continuation-scan hang. Kept (as plain spawn/terminate state, not barriers): `all_domains_lock` +
+   terminating RUNNING domain to lead). The separate ConcurrentImmix chameneos continuation-scan hang is
+   **also FIXED** (GH#4 + GH#14 closed; mmtk-core `88ab2f5ea5` lost-wakeup fix at the Concurrent→FinalMark
+   bucket boundary + `72ee627050` + cont_lock yield-spin; fork bump `3f6f10072`) — re-verified 2026-07-02
+   (~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB, byte-identical checksum), so ConcurrentImmix
+   is correctness-ready. (The residual effect/fiber bug is now **LXR-only**: an unguarded RC slot-unlog on
+   mmap'd fiber-stack slots, `plan/lxr/rc.rs:221`/`:621` — see NOTES 2026-07-02.) Kept (as plain
+   spawn/terminate state, not barriers): `all_domains_lock` +
    `stw_domains` (now a plain spawn/terminate mutex) and the `young_limit`-poison (MMTk's STW reuses it);
    the backup thread is systhreads-entangled, so its deletion is deferred to **#20**. The multi-domain exit
    caller (`caml_stop_all_domains`) now `remove_running`+deregisters each cancelled peer so the sole
@@ -468,7 +478,12 @@ The active research/measurement threads behind the M8 milestone — the index; d
     driven via **`running-ng`** — adopted as the M8 measurement vehicle (rather than building our own harness).
     The headline throughput/RSS campaign runs here. (See `PERFORMANCE.md` §1/§3.)
   - **Quick GC-decision bench panel** (on the `benchmarks` orphan branch, `quick/`; ~5 min/variant; sequential
-    + parallel) — the **fast inner-loop complement** to the macro suite and the **no-zero (RQ8) A/B vehicle**.
+    + parallel) — the **fast inner-loop complement** to the macro suite, the **no-zero (RQ8) A/B vehicle**, and
+    the **LXR (RQ1) measurement vehicle** (LXR runs both sequential AND the parallel domain sweep at a pinned
+    heap; not in the byte-identical CLBG gate). **Parallel finding:** RC does *not* rescue the multi-domain
+    anti-scaling — LXR scales like the tracing plans (on par with GenImmix on compute benches, weak on
+    alloc-heavy par_binarytrees), well short of stock OCaml; the bottleneck is the MMTk↔OCaml integration, not
+    the collector algorithm (see README quick panel + `gc/mmtk/NOTES.md` 2026-07-01).
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime
