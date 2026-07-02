@@ -549,6 +549,25 @@ pub extern "C" fn mmtk_ocaml_handle_user_collection_request(domain_state_addr: u
     mmtk().handle_user_collection_request(tls, true, true);
 }
 
+/// Like `mmtk_ocaml_handle_user_collection_request`, but NON-exhaustive: request a
+/// forced collection without forcing full heap. Under the generational plans this
+/// yields a NURSERY collection — exactly what the domain-termination path needs
+/// (promote the global-rooted `Finished(...)` result out of the nursery before it
+/// is published to the joiner; GH#3/issue #31). The old path requested
+/// exhaustive=true, i.e. a WHOLE-HEAP STW collection per Domain termination —
+/// measured to be the dominant multi-domain scaling pathology on spawn-heavy
+/// programs (one full GC per spawn: 8/260/807 full GCs at d=1/8/24 on the
+/// compute par benches where promotion is otherwise ~zero; SCALABILITY.md
+/// UPDATE 4/5). Non-generational plans collect whole-heap on any GC, so their
+/// behaviour is unchanged.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_handle_user_minor_collection_request(domain_state_addr: usize) {
+    let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+        Address::from_usize(domain_state_addr)
+    })));
+    mmtk().handle_user_collection_request(tls, true, false);
+}
+
 // ── Object queries ────────────────────────────────────────────────────────
 
 /// Total number of objects relocated by copying collection so far (Immix

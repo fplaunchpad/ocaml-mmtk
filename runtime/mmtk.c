@@ -657,6 +657,19 @@ void caml_mmtk_collect(void)
     mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
 }
 
+/* Forced MINOR collection (non-exhaustive): under the generational plans this is
+   a nursery GC — enough to promote a global-rooted young value out of the
+   nursery, without the whole-heap trace caml_mmtk_collect forces. Used by the
+   domain-termination result-promotion path (domain.c sync_and_terminate, GH#3):
+   the old exhaustive collect there cost ONE FULL STW GC PER Domain TERMINATION,
+   the dominant multi-domain scaling pathology on spawn-heavy programs
+   (SCALABILITY.md UPDATE 4/5). */
+void caml_mmtk_collect_minor(void)
+{
+  if (caml_mmtk_collects)
+    mmtk_ocaml_handle_user_minor_collection_request((uintptr_t) Caml_state);
+}
+
 /* True iff `v` is a heap block currently residing in the generational nursery
    (young space). False for immediates, mature blocks, non-generational plans, and
    NoGC. Used by sync_and_terminate (issue #31) to verify the domain result was

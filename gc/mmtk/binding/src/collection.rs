@@ -128,19 +128,37 @@ const MATURE_PRESSURE_OVERHEAD_PCT: usize = 120;
 /// GCs since the last full GC, even if the mature heap has not grown enough to trip
 /// the space-overhead trigger. Guarantees `Gc.major_collections` keeps advancing and
 /// mature-dead weaks/ephemerons/finalisers are reclaimed on a bounded schedule for
-/// steady-state-live-set programs (GH#5). 8 mirrors the order of magnitude of minor
-/// GCs between full major cycles in stock OCaml's default pacing; measured to leave
-/// GenImmix throughput on a mature-growing workload (binarytrees) at parity with
-/// Immix, since a full GC at this cadence is cheap whenever the mature heap is small.
-const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE: usize = 8;
+/// steady-state-live-set programs (GH#5).
+///
+/// ALLOCATION-PACED RETUNE (SCALABILITY.md UPDATE 4, 2026-07-02): this was 8, and
+/// together with the old 4 MiB growth floor it MANUFACTURED domain-scaled major
+/// cycles — with N domains the shared nursery fills ~N× faster, so an 8-minor
+/// cadence fires ~N× more often per unit work (measured: 71→328→807 cycles at
+/// d1/8/24 on par_spectralnorm, up to 92–98% STW-wall on par_binarytrees, while
+/// vanilla — allocated-words-paced — completed ZERO major cycles on every cell).
+/// 64 keeps reclamation bounded for GH#5 (weaklifetime still cycles under its
+/// allocation) without the domain-scaled frequency blow-up; the growth trigger
+/// below, floored at a nursery's worth of promotion, is the primary pacer.
+const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE: usize = 64;
 
-/// Floor (in pages) below which the mature-pressure trigger never fires, so tiny /
-/// short-lived programs (whose mature heap is a handful of pages) don't thrash on
-/// full GCs. 4 MiB / page_size; computed lazily from the runtime page size.
+/// Floor (in pages) below which the mature-pressure trigger never fires. This is
+/// the allocation budget a program must actually promote/allocate into the mature
+/// space before we consider a major cycle at all, so it is the effective pacer for
+/// small-live-set programs. Was 4 MiB — small enough that a few domain-scaled
+/// minors' junk promotion tripped it (the manufactured-cycles pathology above).
+/// Now max(32 MiB, the max nursery size): at least a whole nursery's worth of
+/// survivors must have been promoted since the last cycle, making the budget scale
+/// with the same knob that scales promotion volume. Stock's analogue is its
+/// allocated-words slice budget against `space_overhead`.
 fn mature_pressure_floor_pages() -> usize {
-    const FLOOR_BYTES: usize = 4 * 1024 * 1024;
+    const FLOOR_BYTES: usize = 32 * 1024 * 1024;
     let pg = mmtk::util::constants::BYTES_IN_PAGE;
-    FLOOR_BYTES / pg
+    let nursery_pages = crate::mmtk()
+        .get_plan()
+        .base()
+        .gc_trigger
+        .get_max_nursery_pages();
+    (FLOOR_BYTES / pg).max(nursery_pages)
 }
 
 /// Number of collections reported as `Gc.major_collections` (and the field tests
