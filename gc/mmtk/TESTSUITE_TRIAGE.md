@@ -103,6 +103,7 @@ flakes under the parallel CI load).
 | lib-runtime-events/test_compact | byte+nat | unsupported | compaction events not emitted (no stock compactor) | DISABLED |
 | lib-runtime-events/test_external | byte+nat | unsupported | external GC-event stream not emitted | DISABLED |
 | lib-runtime-events/test_instrumented | nat | unsupported | instrumented GC-event stream not emitted | DISABLED |
+| callback/test_gc_alarm | byte+nat | semantic-timing | ~1 GB LOS-direct churn + ~2 MB young => 0 collections at a large pinned heap (CI 4096 MB), so no alarm can fire; stock paces cycles by allocated words. Passes at 512 MB; alarm delivery works whenever a GC happens | DISABLED |
 | weak-ephe-final/ephetest | byte+nat | semantic-timing | finalise_last "unset" flag not flipped on full_major | DISABLED |
 | weak-ephe-final/ephetest2 | byte+nat | semantic-timing | finalise_last flag not flipped on full_major | DISABLED |
 | weak-ephe-final/ephetest3 | byte+nat | semantic-timing | finalise_last flag not flipped on full_major | DISABLED |
