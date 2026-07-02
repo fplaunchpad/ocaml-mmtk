@@ -154,10 +154,14 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set
   programs — binarytrees was 3.5× slower; now 1.27×. Override via `MMTK_GC_TRIGGER`), `MMTK_NURSERY`
   (raw BYTES only, e.g. `Fixed:8388608` / `Bounded:2097152,8388608`; the `2m,8m` *suffix* form does **not**
-  parse — it silently falls back to mmtk-core's default, ROADMAP #21 BUG B; default = bounded **2–64 MiB**, sized separately from the
-  major heap. Raised 8→64 MiB on 2026-06-25: the old 8 MiB forced 100s–1000s of near-empty minor GCs
-  on high-alloc workloads → GenImmix 1.3–3× slower single-domain; `Bounded` adapts down to fit small
-  heaps. Does **not** fix multi-domain anti-scaling — that's structural; see `gc/mmtk/NOTES.md`), `MMTK_THREADS`
+  parse — it silently falls back to mmtk-core's default, ROADMAP #21 BUG B; default = bounded **2–64 MiB scaled by the live domain
+  count** (N×2–N×64 MiB, stock-parity: stock gives each domain its own 2 MiB arena) — latched from the
+  domain registry at spawn/termination, consumed lazily at the next trigger check; the space-overhead
+  heap gets matching headroom for the scaled portion (SCALABILITY.md UPDATE 6: par_binarytrees d=8
+  5.7× faster, copied objects ÷9). An explicit `MMTK_NURSERY` pin is never scaled; opt out of scaling
+  the default with `MMTK_NURSERY_PER_DOMAIN=0`. Raised 8→64 MiB on 2026-06-25: the old 8 MiB forced
+  100s–1000s of near-empty minor GCs on high-alloc workloads → GenImmix 1.3–3× slower single-domain;
+  `Bounded` adapts down to fit small heaps), `MMTK_THREADS`
   (GC worker count; **default = nproc**, MMTk-core's own default. We tried *forcing 1* — it cut the
   single-domain minor-GC futex park/wake cost ~1.37× — but reverted it as a band-aid: worker count does
   **not** fix multi-domain throughput scaling (STW-bound, not thread-pool-bound), so pinning 1 only bought

@@ -5,6 +5,31 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Per-domain nursery scaling LANDED — culprit-1 experiment: size was most of it (2026-07-02, mmtk-core `ed02eafc6b`)
+
+KC's call: domain-local *collection* (RQ10 pole-A) is harder than it sounds — first scale the
+minor-heap area with the domain count, lazily. Landed: the default `Bounded:2MiB,64MiB` nursery
+budget is scaled by the **live domain count** (N×2–N×64 MiB, stock parity with stock's per-domain
+2 MiB arenas), latched from the domain registry at spawn/termination
+(`active_plan::update_nursery_scale`) and consumed **lazily at the next trigger check** — the
+budget is a pure accounting number, so the store does no eager mapping/copying; a termination that
+leaves usage above the shrunk budget just triggers the next minor GC. Explicit `MMTK_NURSERY` pins
+are never scaled; `MMTK_NURSERY_PER_DOMAIN=0` opts the default out. Single-domain behaviour is
+bit-identical (scale=1 no-op).
+
+**Trap (first cut measured, then fixed):** MMTk's nursery lives INSIDE the heap budget and the
+space-overhead trigger sized the heap to live×2.2 with no nursery term — a scaled budget larger
+than a tiny-live heap made `virtual_memory_exhausted()` turn EVERY collection full-heap
+(par_spectralnorm d=8: 28 → 671 fulls). Fix: the heap target adds the scaled-up portion of the
+budget × (1 + worst-case copy expansion); pinned heaps cap the scaled portion at heap/4 instead.
+
+**Result (M4, GenImmix d=8, outputs byte-identical, d=1 identical):** par_binarytrees wall
+2.53→0.44 s (5.7×; GC time ÷9.4; **copied objects 37 M→4 M** — the bigger budget lets short-lived
+allocation die young instead of being promoted at the next too-early shared fill, so culprit 1 was
+frequency AND premature promotion feeding the mature trace); par_spectralnorm 0.74→0.45 s
+(minors ÷3.4) at an RSS trade 88→320 MiB. Bactrian sees the same win. Full details + table:
+SCALABILITY.md UPDATE 6. Panel + turing rerun owed.
+
 ## Allocation-paced full-GC trigger LANDED + GH issue 3 root-caused (remset lost at domain termination) (2026-07-02, `33ae0009f8`)
 
 **What landed** (measured before/after in `SCALABILITY.md` UPDATE 5; motivation in UPDATE 4):

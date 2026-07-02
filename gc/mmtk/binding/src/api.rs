@@ -4,6 +4,7 @@
 //! struct.  All exported symbols use the `mmtk_ocaml_*` prefix.
 
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use mmtk::memory_manager;
 use mmtk::util::alloc::{Allocator, AllocatorSelector, BumpAllocator, ImmixAllocator};
@@ -166,6 +167,16 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
             memory_manager::process(&mut builder, "nursery", "Bounded:2097152,67108864"),
             "failed to set default nursery"
         );
+        // Per-domain nursery scaling (stock parity: stock's minor-heap capacity is
+        // per-domain, N x 2 MiB total). With the default Bounded budget installed,
+        // scale it by the live domain count — Bounded:N*2MiB,N*64MiB — latched from
+        // the domain registry at spawn/termination and consumed lazily at the next
+        // trigger check (see active_plan::update_nursery_scale). An explicit
+        // MMTK_NURSERY pin is authoritative and never scaled; opt out of scaling
+        // the default with MMTK_NURSERY_PER_DOMAIN=0.
+        if std::env::var_os("MMTK_NURSERY_PER_DOMAIN").is_none_or(|v| v != "0") {
+            NURSERY_PER_DOMAIN.store(true, Ordering::Relaxed);
+        }
     }
     // GC worker count: use mmtk-core's own default (num_cpus::get() = nproc). We do NOT
     // pin a custom default. We previously forced 1 worker to dodge the single-domain minor-GC
@@ -350,6 +361,15 @@ pub extern "C" fn mmtk_ocaml_alloc(
 /// neither an Immix nor a plain bump allocator (MarkSweep's free-list, or
 /// MarkCompact's header-reserving bump allocator — see above; bytecode falls back
 /// to the per-object alloc path; native aborts at startup).
+/// Whether the default Bounded nursery budget is scaled by the live domain count
+/// (set once at init; read by active_plan::update_nursery_scale at domain
+/// registration/deregistration).
+static NURSERY_PER_DOMAIN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn nursery_per_domain_scaling() -> bool {
+    NURSERY_PER_DOMAIN.load(Ordering::Relaxed)
+}
+
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_refill_tlab(
     mutator: *mut libc::c_void,

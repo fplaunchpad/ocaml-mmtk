@@ -32,13 +32,36 @@ lazy_static! {
 
 /// Register a mutator for the given domain address.
 pub fn register_mutator(domain_state_addr: usize, mutator: *mut Mutator<OCamlVM>) {
-    let mut map = DOMAIN_REGISTRY.write().unwrap();
-    let prev = map.insert(domain_state_addr, MutatorPtr(mutator));
-    assert!(
-        prev.is_none(),
-        "register_mutator: domain 0x{:x} already registered — bind_mutator called twice",
-        domain_state_addr
-    );
+    let n = {
+        let mut map = DOMAIN_REGISTRY.write().unwrap();
+        let prev = map.insert(domain_state_addr, MutatorPtr(mutator));
+        assert!(
+            prev.is_none(),
+            "register_mutator: domain 0x{:x} already registered — bind_mutator called twice",
+            domain_state_addr
+        );
+        map.len()
+    };
+    update_nursery_scale(n);
+}
+
+/// Per-domain nursery-budget scaling (stock parity: stock gives each domain its own
+/// 2 MiB minor heap, so total nursery capacity grows with the domain count; a flat
+/// shared budget instead makes minor-GC FREQUENCY scale with the aggregate allocation
+/// rate — SCALABILITY.md UPDATE 5 culprit 1). Scale the shared Bounded budget by the
+/// registered-domain count. LAZY by construction: the budget is a pure accounting
+/// number consulted at trigger checks, so this store does no eager work — a spawn
+/// just widens what the NEXT trigger evaluation allows, and a termination shrinks it
+/// (if usage already exceeds the shrunk budget, the next poll triggers the minor GC).
+/// Skipped when the user pinned MMTK_NURSERY, or with MMTK_NURSERY_PER_DOMAIN=0.
+fn update_nursery_scale(ndomains: usize) {
+    if crate::api::nursery_per_domain_scaling() {
+        crate::mmtk()
+            .get_plan()
+            .base()
+            .gc_trigger
+            .set_nursery_scale(ndomains.max(1));
+    }
 }
 
 /// Addresses (caml_domain_state*) of all registered domains. Used by the STW
@@ -74,6 +97,7 @@ pub fn deregister_by_addr(domain_state_addr: usize) {
         // mutator because it already left the RUNNING set's mutating states.
         unsafe { (*m.0).flush() };
     }
+    update_nursery_scale(DOMAIN_REGISTRY.read().unwrap().len());
     // Also drop it from the stop-the-world RUNNING set so a collection in flight
     // does not wait for a domain that has terminated (it has left the runtime's
     // STW participant set and is no longer executing OCaml).

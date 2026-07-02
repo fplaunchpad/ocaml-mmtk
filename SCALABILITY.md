@@ -264,6 +264,39 @@
 > nursery-per-domain-scaling experiment (cheap; quantifies how much of 1 is size vs architecture —
 > its result decides whether RQ10 pole-A deserves a full build), then scheduler-churn reduction.
 
+> ## ✅ UPDATE 6 (2026-07-02) — per-domain nursery scaling LANDED: the culprit-1 experiment ran, and size is most of it. par_binarytrees d=8 wall 2.53→0.44 s (5.7×, GC time ÷9, copied objects ÷9 — premature promotion was the hidden half); par_spectralnorm 0.74→0.45 s (minors ÷3.4) at an RSS trade (88→320 MiB).
+>
+> KC's direction: don't build domain-local *collection* yet — first scale the minor-heap area with
+> the domain count, lazily (stock parity: stock gives each domain its own 2 MiB arena, so total
+> nursery capacity is N×2 MiB and sits OUTSIDE the major-heap budget). Landed (`ed02eafc6b` +
+> binding): the default `Bounded:2MiB,64MiB` budget is now scaled by the **live domain count** —
+> effectively `Bounded: N×2MiB, N×64MiB` — latched from the domain registry at spawn/termination
+> and consumed **lazily at the next trigger check** (the budget is a pure accounting number: no
+> eager mapping/copying; a termination that leaves usage above the shrunk budget simply triggers
+> the next minor GC). An explicit `MMTK_NURSERY` pin is never scaled; opt out with
+> `MMTK_NURSERY_PER_DOMAIN=0`. Single-domain (scale=1) behaviour is bit-identical.
+>
+> **The trap the first cut hit (and why stock never sees it):** MMTk's nursery lives INSIDE the
+> heap budget, and the fork's space-overhead trigger sizes the heap to live×2.2 with no nursery
+> term — so a scaled budget larger than a tiny-live heap made `virtual_memory_exhausted()` convert
+> EVERY collection to full-heap (spectralnorm d=8: 28 → 671 fulls). Fix (both no-ops at scale=1):
+> the heap target now adds the scaled-up portion of the budget × (1 + worst-case copy expansion);
+> pinned heaps (no headroom mechanism) instead cap the scaled portion at heap/4.
+>
+> **Measured (M4, GenImmix, d=8, 3 reps; scale-on vs `MMTK_NURSERY_PER_DOMAIN=0`):**
+>
+> | bench | wall | GCs (full) | GC time | copied | maxRSS |
+> |---|--|--|--|--|--|
+> | par_binarytrees 20 | 2.53 → **0.44 s** | 337 (22) → **60 (5)** | 2350 → **250 ms** | 37 M → **4 M** | 534 → 546 MiB |
+> | par_spectralnorm 4000 | 0.74 → **0.45 s** | 853 (33) → **253 (13)** | 405 → **116 ms** | ~2.8 k | 88 → **320 MiB** |
+>
+> Outputs byte-identical; d=1 GC counts identical; Bactrian sees the same win (psn d=8: 247 GCs,
+> 111 ms). The binarytrees ÷9 in *copied objects* is the buried lede: the bigger per-domain budget
+> lets short-lived allocation DIE YOUNG instead of being promoted at the next (too-early) shared
+> fill — culprit 1 wasn't just pause *frequency*, it was **premature promotion feeding culprit 2's
+> mature trace work**. Full panel + turing d=24 rerun still owed; the residual after this is the
+> per-pause rendezvous cost itself (still ~1 ms × fewer pauses) and genuinely-live trace work.
+
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The
