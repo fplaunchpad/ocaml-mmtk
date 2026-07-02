@@ -188,6 +188,14 @@ the 2026-07-01 trap #2 limitation is CLOSED and low-domain multidomain works; on
 ([[lxr-multidomain-status]]). **rr lesson:** a deterministic-enough site (rc.rs:280) rr-cracks immediately; the
 rarer race stays hidden — matching the "multidomain timing races hide under rr" note.
 
+**LANDING NOTE (2026-07-02, later):** these two guards had been left **unmerged on `lxr-p3-activate`** --
+the mainline submodule merge (`ed94f5a671`) predated them, so mainline LXR chameneos still SIGSEGV'd
+deterministically at d=1 (caught re-verifying after the trigger-fix landing). Cherry-picked to the
+`bactrian`/`0.32-ocaml` submodule branches as `64e20de7b1` + `bd3fe9d09d` and the submodule bumped on
+`5.5+mmtk`. Re-validated on the bump: d=1 10/10, d=4 12/12, d=8 11/12 (the rare rr-resistant high-domain
+race above remains the only open chameneos issue); GenImmix/Bactrian chameneos and binarytrees
+(LXR/GenImmix/Bactrian) regression-clean.
+
 Found by the #30 investigation agent — Found by the #30 investigation agent —
 which also established **`#30` is the deferred ConcurrentImmix UNLOG-bit barrier-gate PERF item (internal, not a GH
 issue, not a blocker)**, and that **ConcurrentImmix's continuation-scan hang GH#4/#14 is already FIXED** (verified
