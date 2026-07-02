@@ -100,18 +100,27 @@ cycles stretch and it compounds (par_binarytrees at 8 domains ballooned to
 
 ## Closing the gap (RQ7 next steps)
 
-1. **Concurrent/lazy sweep** — move the FinalMark mature sweep off the pause
-   (lazy line sweeping / sweep-on-allocation), matching stock's incremental
-   sweep. Directly shrinks the one categorically-bigger pause.
+Ranked by the 2026-07-02 turing quantification (SCALABILITY.md UPDATE 4):
+
+1. **Allocation-paced cycle trigger** — the measured root cause of the
+   multi-domain gap: the mature-pressure/cadence trigger converts domain-scaled
+   minor traffic into domain-scaled whole-heap cycles (spectralnorm: 71 -> 328
+   -> 807 completed cycles at d1/8/24) that stock — allocated-words-paced with
+   a generous space_overhead — never runs (ZERO majors on every measured cell).
+   Under Bactrian the manufactured cycles run back-to-back, so it is
+   permanently mid-cycle: SATB always armed, marking workers always racing the
+   mutators (752 k context-switches, IPC ~1), floating garbage ballooning RSS.
+   Pace cycles by allocated words (and restore stock's progress guarantee at
+   large heaps — also un-disables `test_gc_alarm`).
 2. **Mutator-paced mark slices** — let mutators drain bounded amounts of the
    Concurrent bucket at poll points (the inert `caml_major_collection_slice`
-   hook is the natural place), matching stock's executor and pacing model and
-   freeing the GC-worker cores.
-3. **Value-filtered remset** — only record mature slots that receive young
+   hook), matching stock's executor and pacing model, freeing GC-worker cores
+   and cutting the worker/mutator context-switch churn.
+3. **Concurrent/lazy sweep** — move the FinalMark mature sweep off the pause
+   (lazy line sweeping / sweep-on-allocation), matching stock's incremental
+   sweep and shrinking the one categorically-bigger pause.
+4. **Value-filtered remset** — only record mature slots that receive young
    values, matching stock's remset traffic.
-4. **Allocation-paced cycle trigger** — start cycles by allocated-words budget
-   as well as pressure, restoring stock's progress guarantee at large heaps
-   (also un-disables `test_gc_alarm`).
 
 ## Running it
 

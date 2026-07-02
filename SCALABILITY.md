@@ -142,6 +142,49 @@
 > decomposition is now cross-host-confirmed — but the independent adversarial-verify layer did NOT run, so treat the
 > mechanism as strong + measured and the ranked remedies as one-analyst.
 
+> ## ⚠️ UPDATE 4 (2026-07-02) — quantified decomposition on turing (28c): vanilla does ZERO major work on every cell; MMTk's pacing MANUFACTURES domain-scaled full-GC work; Bactrian's concurrency doesn't rescue it; plus a zero-GC layout stall on matmul.
+>
+> Full three-phase campaign on turing (perf + GC-work accounting, mainline `fefb82c5b5`,
+> `~/phase{1,2,3}-results.txt`; vanilla = `OCAMLRUNPARAM=v=0x400`, MMTk = `MMTK_VERBOSE=1`;
+> par benches, domains 1/8/24, reps 3).
+>
+> **1. Vanilla completes ZERO major cycles on every single cell** (spectralnorm d8: 854 minors/0 major;
+> binarytrees d8: 350 minors/0 major; matmul d24: 18/0) while MMTk runs **domain-scaled FULL-heap STW
+> collections**: spectralnorm fulls 71 (d1) → 328 (d8) → **807 (d24)**; binarytrees fulls 32 → 83 → 160.
+> The GH#5 mature-pressure(120%)+cadence(8-minor) trigger against a shared nursery whose fill rate scales
+> with domains converts domain-scaled minor traffic into domain-scaled WHOLE-HEAP STW work that stock —
+> allocated-words-paced, generous `space_overhead`, concurrent major — simply never does on these runs.
+> STW-wall: binarytrees d8 GenImmix **5.9 s of 6.4 s wall (92%)**; d24 95%; spectralnorm d24 71%.
+> The single-worker control magnifies it (binarytrees d8 `MMTK_THREADS=1`: **21.2 s STW of 21.7 s wall, 98%**).
+>
+> **2. perf-stat separation of work vs stalls vs churn (d8):**
+> - binarytrees: MMTk executes **4.3× vanilla's instructions** (124e9 vs 29e9) at half the IPC
+>   (1.37 vs 2.23) and 3.2× the LLC misses — the manufactured traces are real *work*, not just pauses.
+>   Symbols: 28% mark-CAS (`atomic_compare_exchange_weak`) + 17% `copy_object` + ~8% side-metadata.
+> - spectralnorm: instructions +3% only, **mutator wall ≈ vanilla** (0.99−0.27 GC ≈ 0.69 s vanilla @d8) —
+>   "MMTk doesn't scale without GC work" is really "MMTk CREATES GC work". The pause machinery churns:
+>   context-switches 3.9 k (vanilla) → **76 k** (GenImmix d8) → **634 k** (d24, 31 k/s, IPC 1.07); at d24
+>   the profile is ~18% kernel futex/sched + **8.7% `Mutex::lock_contended`** (scheduler/work-bucket locks)
+>   vs ~26% OCaml compute — the 807-pause × 24-worker rendezvous burns more than the computation.
+> - **Bactrian does NOT rescue the parallel case** (new since UPDATE 3): binarytrees d8 wall 8.3 s (worse
+>   than GenImmix's 6.4) — STW drops to 4.9 s but mutator-side time explodes 0.5→3.4 s with **752 k
+>   context-switches (27× GenImmix)** and IPC 0.98: with the pressure trigger firing every ~3 minors it is
+>   *permanently mid-cycle* (SATB always armed, `ConcurrentTraceObjects` 18% of samples, workers racing
+>   mutators, 2.9% lock_contended), and RSS balloons on floating garbage. Concurrency relocates the
+>   manufactured work off the pause; it does not remove it — **the trigger design is the root cause**, and
+>   allocation-paced cycles (BACTRIAN.md closing-step #4) are now the top-ranked fix, ahead of concurrent
+>   sweep.
+>
+> **3. A separate, zero-GC mutator-side finding (matmul, Xeon-specific):** par_matmul d1 runs **0 GCs**
+> under GenImmix/Bactrian yet is **1.49×** vanilla (3.45 vs 2.32 s) with **identical instruction counts**
+> (+1%) and *fewer* L1/LLC/dTLB misses — IPC 2.87→1.94. `perf annotate` pins **40% of kernel cycles on the
+> row-header bounds-check load** (`mov -0x8(%rdi)`, 9% under vanilla, identical codegen); the gap vanishes
+> when the matrices fit L2 (256×256: 0.07 vs 0.08 s) and is absent on the M4 (0.87×). Layout-induced
+> memory-hierarchy stall — bump-packed 6208 B row stride vs malloc's ~8 KiB page-spread rows
+> (4K-aliasing/prefetcher interaction suspected). Nursery-size control refutes the promoted-compaction
+> theory (256 KiB nursery → 66 GCs → *slower*, 3.76 s). Open micro-item with a clean repro; sequential-panel
+> matmul ratios on Xeon carry this and it is NOT GC-machinery cost.
+
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The
