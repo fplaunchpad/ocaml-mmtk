@@ -5,6 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Allocation-paced full-GC trigger LANDED + GH issue 3 root-caused (remset lost at domain termination) (2026-07-02, `33ae0009f8`)
+
+**What landed** (measured before/after in `SCALABILITY.md` UPDATE 5; motivation in UPDATE 4):
+
+1. **Domain termination no longer runs exhaustive full GCs.** `domain.c`'s
+   `sync_and_terminate` promoted the `Domain.join` result by running full exhaustive collections —
+   one **whole-heap STW GC per spawned domain** (fulls == spawn count on every measured cell). It now
+   calls `caml_mmtk_collect_minor()` (new binding entry point
+   `mmtk_ocaml_handle_user_minor_collection_request`) — a minor GC promotes everything reachable from
+   the terminating domain's stack/registry out of the nursery, and the existing retry loop re-collects
+   if the result is still young (belt-and-braces; the global-root promotion of the join result is
+   unchanged).
+2. **Promotion-paced pressure trigger** (`collection.rs`): GH#5's mature-pressure floor is now
+   `max(32 MiB, nursery size)` of newly promoted pages since the last full/cycle (was small enough to
+   fire every ~3 minors under multi-domain promotion), and the fallback cadence is **per-domain**:
+   `8 × ndomains` minors (flat 8 before). First cut used a flat 64 and stretched `weaklifetime`'s
+   finalization latency past the testsuite timeout — per-domain scaling keeps d=1 semantics
+   (cadence 8) identical to before, so finalization-latency-sensitive tests are unaffected.
+3. **GH issue 3 fixed** (`active_plan.rs` `deregister_by_addr`, `aa60e04407`): switching termination
+   to minor GCs *unmasked* the real bug behind the long-standing ~50% `Domain.join` crash — a
+   terminating domain's mutator was removed from the registry **without flushing its thread-local
+   remembered-set (modbuf) buffers**, silently dropping old→young edges; the next minor GC then
+   failed to trace those young objects and swept them live. The old exhaustive termination GCs had
+   been masking it: a full-heap trace consults no remset. Fix: `flush()` the mutator (via
+   `MutatorContext`) before deregistering. Validation: 20/20 crash-free on the d=8 spawn-churn repro
+   (previously ~10/20 crashed); an rr chaos trace of the crash is preserved on turing at
+   `~/rr-gh3-1000-1`. A discriminator experiment (adding a *second* exhaustive collect: still 13/20
+   crashes) had already disproved all promotion-completeness theories, pointing at state loss in
+   deregistration itself.
+
+**Effect** (turing, 28c): manufactured majors are gone — par_spectralnorm d24 fulls **807 → 39**,
+par_matmul termination fulls **→ 0** (wall d24 0.66 → 0.32 s), par_binarytrees d8/d24 wall −22/−25%
+(GenImmix S(8) on M4: 0.89 → 1.02); Bactrian is no longer permanently mid-cycle (8-domain RSS
+1689 → 504 MiB). The residual scaling bill is now the **STW minor-pause rendezvous floor**
+(spectralnorm d24: ~1300 minors × ~1 ms ≈ 1.3 s of 1.9 s wall) plus legitimate trace work —
+next levers: BACTRIAN.md closing steps 2–3 (mutator-paced marking, concurrent sweep).
+
+---
+
 ## RQ7 `Bactrian` v1 LANDED — copying nursery + concurrently-marked, STW-evacuated Immix mature + SATB, as one plan (2026-07-02)
 
 **What landed (branch `bactrian`, submodule branch `bactrian`, mmtk-core commit `2d40032a24`):**

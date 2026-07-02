@@ -185,6 +185,54 @@
 > theory (256 KiB nursery → 66 GCs → *slower*, 3.76 s). Open micro-item with a clean repro; sequential-panel
 > matmul ratios on Xeon carry this and it is NOT GC-machinery cost.
 
+> ## ✅ UPDATE 5 (2026-07-02) — allocation-paced trigger LANDED (`33ae0009f8`): manufactured full-GC work de-manufactured (spectralnorm d24 fulls 807→39); binarytrees wall −22/−25% at d8/d24; matmul termination-GCs → 0; the fix also exposed and closed GH issue 3 (lost remembered-set at domain termination). Residual = legit trace work + the STW *minor*-pause rendezvous floor.
+>
+> UPDATE 4's verdict ("the trigger design is the root cause") is now *acted on and re-measured*
+> (same turing protocol, mainline `33ae0009f8`, `/tmp/turing-after.log`; medians of 3).
+> Three landed changes:
+>
+> 1. **Domain-termination full GCs eliminated** (`runtime/domain.c` + binding `api.rs`): domain
+>    termination now runs a *minor* collection (promote the `Domain.join` result out of the dying
+>    domain's nursery, with a promotion-retry loop) instead of `Gc.full_major`-equivalent exhaustive
+>    collections — the old path manufactured **one whole-heap STW GC per spawned domain** (fulls ==
+>    spawn count: matmul d8/d24 had exactly 8/24… and short-lived-domain programs had hundreds).
+> 2. **Allocation-paced mature-pressure trigger** (binding `collection.rs`): the GH#5 pressure floor
+>    is now `max(32 MiB, nursery size)` of *newly promoted* pages (was a tiny fixed floor that fired
+>    every ~3 minors under multi-domain promotion), and the fallback cadence scales per-domain
+>    (8 × ndomains minors, was flat 8) — pacing full GCs by allocation, à la stock's
+>    allocated-words/`space_overhead` pacing, not by domain-scaled minor frequency. (A flat cadence-64
+>    first cut stretched `weaklifetime`'s finalization latency into a testsuite timeout — per-domain
+>    scaling keeps d=1 behaviour identical to before.)
+> 3. **GH issue 3 root-caused and fixed** (binding `active_plan.rs`, `aa60e04407`): the change from
+>    exhaustive to minor termination-GCs *unmasked* a latent crash — a terminating domain's mutator was
+>    deregistered **without flushing its thread-local remembered-set buffers**, dropping old→young edges;
+>    the old exhaustive full GCs had been hiding it (a full trace needs no remset). 20/20 crash-free
+>    (was ~50% crash at d=8 spawn churn); rr chaos trace `~/rr-gh3-1000-1` preserved.
+>
+> **Before → after (turing medians; fulls = whole-heap STW collections per run):**
+>
+> | cell | fulls before | fulls after | wall before | wall after |
+> |---|--:|--:|--:|--:|
+> | par_spectralnorm GenImmix d=8 | 328 | **37** | 0.99 s | 1.05 s |
+> | par_spectralnorm GenImmix d=24 | **807** | **39** | 1.95 s | 1.90 s |
+> | par_binarytrees GenImmix d=8 | 83 | **20** | 6.4 s | **5.0 s (−22%)** |
+> | par_binarytrees GenImmix d=24 | 160 | **22** | 8.4 s | **6.3 s (−25%)** |
+> | par_binarytrees Bactrian d=8 | ~165 | **19** | 8.3 s | **5.9 s (−28%)** |
+> | par_matmul (all plans) d=24 | 24 (= spawns) | **0** | 0.66 s | **0.32 s** |
+>
+> M4 panel: `par_binarytrees` GenImmix S(8) 0.89 → **1.02** (anti-scaling eliminated); Bactrian's
+> 8-domain peak RSS 1689 → **504 MiB** (the paced trigger caps its mid-cycle floating garbage).
+>
+> **What the residual is (the new sharp question).** With the manufactured majors gone, spectralnorm
+> d24 wall barely moved (1.95→1.90 s) — its GC bill (~1.3 s of 1.9 s) is now **~1300 STW *minor*
+> pauses × ~1 ms each**, and at 24 domains that ~1 ms is mostly the 24-domain + GC-worker rendezvous,
+> not copying (d1 pays ~0.1 ms/minor for the same nursery). The manufactured-major problem was hiding
+> a **minor-pause frequency/rendezvous floor** — attack it via nursery scaling per domain, or stock's
+> trick: keep minors stop-the-world but make them *rare and cheap* (domain-local minor GCs are stock's
+> actual answer; MMTk's shared-nursery design pays a global rendezvous per fill). `par_binarytrees`'s
+> remaining 3–4× vs vanilla is legitimate domain-scaled trace work (fulls 20 × ~200 ms) — next levers
+> are concurrent sweep + mutator-paced marking (BACTRIAN.md closing steps 2–3).
+
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains
 makes a fixed amount of work **slower**, while stock OCaml 5.5.0 speeds up ~3.9×. The

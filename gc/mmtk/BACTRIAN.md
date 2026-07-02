@@ -102,16 +102,20 @@ cycles stretch and it compounds (par_binarytrees at 8 domains ballooned to
 
 Ranked by the 2026-07-02 turing quantification (SCALABILITY.md UPDATE 4):
 
-1. **Allocation-paced cycle trigger** — the measured root cause of the
-   multi-domain gap: the mature-pressure/cadence trigger converts domain-scaled
-   minor traffic into domain-scaled whole-heap cycles (spectralnorm: 71 -> 328
-   -> 807 completed cycles at d1/8/24) that stock — allocated-words-paced with
-   a generous space_overhead — never runs (ZERO majors on every measured cell).
-   Under Bactrian the manufactured cycles run back-to-back, so it is
-   permanently mid-cycle: SATB always armed, marking workers always racing the
-   mutators (752 k context-switches, IPC ~1), floating garbage ballooning RSS.
-   Pace cycles by allocated words (and restore stock's progress guarantee at
-   large heaps — also un-disables `test_gc_alarm`).
+1. ~~**Allocation-paced cycle trigger**~~ — **DONE (2026-07-02, `33ae0009f8`;
+   SCALABILITY.md UPDATE 5).** Was the measured root cause of the multi-domain
+   gap: the mature-pressure/cadence trigger converted domain-scaled minor
+   traffic into domain-scaled whole-heap cycles (spectralnorm d1/8/24: 71 ->
+   328 -> 807 completed cycles) that stock — allocated-words-paced with a
+   generous space_overhead — never runs (ZERO majors on every measured cell),
+   and domain *termination* forced one exhaustive full GC per spawn. Landed:
+   promotion-paced pressure floor `max(32 MiB, nursery)`, per-domain cadence
+   (8 x ndomains), and minor (not exhaustive) termination collections — which
+   exposed and fixed GH issue 3 (remset buffers lost at mutator deregister).
+   After: spectralnorm d24 fulls 807 -> 39; binarytrees d8/d24 wall -22/-25%;
+   Bactrian is no longer permanently mid-cycle and its 8-domain RSS fell
+   1689 -> 504 MiB. (`test_gc_alarm` remains disabled: at large dynamic heaps
+   cycles are still legitimately rare.)
 2. **Mutator-paced mark slices** — let mutators drain bounded amounts of the
    Concurrent bucket at poll points (the inert `caml_major_collection_slice`
    hook), matching stock's executor and pacing model, freeing GC-worker cores
