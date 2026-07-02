@@ -232,6 +232,37 @@
 > actual answer; MMTk's shared-nursery design pays a global rendezvous per fill). `par_binarytrees`'s
 > remaining 3–4× vs vanilla is legitimate domain-scaled trace work (fulls 20 × ~200 ms) — next levers
 > are concurrent sweep + mutator-paced marking (BACTRIAN.md closing steps 2–3).
+>
+> ### Prioritised residual culprits (post-trigger-fix; ranked by measured cost)
+>
+> 1. **STW minor-pause frequency × rendezvous cost — the shared global nursery.** Dominates GC-light
+>    workloads. Evidence: spectralnorm d24 = ~1300 STW minors × ~1 ms ≈ 1.3 s of 1.9 s wall; the ~1 ms
+>    is mostly the 2N-thread rendezvous, not copying (d1: ~0.1 ms/minor, same nursery). One shared
+>    nursery fills ~N× faster with N domains → minor *frequency* scales with N, and each fill stops
+>    everyone. Stock's answer is domain-**local** minor heaps (no global rendezvous per fill).
+>    Levers: nursery size × ndomains (cheap experiment, bounded win, more promotion per pause) →
+>    domain-local nurseries (RQ10 pole-A — structural, the real fix).
+> 2. **All mature reclamation is STW — stock's concurrent major was deleted in M9.** Dominates
+>    alloc-heavy workloads: binarytrees' remaining 3–4× vs vanilla is legitimate domain-scaled trace
+>    work paid on the wall (fulls ~20 × ~200 ms at d24; STW share still ~90%). Proof pause-frequency
+>    is the poison, not tracing: plain Immix scales 3.20× where every generational plan sits ≤1.02.
+>    Levers: concurrent/lazy sweep (design in BACTRIAN.md step 3) + mutator-paced mark slices (step 2).
+> 3. **GC-worker scheduler churn per pause — the multiplier on 1 and 2.** Context switches 3.9 k
+>    (vanilla) → 76 k (GenImmix d8) → 634 k (d24); 8.7% `Mutex::lock_contended` + ~18% kernel
+>    futex/sched at d24 (UPDATE 4). Every pause wakes and parks the whole worker pool through the
+>    work-bucket scheduler. Levers: `MMTK_THREADS=domains`, fewer worker wakes for small nursery
+>    packets.
+> 4. **Bactrian's paced-pauses-vs-floating-garbage trade.** The pacing fix capped its RSS
+>    (1689→504 MiB at d8) but it now pays paced STW fulls on the wall (M4 binarytrees S(8) 0.67).
+>    Fixed by the same levers as 2, plus value-filtered remset (BACTRIAN.md step 4) to cut
+>    InitialMark/FinalMark seed traffic.
+> 5. **Non-GC: the Xeon header-load stall** (matmul 1.49× at d1 with ZERO GCs; layout/4K-aliasing;
+>    absent on M4, vanishes in L2 — UPDATE 4 item 3). Inflates turing parallel ratios; not GC
+>    machinery; open micro-item.
+>
+> Recommended attack order: concurrent sweep first (design done; hits 2 and 4 at once), then the
+> nursery-per-domain-scaling experiment (cheap; quantifies how much of 1 is size vs architecture —
+> its result decides whether RQ10 pole-A deserves a full build), then scheduler-churn reduction.
 
 **TL;DR (SUPERSEDED — see the UPDATE above).** On allocation/GC-heavy parallel workloads the MMTk fork's default plan
 (GenImmix) does not just fail to scale across domains — it *anti-scales*: adding domains

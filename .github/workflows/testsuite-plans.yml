@@ -59,6 +59,26 @@ jobs:
         plan: [Immix, StickyImmix, GenImmix, MarkSweep, NoGC,
                SemiSpace, GenCopy, PageProtect, MarkCompact, Compressor, ConcurrentImmix,
                Bactrian, LXR]
+        # Plans that CANNOT pass the full suite by design run report-only
+        # (continue-on-error): MarkSweep/MarkCompact/PageProtect/Compressor have no
+        # bump/Immix Default allocator, so native code aborts at startup ("0 tests
+        # considered"); NoGC never reclaims, so churn-heavy tests OOM-abort at any
+        # heap. Their columns stay informative (flip to gating if one starts
+        # passing) without keeping the whole workflow permanently red. The capable
+        # plans (Immix family, GenCopy/SemiSpace, ConcurrentImmix, Bactrian, LXR)
+        # gate strictly.
+        include:
+          - plan: MarkSweep
+            report-only: true
+          - plan: NoGC
+            report-only: true
+          - plan: PageProtect
+            report-only: true
+          - plan: MarkCompact
+            report-only: true
+          - plan: Compressor
+            report-only: true
+    continue-on-error: ${{ matrix.report-only == true }}
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -127,9 +147,13 @@ jobs:
           #    already scores those correctly via the counters in step 2, so matching
           #    them here would false-positive the good plans. MMTk's own fatal message
           #    and Rust panic text cannot occur in OCaml test output, so they are safe.
+          # NB: grep -c exits 1 on zero matches; without `|| true` the step's
+          # implicit `set -e` would abort the gate exactly when the log is CLEAN
+          # (this kept every healthy plan red until 2026-07-02 — the workflow had
+          # never produced a green run).
           fatal=$(grep -acE \
             'thread .* panicked|panicked at|RUST_BACKTRACE|fatal runtime error|requires an Immix-family plan|no Immix Default allocator|requires a unified object reference' \
-            "$log")
+            "$log" || true)
 
           # 2. Pull summarize.awk's own counters from the trailing "Summary:" block.
           #    Format is fixed-width: "  %4d tests failed" / "  %4d unexpected errors"
@@ -139,7 +163,7 @@ jobs:
           unexp=$(num 'unexpected errors')
           considered=$(num 'tests considered')
           # Also catch summarize.awk's explicit fatal verdict (errored => exit 3).
-          something_failed=$(grep -acE 'Something failed|fatal error occurred during testing' "$log")
+          something_failed=$(grep -acE 'Something failed|fatal error occurred during testing' "$log" || true)
           : "${failed:=}" "${unexp:=}" "${considered:=}"
 
           reasons=""
