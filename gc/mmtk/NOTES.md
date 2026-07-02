@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## chameneos (effects/fiber churn) QUANTIFIED: the pathology is generational-barrier granularity under a mutation-dominated workload, NOT fiber scanning — plain Immix BEATS vanilla on it (2026-07-02)
+
+First panel with chameneos on all plans exposed GenImmix d=8 at 12.3 s vs vanilla 0.32 s (39×) and
+d=1 at ~4×. Quantified (M4, n=500000, d=1):
+
+- **The workload is pointer-MUTATION-dominated:** `MMTK_BARRIER_COUNT=1` → **88,000,845
+  `caml_modify` calls** (binarytrees: **2**). The MVar/green-thread scheduler mutates heap cells
+  (queue links, MVar state, stashed continuations) on every meeting — the RQ1 "OCaml is
+  init-write-dominated, the barrier rarely fires" finding does NOT hold for effect-handler
+  scheduler code.
+- **Promotion volume matches stock** (so it's not "MMTk promotes more"): vanilla promotes 87.7 M
+  words (18% minor survival — parked continuations keep their frames live BY DESIGN); GenImmix
+  copies 21.9 M objects ≈ the same bytes. But vanilla does it inside a 1.26 s total run while
+  GenImmix spends **4.3 s in GC alone** (344 GCs, ~12 ms each).
+- **Where the 4.3 s goes** (sample profile): `ProcessRegionModBuf` + `FieldSlot::load` +
+  side-metadata + `trace_object_nursery` + `caml_scan_stack`. GenImmix's generational barrier
+  remembers whole OBJECTS (region granularity, unlog bit per object). The mutated objects are
+  largely freshly-promoted queue/cont cells — DISTINCT each inter-GC epoch — so the modbuf
+  re-scanned at every minor is huge (~88 M/344 ≈ 250 k objects/GC, estimated), and every
+  remembered continuation re-scans its whole fiber stack (`caml_scan_stack`) at every minor.
+- **Discriminator that closes the case:** non-generational `Immix` (no remembering barrier, no
+  promotion) runs the same binary at d=1 in **0.90 s — faster than vanilla's 1.26 s** (86 ms GC,
+  0 objects copied). The fiber path itself is fine; the GENERATIONAL machinery is the pathology.
+
+**Fix direction (= BACTRIAN.md closing-step 4, now promoted):** a slot-granular, value-filtered
+generational barrier for OCaml — stock ref_table semantics: on `caml_modify(slot, v)` remember the
+SLOT, only when `young(v) && mature(slot)`; scan slots (1 load each) instead of re-scanning objects
+(and cont stacks) at each minor. Keep region-remembering only for array blits. Multi-domain (the
+remaining 39× vs 4×) stacks the per-minor global rendezvous on top — same culprit-1/3 mechanics.
+Stock-parity check: stock's ref_table absorbs the same 88 M barrier fires in a 1.26 s run.
+
 ## Per-domain nursery scaling LANDED — culprit-1 experiment: size was most of it (2026-07-02, mmtk-core `ed02eafc6b`)
 
 KC's call: domain-local *collection* (RQ10 pole-A) is harder than it sounds — first scale the

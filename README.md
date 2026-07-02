@@ -154,11 +154,16 @@ pause is still a global mutators+workers rendezvous (~1 ms at high domain counts
 barrier; `SCALABILITY.md` culprits list); (2) plans without a scalable nursery story: `ConcurrentImmix`
 (0.31×) and `LXR` (0.27×) still anti-scale on alloc-heavy work — mature reclamation is stop-the-world
 in this fork regardless of collector algorithm, and reference counting does not rescue it (RQ1); and
-(3) **effect-handler fiber churn** — new on the panel now that `chameneos_redux` runs on every plan:
-*all* MMTk plans are pathological there (0.3–0.5× at 8 domains; GenImmix wall 12.3 s vs vanilla's
-0.32 s, RSS 1.7 GB) — heavy `perform`/`continue` traffic allocates and scans fiber stacks in ways the
-binding's continuation path does not yet handle efficiently. That is the sharpest open workload class
-(the fiber/continuation scan path, not the collector core).
+(3) **effect-handler scheduler churn** — new on the panel now that `chameneos_redux` runs on every
+plan. The generational plans are pathological there (GenImmix d=8 wall 12.3 s vs vanilla's 0.32 s,
+RSS 1.7 GB; ~4× even single-domain) and the quantified cause is **the generational barrier's
+object granularity under a pointer-mutation-dominated workload**: the MVar scheduler fires
+`caml_modify` **88 million times** (binarytrees: 2), each remembering a whole — usually
+freshly-promoted, distinct — object that every minor GC then re-scans (continuations drag their
+whole fiber stacks with them). It is *not* the fiber path itself: non-generational `Immix` runs the
+same binary single-domain in 0.90 s, **beating vanilla's 1.26 s**. The fix is a slot-granular,
+value-filtered remset (stock's `ref_table` semantics) — see `gc/mmtk/NOTES.md` 2026-07-02; at 8
+domains the per-minor global rendezvous stacks on top, which is why every plan still loses there.
 
 **RQ1/RQ7 (parallel).** With architecture matched (`Bactrian`) *and* nursery capacity matched
 (per-domain scaling), the generational MMTk plans now reproduce stock's alloc-heavy scaling on this

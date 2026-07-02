@@ -252,10 +252,13 @@
 >    futex/sched at d24 (UPDATE 4). Every pause wakes and parks the whole worker pool through the
 >    work-bucket scheduler. Levers: `MMTK_THREADS=domains`, fewer worker wakes for small nursery
 >    packets.
-> 4. **Bactrian's paced-pauses-vs-floating-garbage trade.** The pacing fix capped its RSS
->    (1689→504 MiB at d8) but it now pays paced STW fulls on the wall (M4 binarytrees S(8) 0.67).
->    Fixed by the same levers as 2, plus value-filtered remset (BACTRIAN.md step 4) to cut
->    InitialMark/FinalMark seed traffic.
+> 4. **Generational-barrier granularity under mutation-dominated workloads** (quantified
+>    2026-07-02 via chameneos, NOTES): object-granularity remembering × 88 M `caml_modify` fires ×
+>    distinct freshly-promoted cells = ~250 k-object modbuf re-scanned per minor, with remembered
+>    continuations re-scanning their fiber stacks each time (GenImmix d=1 4× vanilla; plain Immix
+>    BEATS vanilla — the generational machinery, not the fiber path, is the cost). Lever:
+>    slot-granular value-filtered remset (stock ref_table semantics; BACTRIAN.md step 4 — also cuts
+>    Bactrian's InitialMark/FinalMark seed traffic and its paced-pause bill from the RSS fix).
 > 5. **Non-GC: the Xeon header-load stall** (matmul 1.49× at d1 with ZERO GCs; layout/4K-aliasing;
 >    absent on M4, vanishes in L2 — UPDATE 4 item 3). Inflates turing parallel ratios; not GC
 >    machinery; open micro-item.
