@@ -18,12 +18,22 @@ same hazard. Same bug CLASS as the GH#15 `FieldSlot::load` fix (RC indexes raw s
 `is_in_mmtk_spaces`; tracing plans survive via SFT-bounds-aware trace). ConcurrentImmix survives identical stacks
 because its concurrent-mark path does NO per-slot unlog. **FIXED — mmtk-core `807b090b18` (submodule bumped):**
 guard both slot-unlogs with `is_in_mmtk_spaces` (skip non-heap stack slots — not field-barrier-tracked; matches
-rc.rs:252/276/596). Validated: **single-domain** LXR chameneos now exits 0 / checksum **16000000** byte-identical to
-GenImmix/Immix (was deterministic SIGSEGV); LXR binarytrees regression clean. **RESIDUAL (multidomain d≥4): a
-SEPARATE, racy crash** — an `Address::load` garbage-ref (EXC_BAD_ACCESS, thread #2), continuation-specific (LXR
-par_binarytrees d1→d28 is clean), **pre-existing + MASKED** by this unlog crash (execution now reaches it). Matches
-the known [[lxr-multidomain-status]] garbage-ref RC race → needs rr-on-Linux. So the single-domain half of the
-2026-07-01 trap #2 limitation is CLOSED; the multidomain half is the known hard RC race. Found by the #30 investigation agent —
+rc.rs:252/276/596). Validated: **single-domain** LXR chameneos exits 0 / checksum **16000000** byte-identical to
+GenImmix/Immix (was deterministic SIGSEGV); binarytrees regression clean.
+
+**rr-on-turing follow-up (2026-07-02) — the "multidomain residual" was a THIRD unguarded unlog, now FIXED
+(`6f26298cc3`).** rr `record`/`replay` on turing pinned the multidomain crash DETERMINISTICALLY: `process_slot`'s
+`EDGE_KIND_MATURE` unlog (`rc.rs:280`) — NOT a garbage-ref `Address::load` as first guessed from the macOS inlined
+bt. A `Cont_tag`'s fiber-stack slots reach `process_slot` as mature edges → `unlog_field_relaxed` → `side_metadata`
+store on an unmapped page → SIGSEGV. Guarded it with `is_in_mmtk_spaces` (the 3rd slot-unlog site). Now **d=4 20/20
+correct** (was ~3/6 crash), d=1 10/10, d=16 clean. **TRUE residual: a much RARER high-domain (d≥8) crash** (~1–2/12
+at heap 128 MiB; d≤16/small-heaps clean) that rr did NOT catch in 40 record attempts (`-c` swept) — an rr-resistant
+timing race, mechanism unconfirmed; needs a hotter repro or a long rr/chaos campaign. So the single-domain half of
+the 2026-07-01 trap #2 limitation is CLOSED and low-domain multidomain works; only the rare high-domain race is open
+([[lxr-multidomain-status]]). **rr lesson:** a deterministic-enough site (rc.rs:280) rr-cracks immediately; the
+rarer race stays hidden — matching the "multidomain timing races hide under rr" note.
+
+Found by the #30 investigation agent — Found by the #30 investigation agent —
 which also established **`#30` is the deferred ConcurrentImmix UNLOG-bit barrier-gate PERF item (internal, not a GH
 issue, not a blocker)**, and that **ConcurrentImmix's continuation-scan hang GH#4/#14 is already FIXED** (verified
 2026-07-02: ~30 chameneos runs clean incl. 955 concurrent GCs at 16 MiB) → ConcurrentImmix is correctness-ready.
