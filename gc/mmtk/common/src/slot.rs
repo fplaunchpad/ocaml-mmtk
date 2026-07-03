@@ -9,7 +9,7 @@
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use mmtk::memory_manager;
@@ -105,6 +105,28 @@ fn is_forwarded(addr: Address) -> bool {
 pub struct FieldSlot {
     addr: *mut AtomicUsize,
     info: usize,
+    /// `true` = re-validate the current value on every `load` (the GH#15 guard).
+    /// Set for ROOT slots, which a collection may process while a spawning/
+    /// terminating domain concurrently mutates them (the global-root path runs
+    /// regardless of mutator-stop). `false` = a heap FIELD slot created during
+    /// object scanning: under an STW plan the field cannot change between classify
+    /// and load, so `load` can trust the cached classification and skip the re-read
+    /// + `is_in_mmtk_spaces` SFT lookup. Only honoured when [`STW_TRUSTED`] is set
+    /// (STW plans); concurrent plans keep every load revalidating (mutators run
+    /// during their scans, so heap fields can change under the worker).
+    checked: bool,
+}
+
+/// Process-global: enable the trusted-field-load fast path. Set true at init for
+/// stop-the-world plans (GenImmix/Immix/GenCopy/…), where no scan ever runs while
+/// mutators mutate the heap. Left false for the concurrent plans (ConcurrentImmix/
+/// Bactrian/LXR), which then behave exactly as before (every load revalidates).
+pub static STW_TRUSTED: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable the trusted-field-load fast path (see [`STW_TRUSTED`]). Called
+/// once by the binding at MMTk init, after the plan is known.
+pub fn set_stw_trusted(enabled: bool) {
+    STW_TRUSTED.store(enabled, Ordering::Relaxed);
 }
 
 // Raw pointer requires explicit Send; Slot trait bound requires it.
@@ -115,7 +137,18 @@ impl FieldSlot {
     pub fn from_address(address: Address) -> Self {
         let addr = address.to_mut_ptr::<AtomicUsize>();
         let raw = unsafe { (*addr).load(Ordering::Relaxed) };
-        Self { addr, info: Self::classify(raw) }
+        // A heap FIELD slot: trusted under STW plans (checked = false).
+        Self { addr, info: Self::classify(raw), checked: false }
+    }
+
+    /// Create a slot for a ROOT value. Identical to [`from_address`] except the
+    /// slot is marked `checked`, so `load` always re-validates (roots race with
+    /// spawning/terminating domains — GH#15 — even under an STW plan).
+    #[inline]
+    pub fn from_address_root(address: Address) -> Self {
+        let addr = address.to_mut_ptr::<AtomicUsize>();
+        let raw = unsafe { (*addr).load(Ordering::Relaxed) };
+        Self { addr, info: Self::classify(raw), checked: true }
     }
 
     #[inline]
@@ -199,6 +232,16 @@ impl Slot for FieldSlot {
     fn load(&self) -> Option<ObjectReference> {
         if self.info == NOT_TRACEABLE {
             return None;
+        }
+        // Trusted fast path (STW plans, heap FIELD slots): the field was classified
+        // moments ago on this same worker and, mutators being stopped, cannot have
+        // changed — so skip the re-read + `is_in_mmtk_spaces` re-check below. `info`
+        // already encodes the (ordinary vs infix) offset. Root slots (`checked`) and
+        // the concurrent plans (`!STW_TRUSTED`) fall through to full revalidation.
+        if !self.checked && STW_TRUSTED.load(Ordering::Relaxed) {
+            let raw = self.raw_value();
+            let start = unsafe { Address::from_usize(raw) } - self.info;
+            return Some(unsafe { ObjectReference::from_raw_address_unchecked(start) });
         }
         let raw = self.raw_value();
         // GH#15: re-validate the CURRENT value, not just the cached classification.

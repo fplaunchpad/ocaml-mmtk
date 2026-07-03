@@ -260,7 +260,14 @@
 >    vanilla (remset granularity/filtering disproven — the barrier already records 1-slot regions);
 >    StickyImmix pays the same (not the copying policy); plain Immix (no promotion) beats vanilla
 >    outright. Levers: nursery-trace fast path (also lifts the kb/binarytrees ~90 ns floor),
->    batched cont-stack tracing with a cheap validity guard.
+>    batched cont-stack tracing with a cheap validity guard. **DECOMPOSED + partly landed
+>    (2026-07-03, NOTES):** the ~89 ns/promoted-object is 77% metadata/dispatch/scan machinery vs
+>    only 7% actual copy (SFT dispatch 20% + side-metadata 18% + scan 38% + enqueue 8%). The safe
+>    slice — trusted field loads on STW plans, skipping the redundant load-side SFT re-check — landed
+>    (binarytrees GC −6%, kb −5%, chameneos −2%; sanity-clean). The structural remainder (SFT +
+>    side-metadata ≈ 38%) needs a bespoke OCaml nursery ProcessEdges (range-check nursery membership,
+>    header-word forwarding, inline scan/copy) — mmtk-core hot-path surgery, a framework-generality-
+>    vs-specialization decision, not a bug fix.
 > 5. **Non-GC: the Xeon header-load stall** (matmul 1.49× at d1 with ZERO GCs; layout/4K-aliasing;
 >    absent on M4, vanishes in L2 — UPDATE 4 item 3). Inflates turing parallel ratios; not GC
 >    machinery; open micro-item.

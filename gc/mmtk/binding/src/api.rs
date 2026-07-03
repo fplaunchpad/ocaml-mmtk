@@ -92,6 +92,17 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
 
     let plan_str = unsafe { CStr::from_ptr(plan).to_str().expect("invalid plan string") };
 
+    // Trusted-field-load fast path (slot.rs): enable for stop-the-world plans, whose
+    // object scans never run concurrently with mutator heap writes, so a heap field
+    // classified during scanning cannot change before the worker loads it. The
+    // concurrent plans (ConcurrentImmix/Bactrian/LXR) scan while mutators run, so
+    // they must keep revalidating every load — leave it off (default) for them.
+    // MMTK_NO_TRUSTED_LOADS=1 forces the fast path off (A/B / bisection knob).
+    let stw_trusted = !matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR")
+        && std::env::var_os("MMTK_NO_TRUSTED_LOADS").is_none();
+    mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
+
+
     let mut builder = MMTKBuilder::new();
     assert!(
         memory_manager::process(&mut builder, "plan", plan_str),

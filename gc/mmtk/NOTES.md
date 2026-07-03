@@ -5,6 +5,52 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Lever 1 (per-object nursery cost) — SAFE slice LANDED: trusted field loads (STW plans), +decomposition showing the structural remainder needs a bespoke nursery trace (2026-07-03)
+
+Acting on the corrected chameneos mechanism (per-promoted-object framework tax). First the
+**decomposition** of where GenImmix's ~89 ns/promoted-object goes (binarytrees d=1, `sample` bucketed
+over GC-worker frames, idle/mutator excluded):
+
+| bucket | share | note |
+|---|--:|---|
+| scan (scan_ocaml_object / FieldSlot / visit_slot) | 38% | field iteration + classify/load |
+| **SFT dispatch** (is_in_mmtk_spaces / get_checked / is_in_space) | 20% | plan-generality tax: 2-3 space lookups/object |
+| **side-metadata** (mark / line / VO / forwarding bits) | 18% | plan-generality tax: side tables vs stock's header word |
+| nursery/immix trace_object core | 8% | |
+| enqueue / work-packet | 8% | node-buffer machinery (stock has none) |
+| forward CAS + memmove + post_copy | **7%** | the ACTUAL copy — the only irreducible work |
+
+The headline: **~77% is per-object metadata/dispatch/scan machinery; only ~7% is the copy itself.**
+Stock's `oldify_one` does the same scan+copy off the *header word* with no SFT and no side tables —
+that's the ~40 vs ~89 ns gap, and it is structural (MMTk's plan-general per-object model), not a bug.
+
+**SAFE slice landed** (this commit, binding-only — `common/src/slot.rs` + `binding/src/{api,scanning}.rs`):
+**trusted field loads.** `FieldSlot::load` did `is_in_mmtk_spaces` (an SFT lookup) on EVERY slot as a
+GH#15 re-validation — but that guard only defends the ROOT-slot race with spawning/terminating domains
+(the global-root path runs regardless of mutator-stop). A heap FIELD slot classified during scanning
+cannot change before the same worker loads it *under an STW plan* (mutators stopped). So: field slots
+carry `checked=false` and, when the process-global `STW_TRUSTED` is set (STW plans only), skip the
+re-read + SFT re-check; root slots (`from_address_root`, `checked=true`) always revalidate; the
+concurrent plans (ConcurrentImmix/Bactrian/LXR) leave `STW_TRUSTED` off and behave exactly as before
+(their scans race live mutators, so every load must revalidate). Knob: `MMTK_NO_TRUSTED_LOADS=1`.
+
+Validated: mmtk `sanity` feature (full-heap re-trace after every GC) CLEAN at 32-64 MiB on
+GenImmix/Immix/StickyImmix/GenCopy with it on and Bactrian/ConcurrentImmix with it off; checksums
+byte-identical across all plans; par_binarytrees d=8 GenImmix+Bactrian correct. Measured (M4, median-5,
+`MMTK_NO_TRUSTED_LOADS` A/B): **binarytrees GC -6.0% / wall -4.2%, kb GC -4.9%, chameneos GC -1.9%**
+(chameneos less because its load volume is dominated by deep fiber-stack ROOTS, correctly kept
+revalidating). Attacks ~half the SFT bucket (the load-side lookup); the classify-side + trace-side
+SFT and all side-metadata remain.
+
+**The structural remainder (SFT 20% + side-metadata 18% ≈ 38%) needs a bespoke OCaml nursery
+ProcessEdges** — range-check nursery membership instead of SFT dispatch; forward via OCaml's header
+word instead of side forwarding bits; inline scan+copy; skip the object work-queue. This is mmtk-core
+hot-path surgery (high risk, correctness-critical) and would recover maybe half of that 38% — still
+short of stock's 40 ns, because some SFT/metadata is irreducible under a plan-general framework.
+**It is a genuine framework-generality-vs-specialization decision (RQ7 at the per-object level), not a
+bug fix — flagged for KC before undertaking.** Meanwhile plain Immix already sidesteps the whole
+generational per-object tax on mutation/fiber-heavy code (chameneos d=1 0.90 s, beats vanilla).
+
 ## chameneos mechanism CORRECTED by controls: promotion volume × per-promoted-object cost — the framework copy-path tax DOUBLED by the cont/fiber scan machinery; remset granularity disproven (2026-07-02, later)
 
 Controls run before implementing the slot-remset "fix" falsified the first mechanism story:

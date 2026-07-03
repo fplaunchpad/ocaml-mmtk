@@ -192,7 +192,9 @@ extern "C" fn ephe_retain(ctx: *mut c_void, v: usize) -> usize {
 /// the `Vec<FieldSlot>` being filled; `slot` is the address of a root value.
 extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) {
     let buf = unsafe { &mut *(data as *mut Vec<FieldSlot>) };
-    let fs = FieldSlot::from_address(Address::from_mut_ptr(slot));
+    // ROOT slot: `checked` (always revalidates) — roots race with spawning/
+    // terminating domains even under STW (GH#15). See slot.rs `from_address_root`.
+    let fs = FieldSlot::from_address_root(Address::from_mut_ptr(slot));
     buf.push(fs);
     // DEBUG: record this root's pre-GC object so the post-closure pass can verify
     // it was forwarded (not mis-forwarded to a different valid object).
@@ -210,7 +212,7 @@ extern "C" fn collect_root_slot(data: *mut c_void, _v: usize, slot: *mut usize) 
 /// lives (value stack, local roots, finalisable, globals). Uses FieldSlot so infix
 /// roots resolve to their (possibly forwarded) parent.
 extern "C" fn check_root_slot(_data: *mut c_void, _v: usize, slot: *mut usize) {
-    let fs = FieldSlot::from_address(Address::from_mut_ptr(slot));
+    let fs = FieldSlot::from_address_root(Address::from_mut_ptr(slot));
     if let Some(obj) = fs.load() {
         if let Some(fwd) = obj.get_forwarded_object() {
             if fwd.to_raw_address() != obj.to_raw_address() {
