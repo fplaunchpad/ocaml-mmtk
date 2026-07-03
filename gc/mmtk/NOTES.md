@@ -58,6 +58,39 @@ filter would require relocating `.data` constants into an MMTk immortal space, w
 (they are emitted into the binary and referenced directly by compiled code). Recorded because the
 50%-foreign figure also means S1's range check earns its keep on *every* field, not a rare one.
 
+**Can we put the constant area in MMTk's immortal/VM space to remove the filter?** (KC follow-up.)
+Investigated: **MMTk supports it** — `VMSpace` (policy/vmspace.rs) is exactly "an external, immortal,
+never-moved region"; `memory_manager::set_vm_space(start, size)` registers discontiguous external
+ranges (behind the `vm_space` cargo feature, currently OFF for us). **But it is the wrong tool for
+OCaml, and would UNDO S1:**
+
+1. **It breaks S1's range check.** A VMSpace for `.data` sits at the *binary's* load address, OUTSIDE
+   `[heap_start, heap_end)` (it uses an `ExternalPageResource`). S1 assumes every traceable object is
+   in that range, so it would filter VMSpace objects as "foreign" — wrong. Adopting VMSpace forces
+   reverting classify to the full `is_in_mmtk_spaces`/SFT dispatch, i.e. giving back the S1 win.
+2. **It traces data that never needs tracing, at higher per-field cost.** VMSpace `trace_object`
+   marks + scans its objects (SFT dispatch → VMSpace → mark bit) — so each of the 50%-of-fields
+   static-constant pointers would cost load + SFT dispatch + mark, versus S1's 2-compare skip. And
+   the tracing is pure waste: OCaml static constants are **immutable and never point into the heap**
+   (empirically: DISAGREE=0 + sanity + byte-identical checksums prove filtering them loses nothing),
+   so there is nothing for a trace to find. VMSpace is only the right tool when the external region
+   holds *mutable* roots into the heap (JikesRVM's boot image does); OCaml's does not.
+3. **Feasibility is poor.** OCaml 5 keeps **no registry of static-data ranges** — `Is_in_value_area`
+   is `1`, `Is_young` is `0`; the no-naked-pointers runtime abandoned address classification entirely
+   and identifies static/immortal blocks by **header color** (a pre-"marked" status the GC skips —
+   `Make_header(_,_,color)`). To register `.data` as VMSpace we would have to enumerate every data
+   section of the main binary **and every Dynlink'd module at load time** — fragile and platform-
+   specific — to reconstruct information OCaml deliberately does not track by address.
+
+**Verdict:** the S1 heap-range filter is the optimal tool for "skip immutable out-of-heap constants":
+cheaper than VMSpace, needs no enumeration, handles atoms + `.data` + Dynlink uniformly by address.
+The *only* thing VMSpace buys is removing the foreign-pointer special case from every consumer
+(classify/load/sanity/weak-ref/LXR-RC) — a robustness/simplicity gain, not a perf gain — and it pays
+for it with the S1 regression + a Dynlink enumeration problem. Not worth it now; revisit only if the
+foreign-pointer special-casing ever becomes a correctness liability. The OCaml-5-idiomatic alternative
+(recognize static blocks by header color, as stock does) is not cheaper than the range check either
+(a header read vs 2 compares) and re-opens the S3 header-bit hazards.
+
 **S1 landed** (same day): the classify-side `is_in_mmtk_spaces` — run on *every field of
 every scanned object* in `FieldSlot::classify` to filter OCaml foreign pointers — is replaced, on
 STW plans, by a heap-range compare against the cached `[heap_start, heap_end)` (a field value in
