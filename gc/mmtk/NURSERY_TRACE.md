@@ -79,12 +79,33 @@ parallelism (each worker owns its to-space blocks via `GCWorkerCopyContext`) whi
 the enqueue. Risk: interaction with work-stealing/termination detection; a worker that
 finishes its region must still steal. This is the largest structural change.
 
-**S3 — header-word forwarding instead of side forwarding-bits (medium/high risk, part of 18%).**
+**S3 — header-word forwarding/marking instead of side bits (high risk, part of 18%).**
 Stock stores the forwarding pointer in the header and signals "forwarded" with `hd == 0`.
-MMTk uses a side-metadata forwarding-bits CAS + forwarding pointer in the header. Moving to a
-header-word protocol drops the side-metadata CAS but **collides with every other subsystem
-that reads MMTk forwarding state** (sanity, weak-ref, defrag). Almost certainly not worth it
-unless S2 is done and this is the last bucket standing.
+MMTk uses side forwarding-bits/mark-bit + forwarding pointer in the header. Moving the bits
+in-header drops their side-metadata CAS but faces **two structural blockers**, both surfaced
+by KC:
+
+- **The spec is per-binding, not per-plan.** `LOCAL_FORWARDING_BITS_SPEC` / `LOCAL_MARK_BIT_SPEC`
+  are single `const`s on the one `ObjectModel` — flipping them `in_header` applies to **every**
+  plan we ship, including the *concurrent* ones (ConcurrentImmix/Bactrian/LXR). You cannot make
+  it in-header for GenImmix and on-side for the concurrent plans. So S3 is not a GenImmix-local
+  optimization; it changes the metadata layout for all plans at once.
+- **Header-word write race with lazy tag updates.** The mark/forwarding bits would share the
+  header word with OCaml's own *mutator-side* header mutations — chiefly multi-domain **lazy
+  forcing**, which atomically CAS-updates the tag (`caml_obj_update_tag`: Unforced → Forcing →
+  Forward), plus `Obj.set_tag` and the `Forward_tag` short-circuit. Under an STW plan the GC
+  writes headers only at a safepoint with mutators stopped → **no race** (this is why an
+  STW-only world could adopt in-header marking safely). But under a *concurrent* plan a GC
+  worker sets a mark bit **while a mutator is CAS-forcing a lazy value in the same word** → a
+  lost-update race. Side metadata avoids this by construction (separate word); that is *why*
+  the current specs are `side_*`. Coexistence is *possible* — both sides must do atomic RMW on
+  the full word with CAS-retry (OCaml's lazy forcing already CAS-loops for multi-domain safety;
+  the GC's mark would need to become an atomic `fetch_or` so a racing tag-CAS re-reads and
+  re-applies over the set bit) — but it is delicate and must be proven per header-mutating path.
+
+Net: almost certainly not worth it before S1/S2, and if taken, it is a whole-binding
+concurrency change (enumerate every header-mutating mutator path; make GC mark writes
+retry-safe `fetch_or`; re-verify the concurrent plans), not a constant flip.
 
 **S4 — batched cont-stack slots (low risk, targets chameneos specifically).**
 When scanning a promoted continuation, trace its fiber-stack slots directly during the frame
@@ -106,6 +127,12 @@ disproportionately (that is where the cont-scan machinery doubles the per-object
 5. **VO-bit + line marks** — mature Immix's own sweep/defrag depends on the promoted objects
    carrying correct VO and line metadata; `post_copy` cannot simply be skipped.
 6. **Pinning** (`object_pinning`) and **multi-worker** correctness (per-worker to-space).
+7. **Header-word write races** (only if S3): GC mark/forwarding writes must not lose, or be lost
+   to, mutator header mutations (lazy forcing `caml_obj_update_tag`, `Obj.set_tag`, `Forward_tag`
+   short-circuit). STW plans: safe (mutators stopped at GC). Concurrent plans: need atomic
+   `fetch_or` GC writes + the mutator's existing CAS-retry to coexist — proven per path. See §4 S3.
+   Also add S3 to the `sanity`/checksum matrix run *under the concurrent plans while forcing lazy
+   values*, the exact race window.
 
 ## 6. Expected ceiling (why it still won't reach 40 ns)
 
@@ -192,4 +219,8 @@ The **decomposition is the publishable result** on its own. The bespoke trace is
 building only as a *demonstration* that the gap is closable (a paper figure), because plain
 `Immix` already sidesteps the entire generational per-object tax on the workloads that hurt
 (chameneos d=1 0.90 s, beats vanilla). If undertaken, do **S1 + S4 first** (low risk, no
-forwarding-protocol change), measure, and stop there unless the figure needs S2.
+forwarding-protocol change), measure, and stop there unless the figure needs S2. **S3 is still
+worth exploring** — but as a scoped concurrency study (can header-word marking coexist with
+OCaml's lazy-tag CAS via retry-safe atomics?), *not* as a quick constant flip; its blast radius
+is all plans, so it is the last thing to touch and the one that most needs an isolated proof
+before any panel measurement.
