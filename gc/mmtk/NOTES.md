@@ -39,7 +39,26 @@ GenImmix/Immix/StickyImmix/GenCopy with it on and Bactrian/ConcurrentImmix with 
 byte-identical across all plans; par_binarytrees d=8 GenImmix+Bactrian correct. Measured (M4, median-5,
 `MMTK_NO_TRUSTED_LOADS` A/B): **binarytrees GC -6.0% / wall -4.2%, kb GC -4.9%, chameneos GC -1.9%**
 (chameneos less because its load volume is dominated by deep fiber-stack ROOTS, correctly kept
-revalidating). **S1 also landed** (same day): the classify-side `is_in_mmtk_spaces` — run on *every field of
+revalidating). **Does OCaml 5's no-naked-pointers guarantee let us DROP the foreign-pointer filter entirely?
+Measured: NO — but it is exactly what makes S1's range check SOUND.** (KC's question, 2026-07-03.)
+Instrumented `classify` to compute both the range compare and `is_in_mmtk_spaces` for every
+classified value: **DISAGREE=0 over 104 M (binarytrees) + 28 M (chameneos) values** — the range
+compare is a provably exact replacement for the SFT lookup on these workloads. But the filter is
+*not* removable: **50.1% of binarytrees' classified non-immediate field values are FOREIGN
+(out-of-heap)** (chameneos 0.5%). No-naked-pointers guarantees every LSB=0 field is a pointer to a
+valid OCaml *block* (has a header) — but "valid block" ≠ "MMTk-heap object": **statically-allocated
+constants** live in the binary's `.data`, outside the MMTk heap, and appear in scanned fields
+heavily. binarytrees is the extreme case: the compiler CSEs the constant leaf `Node(Empty,Empty)`
+into **one shared static block**, so every depth-1 internal node's two fields point at it — ~half of
+all field pointers are that single `.data` address. Handing it to `trace_object` would panic (not an
+MMTk space) / corrupt. So the filter is load-bearing and heavily exercised; the guarantee only lets
+it be a **range compare** (no wild pointers ⇒ in-range ⇔ real object, so the SFT's chunk-occupancy
+check is redundant) rather than a full SFT lookup — which is precisely the S1 win. Dropping the
+filter would require relocating `.data` constants into an MMTk immortal space, which is infeasible
+(they are emitted into the binary and referenced directly by compiled code). Recorded because the
+50%-foreign figure also means S1's range check earns its keep on *every* field, not a rare one.
+
+**S1 landed** (same day): the classify-side `is_in_mmtk_spaces` — run on *every field of
 every scanned object* in `FieldSlot::classify` to filter OCaml foreign pointers — is replaced, on
 STW plans, by a heap-range compare against the cached `[heap_start, heap_end)` (a field value in
 range is a live MMTk object; outside it is an atom/code/pre-MMTk pointer). Same STW soundness as the
