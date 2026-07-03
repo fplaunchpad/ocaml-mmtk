@@ -31,9 +31,16 @@ the object **header word** with no space-function-table (SFT) lookups and no sid
 
 ## 2. What is already landed (the free, safe slice)
 
-`FieldSlot::load` no longer re-runs `is_in_mmtk_spaces` for heap field slots on STW plans
-(commit `0170d2db60`): binarytrees GC −6% / wall −4.2%, kb −5%, chameneos −2%; sanity-clean.
-This removes roughly the **load-side half of the SFT bucket**. Everything below is the rest.
+Two binding-side slices are landed — the **whole SFT-dispatch bucket (20% → 0.0%)**:
+1. **Trusted field loads** (commit `0170d2db60`): `FieldSlot::load` skips its `is_in_mmtk_spaces`
+   re-check for heap field slots on STW plans.
+2. **S1 classify range-check** (this record's commit): `FieldSlot::classify` — run on *every field*
+   to filter OCaml foreign pointers — replaces `is_in_mmtk_spaces` with a `[heap_start, heap_end)`
+   range compare on STW plans (§4 S1, binding-side).
+
+Combined, median-5 GenImmix, sanity-clean, GC-count/checksum byte-identical: **binarytrees GC −15% /
+wall −11%, kb GC −8%, chameneos GC −5%**; the SFT bucket is gone. Remaining nursery GC cost: scan
+50%, side-metadata 23%, copy 9% — all needing the mmtk-core changes below, not binding work.
 
 ## 3. Current per-object path (what a bespoke trace would replace)
 
@@ -62,10 +69,13 @@ Ranked by payoff/risk. A bespoke `OCamlNurseryProcessEdges` (new `ProcessEdgesWo
 selected as GenImmix/GenCopy/StickyImmix `DefaultProcessEdges` for the nursery bucket) would
 adopt some subset:
 
-**S1 — young/old test by range, not `in_space`/SFT (low risk, ~part of 20%).**
-The nursery `CopySpace` occupies a known contiguous VA range (or a small chunk list). Cache
-`[nursery_start, nursery_end)` at GC start; replace the per-object `in_space` and the
-field-classify `is_in_mmtk_spaces` with a range compare. Correctness: LOS-young objects fall
+**S1 — young/old test by range, not `in_space`/SFT (low risk, ~part of 20%). [binding-side LANDED]**
+The **classify-side** half is done (see §2): `FieldSlot::classify` uses a `[heap_start, heap_end)`
+range compare instead of `is_in_mmtk_spaces` on STW plans, eliminating the SFT bucket. The remaining
+**trace-side** `in_space` inside mmtk-core's `trace_object_nursery` is a separate, smaller lookup
+(`CopySpace::in_space` — a VMMap descriptor check, not the SFT); replacing it needs mmtk-core work
+and is low-value now that the binding SFT is gone. Original note follows: cache `[nursery_start,
+nursery_end)` at GC start; replace the per-object `in_space` with a range compare. Correctness: LOS-young objects fall
 *outside* the range — must still consult LOS (one extra range compare) before concluding
 "mature, don't trace". Foreign pointers (atoms/code) also fall outside — a range compare
 alone cannot filter them, so keep a cheap "in any heap chunk" guard (or exploit that atoms

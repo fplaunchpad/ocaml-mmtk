@@ -129,6 +129,23 @@ pub fn set_stw_trusted(enabled: bool) {
     STW_TRUSTED.store(enabled, Ordering::Relaxed);
 }
 
+/// Cached heap VA bounds `[start, end)` for the trusted classify fast path (S1):
+/// under an STW plan a heap FIELD value that is in this range is a live MMTk
+/// object, and one outside it is an OCaml foreign pointer (atom / code / pre-MMTk),
+/// so a range compare replaces the `is_in_mmtk_spaces` SFT lookup in `classify`.
+/// `end == 0` means "not yet published" → fall back to `is_in_mmtk_spaces`.
+/// Sound only on the contiguous (SFTSpaceMap) 64-bit layout, where every space
+/// lives within one `[heap_start, heap_end)` reservation — which is what we run.
+static HEAP_START: AtomicUsize = AtomicUsize::new(0);
+static HEAP_END: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the MMTk heap VA bounds. Called once by the binding after `mmtk_init`,
+/// when `vm_layout()` is fixed. Only consulted on the trusted classify path.
+pub fn set_heap_bounds(start: usize, end: usize) {
+    HEAP_START.store(start, Ordering::Relaxed);
+    HEAP_END.store(end, Ordering::Relaxed);
+}
+
 // Raw pointer requires explicit Send; Slot trait bound requires it.
 unsafe impl Send for FieldSlot {}
 
@@ -137,8 +154,10 @@ impl FieldSlot {
     pub fn from_address(address: Address) -> Self {
         let addr = address.to_mut_ptr::<AtomicUsize>();
         let raw = unsafe { (*addr).load(Ordering::Relaxed) };
-        // A heap FIELD slot: trusted under STW plans (checked = false).
-        Self { addr, info: Self::classify(raw), checked: false }
+        // A heap FIELD slot: trusted under STW plans (checked = false). Classify
+        // with the range-based foreign-pointer filter when trusted (S1).
+        let trusted = STW_TRUSTED.load(Ordering::Relaxed);
+        Self { addr, info: Self::classify_inner(raw, trusted), checked: false }
     }
 
     /// Create a slot for a ROOT value. Identical to [`from_address`] except the
@@ -148,6 +167,7 @@ impl FieldSlot {
     pub fn from_address_root(address: Address) -> Self {
         let addr = address.to_mut_ptr::<AtomicUsize>();
         let raw = unsafe { (*addr).load(Ordering::Relaxed) };
+        // ROOT slot: always full classify (roots race spawn/terminate; GH#15).
         Self { addr, info: Self::classify(raw), checked: true }
     }
 
@@ -161,10 +181,20 @@ impl FieldSlot {
         unsafe { (*self.addr).load(Ordering::Relaxed) }
     }
 
-    /// Classify the value `raw` once, returning the cached `info`:
-    /// `NOT_TRACEABLE`, `0` (ordinary heap reference), or an infix byte offset.
+    /// Root-slot classify: full `is_in_mmtk_spaces` foreign-pointer filter.
     #[inline]
     fn classify(raw: usize) -> usize {
+        Self::classify_inner(raw, false)
+    }
+
+    /// Classify the value `raw` once, returning the cached `info`:
+    /// `NOT_TRACEABLE`, `0` (ordinary heap reference), or an infix byte offset.
+    /// `trusted` (STW plan, heap FIELD slot) uses a heap-range compare in place of
+    /// the `is_in_mmtk_spaces` SFT lookup for the foreign-pointer filter (S1); it is
+    /// sound because, mutators stopped, a live field's value is either a real MMTk
+    /// object (in `[HEAP_START, HEAP_END)`) or an OCaml foreign pointer (outside it).
+    #[inline]
+    fn classify_inner(raw: usize, trusted: bool) -> usize {
         if raw & 1 != 0 || raw == 0 {
             return NOT_TRACEABLE; // tagged integer (LSB=1) or null
         }
@@ -176,7 +206,14 @@ impl FieldSlot {
         // code addresses, objects allocated before MMTk was enabled. Tracing
         // those would make mmtk-core panic, and reading their "header" to test
         // for an infix tag would be a wild read; filter them out here.
-        if !memory_manager::is_in_mmtk_spaces(obj) {
+        let end = HEAP_END.load(Ordering::Relaxed);
+        let in_heap = if trusted && end != 0 {
+            // S1 fast path: heap-range compare, no SFT lookup.
+            raw >= HEAP_START.load(Ordering::Relaxed) && raw < end
+        } else {
+            memory_manager::is_in_mmtk_spaces(obj)
+        };
+        if !in_heap {
             return NOT_TRACEABLE;
         }
 

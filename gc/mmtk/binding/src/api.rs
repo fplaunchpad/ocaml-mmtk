@@ -217,6 +217,15 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         .ok()
         .expect("mmtk_ocaml_init called more than once");
 
+    // Publish the heap VA bounds for the trusted classify fast path (slot.rs S1):
+    // vm_layout() is fixed once mmtk_init has run. A heap FIELD value in this range
+    // is a live MMTk object, one outside it is an OCaml foreign pointer, so a range
+    // compare replaces the is_in_mmtk_spaces SFT lookup during scanning on STW plans.
+    mmtk_ocaml_common::slot::set_heap_bounds(
+        memory_manager::starting_heap_address().as_usize(),
+        memory_manager::last_heap_address().as_usize(),
+    );
+
     // Hand the forwarding-bits side-metadata spec to the common crate so
     // FieldSlot::classify can authoritatively distinguish an already-forwarded
     // object's header (now a forwarding pointer) from a genuine Infix_tag header,

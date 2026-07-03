@@ -39,8 +39,16 @@ GenImmix/Immix/StickyImmix/GenCopy with it on and Bactrian/ConcurrentImmix with 
 byte-identical across all plans; par_binarytrees d=8 GenImmix+Bactrian correct. Measured (M4, median-5,
 `MMTK_NO_TRUSTED_LOADS` A/B): **binarytrees GC -6.0% / wall -4.2%, kb GC -4.9%, chameneos GC -1.9%**
 (chameneos less because its load volume is dominated by deep fiber-stack ROOTS, correctly kept
-revalidating). Attacks ~half the SFT bucket (the load-side lookup); the classify-side + trace-side
-SFT and all side-metadata remain.
+revalidating). **S1 also landed** (same day): the classify-side `is_in_mmtk_spaces` — run on *every field of
+every scanned object* in `FieldSlot::classify` to filter OCaml foreign pointers — is replaced, on
+STW plans, by a heap-range compare against the cached `[heap_start, heap_end)` (a field value in
+range is a live MMTk object; outside it is an atom/code/pre-MMTk pointer). Same STW soundness as the
+trusted load; sanity-clean; GC-count/objects-copied/checksum byte-identical. **Combined (trusted
+loads + S1), median-5 GenImmix:** binarytrees GC **−15%** / wall **−11%**, kb GC **−8%**, chameneos
+GC **−5%** — and the re-profile shows the **SFT-dispatch bucket 20% → 0.0%** (fully eliminated). The
+remaining nursery GC cost is scan 50% (field iteration + infix header reads), side-metadata 23%
+(mark/line/VO/forwarding bits), copy 9% — all needing the deferred mmtk-core surgery (S2/S3,
+`NURSERY_TRACE.md`), which is the framework-generality-vs-specialization decision, not binding work.
 
 **The structural remainder (SFT 20% + side-metadata 18% ≈ 38%) needs a bespoke OCaml nursery
 ProcessEdges** (full design + the cross-language-compat analysis in `gc/mmtk/NURSERY_TRACE.md`) — range-check nursery membership instead of SFT dispatch; forward via OCaml's header
