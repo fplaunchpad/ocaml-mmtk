@@ -43,7 +43,7 @@ revalidating). Attacks ~half the SFT bucket (the load-side lookup); the classify
 SFT and all side-metadata remain.
 
 **The structural remainder (SFT 20% + side-metadata 18% ≈ 38%) needs a bespoke OCaml nursery
-ProcessEdges** — range-check nursery membership instead of SFT dispatch; forward via OCaml's header
+ProcessEdges** (full design + the cross-language-compat analysis in `gc/mmtk/NURSERY_TRACE.md`) — range-check nursery membership instead of SFT dispatch; forward via OCaml's header
 word instead of side forwarding bits; inline scan+copy; skip the object work-queue. This is mmtk-core
 hot-path surgery (high risk, correctness-critical) and would recover maybe half of that 38% — still
 short of stock's 40 ns, because some SFT/metadata is irreducible under a plan-general framework.
