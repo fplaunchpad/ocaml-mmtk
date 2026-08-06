@@ -93,16 +93,18 @@ MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
 # weight, and native code plus .symtab are untouched (verified: the same object
 # goes from "no symbols" to its full 1778).
 #
-# Best-effort: `-` because objcopy may be absent, and the strip is only needed
-# on hosts with the stale plugin.
-MMTK_STRIP_BITCODE = -$(OBJCOPY) --remove-section=.llvmbc --remove-section=.llvmcmd
+# Best-effort: the recipe line carries a `-` so a missing objcopy cannot fail the
+# build. The `-` must be on the LINE, not inside this variable — inside, it would
+# expand to the literal command `-objcopy`, which does not exist, and the strip
+# would silently do nothing.
 OBJCOPY ?= objcopy
+MMTK_STRIP_BITCODE = $(OBJCOPY) --remove-section=.llvmbc --remove-section=.llvmcmd
 
 $(MMTK_OBJS_STAMP): $(MMTK_LIB)
 	rm -rf $(MMTK_OBJS_DIR)
 	mkdir -p $(MMTK_OBJS_DIR)
 	cd $(MMTK_OBJS_DIR) && $(ARCMD) x $(abspath $(MMTK_LIB))
-	$(MMTK_STRIP_BITCODE) $(MMTK_OBJS_DIR)/*.o 2>/dev/null || true
+	-$(MMTK_STRIP_BITCODE) $(MMTK_OBJS_DIR)/*.o
 	touch $@
 
 # Canned recipe: bundle the staged MMTk objects into archive $(1). Used in the
