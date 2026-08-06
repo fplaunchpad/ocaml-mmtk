@@ -164,10 +164,22 @@ skipped exactly those.
   specifically destroys plans whose premise is marking off the critical path.
 - `setarch -R` on both sides; governor `performance`; ≥10 invocations given the variance
   above; timing and profiling as separate passes.
-- **Hosts.** This laptop iterates; **church** (homogeneous Xeon, 26.04, matching the host's
-  gcc 15.2 / glibc 2.43) is the authoritative campaign. Results are tagged by `host` and
-  never pooled. The `church` numbers in `SCALABILITY.md` §11 are retracted for a
-  contaminated *build*, not a bad host.
+- **Hosts.** This laptop iterates; **church** is the authoritative campaign. Results are
+  tagged by `host` and never pooled. The `church` numbers in `SCALABILITY.md` §11 are
+  retracted for a contaminated *build*, not a bad host.
+
+  church, confirmed: **2× Xeon Gold 5120**, 56 threads = 2 sockets × 14 cores × 2 SMT,
+  NUMA `node0 = 0-13,28-41` and `node1 = 14-27,42-55`, 61 GB RAM, Ubuntu 26.04 with
+  gcc 15.2.0 / glibc 2.43 — an exact toolchain match with the dev laptop. Cores are
+  **uniform**: no hybrid split, which is the whole reason it is the reference host.
+
+  This is the machine `PERFORMANCE.md` §5 was written against, and its `taskset -c 0-13`
+  is not an arbitrary 14 CPUs: `cpu0`'s `thread_siblings_list` is `0,28`, so `0-13` is
+  exactly one thread per *physical* core of socket 0. `quickbench --cpu-set auto` now
+  derives that rather than copying it — uniform class, one thread per physical core,
+  inside one NUMA node — and resolves to `0-13` on church, `0-5` on the laptop. Getting
+  this wrong is not cosmetic: the previous default would have pinned `0-55`, spanning
+  both sockets, and made every run a NUMA experiment.
 - **`perf` needs the host.** The VM cannot substitute: as root with `paranoid=-1` it still
   reports "No supported events found" — Multipass does not virtualize the PMU. The host has
   `cpu_core`+`cpu_atom` and only lacks permission
