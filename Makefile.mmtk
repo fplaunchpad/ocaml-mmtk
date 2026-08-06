@@ -93,6 +93,11 @@ MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
 # weight, and native code plus .symtab are untouched (verified: the same object
 # goes from "no symbols" to its full 1778).
 #
+# Applied ONE FILE AT A TIME. objcopy's signature is `objcopy [opts] in [out]`,
+# so handing it a glob of 505 objects does not strip 505 objects — it strips the
+# first ONTO the second, destroying it, and ignores the rest. (Measured: an
+# 844,952-byte object became a 6,684,632-byte copy of its neighbour.)
+#
 # Best-effort: the recipe line carries a `-` so a missing objcopy cannot fail the
 # build. The `-` must be on the LINE, not inside this variable — inside, it would
 # expand to the literal command `-objcopy`, which does not exist, and the strip
@@ -104,7 +109,7 @@ $(MMTK_OBJS_STAMP): $(MMTK_LIB)
 	rm -rf $(MMTK_OBJS_DIR)
 	mkdir -p $(MMTK_OBJS_DIR)
 	cd $(MMTK_OBJS_DIR) && $(ARCMD) x $(abspath $(MMTK_LIB))
-	-$(MMTK_STRIP_BITCODE) $(MMTK_OBJS_DIR)/*.o
+	-for f in $(MMTK_OBJS_DIR)/*.o; do $(MMTK_STRIP_BITCODE) "$$f" || break; done
 	touch $@
 
 # Canned recipe: bundle the staged MMTk objects into archive $(1). Used in the
