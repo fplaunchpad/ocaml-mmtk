@@ -208,3 +208,54 @@ Two things worth carrying forward:
    Bactrian cuts the *median full-GC* pause 11× (12.5 → 1.1 ms) but leaves the max
    unchanged (119 → 112 ms), because in both plans the worst pauses are **nursery**
    collections, not marking. A summed total could neither support nor refute this.
+
+---
+
+## Campaign results — church, 2026-08-07 (full profile, all dimensions × both axes)
+
+Data + figures: `benchmarks` branch, `quick/campaigns/20260807/` (shape_summary.md
+carries every number; RUNLOG.md the machine state, hitches, and one retraction).
+Operating point: MMTk pinned 192 MiB vs vanilla `o=500` (iso-memory); 14 physical
+cores of socket 0.
+
+**D1 — the headline result.** Bactrian at `MMTK_THREADS=1` matches vanilla's
+*absolute* collector CPU on binarytrees to a centisecond — G 1.99 s vs 1.98 s — and
+the entire fraction gap (0.42 vs 0.55) is the denominator: W 2.76 s vs 1.64 s, a
++68% mutator tax that the mutator-side instrumentation proves is NOT misattributed
+GC work (explicit mutator-side GC totals 0.10 s). On kb the gap is in G as well
+(0.53 vs 0.19 s): at small heaps the per-collection floor dominates both buckets.
+The W tax needs perf's cache counters to attribute; blocked on root.
+
+**Retraction.** The 2026-08-06 finding "idle workers park; G invariant to
+MMTK_THREADS" came from the pre-fix sampler losing worker CPU at thread exit. With
+per-TID accounting, G *grows* with T (binarytrees: 1.74 → 3.34 for T=1→4). Report
+D1 at T=1 and T=domains, both.
+
+**D2 + the tweak experiment (`shape/tweaks`).** Stock-parity pacing is pure
+configuration: `MMTK_NURSERY=Fixed:2097152` + `MMTK_FULL_GC_CADENCE` reproduce
+vanilla's collection count (1867 vs 1839 on binarytrees). The price is 5.4–7.7×
+wall: the per-minor floor is ~7.5 ms against vanilla's 0.63 ms (~12×). The
+tweak_frontier figure quantifies the whole nursery×cadence surface; the shipped
+default sits at the opposite end (58 collections, 32× fewer than vanilla, best
+wall). **Matching vanilla's D2 shape is blocked on the per-collection floor, not on
+trigger design** — the floor is the lever (NURSERY_TRACE.md S2/S3, STW rendezvous
+cost).
+
+**D3 — the shapes are opposite, and neither dominates.** binarytrees: vanilla
+stalls 3553 times for 1.98 s total — at fine grain it is nearly always briefly
+stalled (MMU@100ms = 0.063); MMTk stalls 57–59 times for 1.0–1.25 s, concentrated
+(MMU@100ms = 0 — clustered full-GC windows). kb separates them cleanly: vanilla
+MMU@10ms = 0.77 vs MMTk 0.00. Which shape is "better" depends on the window a
+consumer cares about; this is the argument for reporting MMU curves rather than
+pause percentiles.
+
+**M1.** MMTk beats vanilla on wall AND total CPU at d=2–4 (e.g. d=4: 1.90–1.98 s /
+4.8–6.5 CPU vs vanilla 2.08 s / 5.6). At d=8 it collapses — wall 2.6 s, CPU 15–17 s
+vs vanilla's 1.79 s / 7.1 — because 8 domains + 8 workers oversubscribe 14 cores.
+Policy fix, not fundamental: cap workers so domains + workers ≤ physical cores.
+
+**Instrument caveats current as of this campaign**: vanilla's own write-barrier
+cost sits outside its spans (small, uncorrected, favours vanilla's W); gcpauses
+fails with "corrupt stream" from a detached parent (unresolved — run it from an
+interactive context); threadcpu undercounts by at most one sampling interval per
+thread.
