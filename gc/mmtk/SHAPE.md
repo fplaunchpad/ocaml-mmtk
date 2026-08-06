@@ -113,6 +113,23 @@ wrong and there is no MMTk-side counter to correct it.
 independently accumulated total: GenImmix 259 pauses / 2280 ms vs `MMTK_VERBOSE`'s 2279 ms;
 Bactrian 233 / 1554 vs 1554.
 
+**The probe's D3 output has a resolution limit — it is scoped to D2.** A gap means "the
+mutator did not progress" only if the work between ticks is far smaller than a pause, and
+that is a property of the *call site*. With the marker in binarytrees' outer loop, all
+three runs — vanilla included — read 67–72% "stalled" with MMU(10ms) = 0.000, because one
+depth-20 iteration is tens of milliseconds of ordinary work. Moving the marker into the
+`check` recursion resolves it but costs 44% wall (1.92 → 2.77 s); a stride sweep
+(1024/16384/262144 → 2.77/2.81/2.77 s) shows the cost is the per-call `Domain.DLS.get`,
+not the clock, and even the disabled call costs 11%. On a workload whose unit of work is
+~7 ns, no per-unit call is affordable.
+
+So: **probe → D2**, where coarse placement is correct (the pacing curve only changes at
+collections) and the probe is free (1.90 vs 1.89 s bare). **D3 pause distribution →
+`MMTK_PAUSE_LOG` on the fork and `runtime_events` on vanilla**, both zero-overhead and
+authoritative. Residual, recorded rather than hidden: coarse placement also under-samples
+D2 during binarytrees' deep-tree phase (last sample at 2344 of ~3660 MiB, 10 of 61 major
+collections). Benches with uniform iteration granularity, such as kb, do not have this.
+
 **Probe gaps vs GC pause records** — the mutator-side and GC-side views agree where they
 should. The probe is a strict superset (2.28× total stall, 24.6× event count: it also sees
 scheduling, page faults, allocation slow paths). But the **largest** stalls track closely:
