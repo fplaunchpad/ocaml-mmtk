@@ -5,6 +5,111 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Build: stale LLVM gold plugin makes the whole Rust runtime vanish at link (church, 2026-08-06)
+
+Moving the shape campaign to church, the fork would not link — `runtime/ocamlrun` failed
+with undefined references to Rust internals: `core::fmt::write`, `std::process::abort`,
+`core::panicking::panic_fmt`, `<Mutex>::lock_contended`, and `hidden symbol
+__rdl_alloc isn't defined`. Vanilla built fine on the same host.
+
+**Cause: not ours, and not the archive.** rustc leaves `.llvmbc`/`.llvmcmd` in every
+object. binutils `ld`/`nm` auto-load an LLVM gold plugin when they see them, and church
+carries a stale LLVM-14 one:
+
+```
+bfd plugin: LLVM gold plugin has failed to create LTO module:
+Opaque pointers are only supported in -opaque-pointers mode
+(Producer: 'LLVM22.1.2-rust-1.96.0-stable' Reader: 'LLVM 14.0.6')
+```
+
+When the plugin fails, the member is reported as having **no symbols at all**, so every
+Rust runtime symbol disappears and the link fails naming Rust internals rather than the
+plugin.
+
+**Why it was slow to find.** The failing object is BYTE-IDENTICAL to one that links on the
+dev laptop — same md5, same 11,599,800 bytes. Everything comparable matched: rustc 1.96.0,
+binutils 2.46, gcc 15.2.0, `Makefile.config`, archive structure (563 members, 470 Rust,
+`std` cgu0 present), and `ar r *.o` glob order (checked under C / en_IN / en_US.UTF-8 —
+identical, so locale collation was NOT it). An archive-wide `nm` under-reports silently:
+the plugin error only appears on **stderr**, and only when `nm` is run on a single
+extracted member. Two hypotheses were tested and refuted first — distro rustc 1.93
+(installing rustup 1.96 did not help) and stale mixed objects (`make clean` did not help,
+and produced *more* missing symbols).
+
+**Fix (`Makefile.mmtk`, MMTK_STRIP_BITCODE).** `objcopy --remove-section=.llvmbc
+--remove-section=.llvmcmd` on the extracted objects before they are bundled. We never LTO
+across the C/Rust boundary, so the bitcode is dead weight; native code and `.symtab` are
+untouched. Verified: the same object goes from "no symbols" to its full **1778**, matching
+the laptop exactly, and church then builds `world.opt` clean with all four plans producing
+byte-identical output.
+
+Best-effort (`-` prefix, `OBJCOPY ?= objcopy`) since the strip is only needed on hosts
+carrying the stale plugin, and objcopy may be absent.
+
+**Worth re-examining:** `SCALABILITY.md` §11's church numbers are retracted as a
+"contaminated build". This is exactly the class of toolchain trap that could produce one —
+a tree that links only because some objects were silently symbol-less is a plausible route
+to a subtly wrong binary. Not investigated.
+
+## Near-OOM SEGV: root scanning crashes instead of raising Out_of_memory (single-domain, 2026-08-06)
+
+Found while establishing the left edge of the D5 heap sweep. Below a certain heap the
+program must fail — that is expected — but it should fail as `Out_of_memory`, not as a
+segfault. In a band just above the true OOM point it segfaults, **nondeterministically**.
+
+Repro (single domain, native, no probe, `binarytrees` at depth 20):
+
+```
+taskset -c 0-5 setarch $(uname -m) -R env MMTK_PLAN=GenImmix MMTK_THREADS=4 \
+  MMTK_HEAP_SIZE_MB=52 quick/build_mmtk/binarytrees.native 20
+```
+
+Two reps per cell:
+
+| heap | GenImmix | Bactrian |
+|---|---|---|
+| 32M | OOM (clean) | OOM |
+| 36M | **SEGV SEGV** | OOM OOM |
+| 40M | **SEGV** OOM | OOM OOM |
+| 44M | OOM OOM | OOM **SEGV** |
+| 48M | **SEGV** OOM | OOM OOM |
+| 52M | **SEGV SEGV** | OOM OOM |
+| 56M+ | ok | ok |
+
+So it is not a clean threshold: the same configuration gives SEGV or a clean
+`Out_of_memory` run to run, which points at a race or at partially-completed collection
+state rather than a deterministic bad size. GenImmix is much more exposed than Bactrian
+here, though Bactrian took one at 44M, so this is not GenImmix-only.
+
+Backtrace (gdb, GenImmix, 52 MiB, caught on the 3rd attempt — note it crashes on a **GC
+worker**, in `ScanMutatorRoots` for a **mature** GenImmix collection):
+
+```
+Thread 4 received SIGSEGV
+#0  scan_stack_frames (fflags=(SCANNING_ONLY_YOUNG_VALUES | unknown: 0x5554),
+                       stack=0x555555c4c390, gc_regs=0x0)      runtime/fiber.c:305
+#1  caml_scan_stack (f=mmtk_ocaml::scanning::collect_root_slot) runtime/fiber.c:325
+#2  caml_do_local_roots (fflags=(... | 0x5554), fflags@entry=0) runtime/roots.c:64
+#3  caml_do_roots (fflags=0)                                    runtime/roots.c:40
+#4  scan_roots_in_mutator_thread<...GenImmix...>                binding/src/scanning.rs:260
+#5  ScanMutatorRoots<GenImmixMatureGCWorkContext>::do_work      gc_work.rs:436
+```
+
+The suspicious part is `fflags`. `caml_do_roots` is called with `fflags=0` (frame 3) and
+`caml_do_local_roots` records `fflags@entry=0` (frame 2), yet by the call into
+`caml_scan_stack` it reads `SCANNING_ONLY_YOUNG_VALUES | unknown: 0x5554` — a value with
+garbage high bits, for a parameter that should be a small enum bitmask. Several
+neighbouring parameters print `<optimized out>`, so gdb's rendering may be unreliable and
+this could be an artifact rather than real corruption; it needs confirming at `-O0` or
+under `rr` before being treated as the cause. `gc_regs=0x0` says the stack being scanned
+is not the currently-running one.
+
+Not yet investigated further — recorded so the heap sweep can avoid the band rather than
+silently mix a crash into the curve. **The D5 sweep therefore floors at 64 MiB for
+binarytrees-20.** Worth an `rr` session (`rr record -c <N>`, varying N, per CLAUDE.md)
+since the nondeterminism is exactly what `rr` is for; a replayable trace would settle
+whether the `fflags` reading is real.
+
 ## Lever 1 (per-object nursery cost) — SAFE slice LANDED: trusted field loads (STW plans), +decomposition showing the structural remainder needs a bespoke nursery trace (2026-07-03)
 
 Acting on the corrected chameneos mechanism (per-promoted-object framework tax). First the

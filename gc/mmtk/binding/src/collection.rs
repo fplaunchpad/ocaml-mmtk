@@ -99,6 +99,34 @@ static FULL_GC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GC_NANOS: AtomicU64 = AtomicU64::new(0);
 static GC_PAUSE_START: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Per-pause records for the GC space-time shape work (backlog #R1).
+///
+/// `GC_NANOS` above is a SUM: it answers "how much stop-the-world in total" and
+/// nothing about the distribution. Two collectors with identical totals can have
+/// entirely different pause profiles — many small pauses versus a few large ones
+/// — which is exactly the vanilla-vs-Bactrian question, so the per-pause value
+/// is what the latency dimension needs. It was already being computed in
+/// `resume_mutators` (`start.elapsed()`) and immediately discarded into the sum.
+///
+/// Kept in memory and dumped at exit rather than written per pause: the pause
+/// path must not do I/O, and a mutator is parked waiting on this. A pause is 24
+/// bytes, so even a run with a million collections costs 24 MB.
+///
+/// Enabled only when MMTK_PAUSE_LOG names an output path; otherwise every pause
+/// costs one relaxed atomic load of the disabled flag.
+static PAUSE_LOG: Mutex<Vec<PauseRecord>> = Mutex::new(Vec::new());
+static PAUSE_LOG_ON: AtomicBool = AtomicBool::new(false);
+static PAUSE_LOG_T0: Mutex<Option<Instant>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct PauseRecord {
+    /// Start of the pause, nanoseconds since the first recorded pause. Relative
+    /// so it can be aligned against the in-mutator probe's own timeline.
+    at_nanos: u64,
+    dur_nanos: u64,
+    full: bool,
+}
+
 /// Mature (major-heap) reserved pages right after the last FULL collection — the
 /// baseline for the mature-space-pressure full-GC trigger (GH#5). After a full GC
 /// reclaims the mature heap, a generational plan otherwise runs ONLY nursery GCs
@@ -188,6 +216,57 @@ pub extern "C" fn mmtk_ocaml_total_gc_count() -> usize {
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_gc_time_ms() -> u64 {
     GC_NANOS.load(Ordering::Relaxed) / 1_000_000
+}
+
+/// Arm per-pause recording (backlog #R1). Called once at init when
+/// MMTK_PAUSE_LOG is set; off by default, and off costs one relaxed load per
+/// pause.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_pause_log_enable() {
+    PAUSE_LOG_ON.store(true, Ordering::Relaxed);
+}
+
+/// Write the recorded pauses as NDJSON to `path` (NUL-terminated C string).
+/// Called from the runtime's atexit handler. Returns the number written, or
+/// -1 if the path could not be opened.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn mmtk_ocaml_pause_log_dump(path: *const std::os::raw::c_char) -> i64 {
+    use std::io::Write;
+    if path.is_null() || !PAUSE_LOG_ON.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let p = match std::ffi::CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let recs = PAUSE_LOG.lock().unwrap();
+    let f = match std::fs::File::create(p) {
+        Ok(f) => f,
+        Err(_) => return -1,
+    };
+    let mut w = std::io::BufWriter::new(f);
+    for r in recs.iter() {
+        // at/dur in seconds so the stream lines up with the probe's float
+        // timeline without either side having to know the other's units.
+        if writeln!(
+            w,
+            "{{\"kind\":\"pause\",\"at\":{:.9},\"dur\":{:.9},\"full\":{}}}",
+            r.at_nanos as f64 / 1e9,
+            r.dur_nanos as f64 / 1e9,
+            r.full
+        )
+        .is_err()
+        {
+            return -1;
+        }
+    }
+    if w.flush().is_err() {
+        return -1;
+    }
+    recs.len() as i64
 }
 
 extern "C" {
@@ -464,8 +543,21 @@ impl Collection<OCamlVM> for VMCollection {
         STW_COND.notify_all();
         drop(s);
         if let Some(start) = GC_PAUSE_START.lock().unwrap().take() {
-            GC_NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let dur = start.elapsed();
+            GC_NANOS.fetch_add(dur.as_nanos() as u64, Ordering::Relaxed);
             GC_COUNT.fetch_add(1, Ordering::Relaxed);
+            // Keep the individual pause too, not just the running sum (#R1).
+            if PAUSE_LOG_ON.load(Ordering::Relaxed) {
+                let mut t0 = PAUSE_LOG_T0.lock().unwrap();
+                let base = *t0.get_or_insert(start);
+                let at = start.saturating_duration_since(base).as_nanos() as u64;
+                drop(t0);
+                PAUSE_LOG.lock().unwrap().push(PauseRecord {
+                    at_nanos: at,
+                    dur_nanos: dur.as_nanos() as u64,
+                    full: was_full,
+                });
+            }
         }
     }
 
@@ -489,12 +581,25 @@ impl Collection<OCamlVM> for VMCollection {
     fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<OCamlVM>) {
         match ctx {
             GCThreadContext::Worker(worker) => {
-                std::thread::spawn(move || {
-                    let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(unsafe {
-                        mmtk::util::Address::from_usize(1)
-                    })));
-                    memory_manager::start_worker::<OCamlVM>(crate::mmtk(), tls, worker);
-                });
+                // NAMED, so /proc/<pid>/task/<tid>/comm identifies GC workers.
+                //
+                // This is what makes the D1 CPU budget measurable without any
+                // privileges. The proper instrument is perf symbol attribution,
+                // but perf needs perf_event_paranoid lowered, which needs root —
+                // not available on every host we measure on. With named threads,
+                // per-thread utime+stime from /proc separates GC CPU from mutator
+                // CPU directly, because on this binding GC work runs on threads
+                // the mutator never uses.
+                //
+                // Linux truncates comm to 15 bytes; this name is 14.
+                let _ = std::thread::Builder::new()
+                    .name("mmtk-gc-worker".into())
+                    .spawn(move || {
+                        let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(
+                            unsafe { mmtk::util::Address::from_usize(1) },
+                        )));
+                        memory_manager::start_worker::<OCamlVM>(crate::mmtk(), tls, worker);
+                    });
             }
         }
     }

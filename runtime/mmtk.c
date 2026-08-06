@@ -127,8 +127,88 @@ int caml_mmtk_weak_refs = 1;
 #define CAML_MMTK_SEM_DEFAULT   0
 #define CAML_MMTK_SEM_LOS       2
 
+/* --------------------------------------------------------------------------
+   D1 mutator-side GC time (MMTK_MUTATOR_GC_TIME=1).
+
+   The D1 CPU-budget comparison needs GC work attributed the same way on both
+   runtimes. Vanilla runs ALL of its GC on the mutator, and its runtime_events
+   spans capture it there. Under MMTk, per-thread attribution captures only the
+   worker pool: the GC work the MUTATOR does — write barriers, TLAB refills,
+   LOS allocations — lands in the mutator bucket and flatters MMTk. Measured on
+   church (binarytrees-20): the identical program's "mutator" CPU is 2.5 s under
+   MMTk vs 1.65 s under vanilla — that ~0.9 s IS this uncounted GC work.
+
+   So: time the mutator-side GC entry points, report at exit, and let the
+   harness add this to worker CPU (G) and subtract it from mutator CPU (W).
+   All such work funnels through the helpers in this file — native code makes
+   no other GC-related C calls — so wrapping them here is complete.
+
+   Mechanics. TSC pairs (~20 ns/pair), accumulated in PER-DOMAIN plain u64
+   slots (each domain writes only its own; no atomics on the hot path), summed
+   at exit and converted via a monotonic-clock calibration of the TSC rate.
+   Off = one predictable branch per call; armed only by MMTK_MUTATOR_GC_TIME.
+
+   The park subtraction is load-bearing: a TLAB refill or LOS allocation can
+   BLOCK FOR AN ENTIRE GC (its block acquisition polls, which can trigger a
+   collection and park the mutator). TSC measures wall cycles, and a parked
+   thread burns wall time but no CPU — without the subtraction a single
+   blocking refill would book a whole multi-ms pause as mutator GC *CPU*. The
+   alloc wrappers therefore subtract whatever caml_mmtk_park accumulated inside
+   their window. Blocked time is D3's business (the pause log), not D1's.
+
+   x86-64 only (TSC); armed on another arch it reports zero and warns. */
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#define MUT_GC_TSC() __rdtsc()
+#else
+#define MUT_GC_TSC() ((uint64_t)0)
+#endif
+#define MUT_GC_DOMS 256   /* slots; domain id masked (collision = summed, benign) */
+static int caml_mut_gc_timing = 0;
+static uint64_t caml_mut_gc_barrier_tsc[MUT_GC_DOMS];
+static uint64_t caml_mut_gc_alloc_tsc[MUT_GC_DOMS];
+static uint64_t caml_mut_gc_park_tsc[MUT_GC_DOMS];
+static uint64_t caml_mut_gc_tsc0;
+static double caml_mut_gc_mono0;
+
+static double caml_mut_gc_now(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void caml_mut_gc_dump(void)
+{
+  uint64_t barrier = 0, alloc = 0, park = 0;
+  double secs = caml_mut_gc_now() - caml_mut_gc_mono0;
+  double hz;
+  int i;
+  for (i = 0; i < MUT_GC_DOMS; i++) {
+    barrier += caml_mut_gc_barrier_tsc[i];
+    alloc   += caml_mut_gc_alloc_tsc[i];
+    park    += caml_mut_gc_park_tsc[i];
+  }
+  hz = secs > 0 ? (double)(MUT_GC_TSC() - caml_mut_gc_tsc0) / secs : 0;
+  if (hz <= 0) {
+    fprintf(stderr, "[mmtk] mutator GC time: unavailable (no TSC)\n");
+    return;
+  }
+  fprintf(stderr,
+          "[mmtk] mutator GC time: %.3f ms (barrier %.3f ms, alloc %.3f ms; "
+          "parked %.3f ms excluded)\n",
+          (double)(barrier + alloc) / hz * 1e3,
+          (double)barrier / hz * 1e3,
+          (double)alloc / hz * 1e3,
+          (double)park / hz * 1e3);
+}
+/* ------------------------------------------------------------------------ */
+
 static void caml_mmtk_report_copied(void);
 static void caml_e1_dump(void);  /* E1 write-barrier counter dump (atexit) */
+static void caml_mmtk_dump_pause_log(void);  /* #R1 per-pause dump (atexit) */
+/* Held from init to atexit; points into the environment, so it stays valid. */
+static const char *caml_mmtk_pause_log_path;
 
 void caml_mmtk_init(void)
 {
@@ -222,6 +302,41 @@ void caml_mmtk_init(void)
 
   if (getenv("MMTK_BARRIER_COUNT") != NULL)
     atexit(caml_e1_dump);
+
+  /* D1 mutator-side GC time accounting (see the block comment up top). */
+  if (getenv("MMTK_MUTATOR_GC_TIME") != NULL) {
+    caml_mut_gc_timing = 1;
+    caml_mut_gc_tsc0 = MUT_GC_TSC();
+    caml_mut_gc_mono0 = caml_mut_gc_now();
+#if !defined(__x86_64__)
+    fprintf(stderr, "[mmtk] mutator GC time: no TSC on this arch; "
+                    "figures will read 0\n");
+#endif
+    atexit(caml_mut_gc_dump);
+  }
+
+  /* Per-pause STW records (backlog #R1). MMTK_VERBOSE only reports the SUM of
+     pause time, which cannot distinguish many small pauses from a few large
+     ones — the distinction the GC-shape comparison turns on. Arming here keeps
+     the pause path itself free of any I/O: records accumulate in memory and are
+     written once at exit. */
+  caml_mmtk_pause_log_path = getenv("MMTK_PAUSE_LOG");
+  if (caml_mmtk_pause_log_path != NULL && caml_mmtk_pause_log_path[0] != '\0') {
+    mmtk_ocaml_pause_log_enable();
+    atexit(caml_mmtk_dump_pause_log);
+  }
+}
+
+/* Write the per-pause STW records collected during the run. */
+static void caml_mmtk_dump_pause_log(void)
+{
+  int64_t n = mmtk_ocaml_pause_log_dump(caml_mmtk_pause_log_path);
+  if (n < 0)
+    fprintf(stderr, "[mmtk] pause log: could not write %s\n",
+            caml_mmtk_pause_log_path);
+  else if (getenv("MMTK_VERBOSE") != NULL)
+    fprintf(stderr, "[mmtk] pause log: %lld pauses -> %s\n",
+            (long long) n, caml_mmtk_pause_log_path);
 }
 
 /* Report how many objects copying collection relocated (Immix defrag, etc.).
@@ -325,9 +440,19 @@ value caml_mmtk_alloc_small(mlsize_t wosize, tag_t tag, reserved_t reserved)
 
 value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
 {
+  void *p;
+  uint64_t t0 = 0, p0 = 0;
+  int timed = caml_mut_gc_timing;
+  int slot = Caml_state->id & (MUT_GC_DOMS - 1);
   (void)reserved;
-  void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                             caml_mmtk_semantics(wosize));
+  if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
+  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
+                       caml_mmtk_semantics(wosize));
+  if (timed)
+    /* Subtract any time spent PARKED for a GC this allocation triggered:
+       parked wall is not mutator CPU (see the block comment up top). */
+    caml_mut_gc_alloc_tsc[slot] +=
+      (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
   if (p == NULL) caml_raise_out_of_memory();
   return (value)p;
 }
@@ -338,8 +463,16 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
    exactly as the stock caml_shared_try_alloc path does. */
 value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
 {
-  void *p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                             caml_mmtk_semantics(wosize));
+  void *p;
+  uint64_t t0 = 0, p0 = 0;
+  int timed = caml_mut_gc_timing;
+  int slot = Caml_state->id & (MUT_GC_DOMS - 1);
+  if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
+  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
+                       caml_mmtk_semantics(wosize));
+  if (timed)
+    caml_mut_gc_alloc_tsc[slot] +=
+      (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
   return (value)p;
 }
 
@@ -358,11 +491,22 @@ value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
 int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
 {
   uintptr_t start = 0, end = 0;
+  uint64_t t0 = 0, p0 = 0;
+  int timed = caml_mut_gc_timing;
+  int slot = dom->id & (MUT_GC_DOMS - 1);
   size_t min_bytes = (size_t)whsize * sizeof(value);
   if (min_bytes == 0) min_bytes = sizeof(value);
 
-  if (!mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end))
+  if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
+  if (!mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end)) {
+    if (timed)
+      caml_mut_gc_alloc_tsc[slot] +=
+        (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
     return 0;
+  }
+  if (timed)
+    caml_mut_gc_alloc_tsc[slot] +=
+      (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
 
   /* Minor-words accounting: the block we are about to replace is retired here.
      The words it consumed (young_end - young_ptr, a downward bump from
@@ -759,9 +903,15 @@ static void caml_e1_dump(void)
 
 void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
 {
+  uint64_t t0 = 0;
+  int timed = caml_mut_gc_timing;
+  if (timed) t0 = MUT_GC_TSC();
   if (caml_mmtk_generational)
     mmtk_ocaml_region_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                               (size_t) count);
+  if (timed)
+    caml_mut_gc_barrier_tsc[Caml_state->id & (MUT_GC_DOMS - 1)] +=
+      MUT_GC_TSC() - t0;
 }
 
 /* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
@@ -779,6 +929,9 @@ void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
      called on MUTATIONS (caml_modify / atomic exchange/cas) where the old value
      is valid -- never on caml_initialize, so LXR never logs an initialising
      write as a mutation. */
+  uint64_t t0 = 0;
+  int timed = caml_mut_gc_timing;
+  if (timed) t0 = MUT_GC_TSC();
   /* E1: count every mutation-barrier entry (plan-independent) */
   caml_e1_satb_calls++;
   /* E1: total mutated slots = LXR field-log barrier fires */
@@ -786,6 +939,9 @@ void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
   if (caml_mmtk_concurrent || caml_mmtk_field_log)
     mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                             (size_t) count);
+  if (timed)
+    caml_mut_gc_barrier_tsc[Caml_state->id & (MUT_GC_DOMS - 1)] +=
+      MUT_GC_TSC() - t0;
 }
 
 /* Per-continuation scan lock (concurrent plan). Held by a GC worker while it
@@ -908,8 +1064,13 @@ void caml_mmtk_become_running(uintnat domain_state_addr)
    safepoint poll. */
 void caml_mmtk_park(uintnat domain_state_addr)
 {
+  uint64_t t0 = 0;
+  int timed = caml_mut_gc_timing;
+  int slot = ((caml_domain_state *)domain_state_addr)->id & (MUT_GC_DOMS - 1);
+  if (timed) t0 = MUT_GC_TSC();
   caml_mmtk_cooperative_park(domain_state_addr);
   caml_mmtk_become_running(domain_state_addr);
+  if (timed) caml_mut_gc_park_tsc[slot] += MUT_GC_TSC() - t0;
 }
 
 /* Called from caml_handle_gc_interrupt at every safepoint. If MMTk has a
