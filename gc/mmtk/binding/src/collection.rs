@@ -581,12 +581,25 @@ impl Collection<OCamlVM> for VMCollection {
     fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<OCamlVM>) {
         match ctx {
             GCThreadContext::Worker(worker) => {
-                std::thread::spawn(move || {
-                    let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(unsafe {
-                        mmtk::util::Address::from_usize(1)
-                    })));
-                    memory_manager::start_worker::<OCamlVM>(crate::mmtk(), tls, worker);
-                });
+                // NAMED, so /proc/<pid>/task/<tid>/comm identifies GC workers.
+                //
+                // This is what makes the D1 CPU budget measurable without any
+                // privileges. The proper instrument is perf symbol attribution,
+                // but perf needs perf_event_paranoid lowered, which needs root —
+                // not available on every host we measure on. With named threads,
+                // per-thread utime+stime from /proc separates GC CPU from mutator
+                // CPU directly, because on this binding GC work runs on threads
+                // the mutator never uses.
+                //
+                // Linux truncates comm to 15 bytes; this name is 14.
+                let _ = std::thread::Builder::new()
+                    .name("mmtk-gc-worker".into())
+                    .spawn(move || {
+                        let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(
+                            unsafe { mmtk::util::Address::from_usize(1) },
+                        )));
+                        memory_manager::start_worker::<OCamlVM>(crate::mmtk(), tls, worker);
+                    });
             }
         }
     }
