@@ -176,7 +176,24 @@ const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN: usize = 8;
 /// Cadence threshold for the current run: 8 minors per registered domain.
 fn cadence_threshold() -> usize {
     let ndomains = crate::active_plan::domain_addrs().len().max(1);
-    MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN * ndomains
+    // Shape experiment (MMTK_FULL_GC_CADENCE): override the per-domain cadence.
+    //
+    // Matching vanilla's D2 pacing needs BOTH knobs. MMTK_NURSERY sets the
+    // minor rate (vanilla: ~2 MiB/minor; the fork's default cap: ~61 MiB), but
+    // pinning a stock-parity 2 MiB nursery would leave the default cadence
+    // firing a FULL collection every 8 minors = every ~16 MiB allocated, where
+    // vanilla's allocated-words law runs a major per ~57 MiB. The cadence has
+    // to scale with the nursery or the backstop becomes the pacer. Read once
+    // and cached: this is polled after every nursery GC.
+    static CADENCE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let per_domain = *CADENCE.get_or_init(|| {
+        std::env::var("MMTK_FULL_GC_CADENCE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN)
+    });
+    per_domain * ndomains
 }
 
 /// Floor (in pages) below which the mature-pressure trigger never fires. This is
