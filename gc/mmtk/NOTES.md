@@ -5,6 +5,52 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## Build: stale LLVM gold plugin makes the whole Rust runtime vanish at link (church, 2026-08-06)
+
+Moving the shape campaign to church, the fork would not link — `runtime/ocamlrun` failed
+with undefined references to Rust internals: `core::fmt::write`, `std::process::abort`,
+`core::panicking::panic_fmt`, `<Mutex>::lock_contended`, and `hidden symbol
+__rdl_alloc isn't defined`. Vanilla built fine on the same host.
+
+**Cause: not ours, and not the archive.** rustc leaves `.llvmbc`/`.llvmcmd` in every
+object. binutils `ld`/`nm` auto-load an LLVM gold plugin when they see them, and church
+carries a stale LLVM-14 one:
+
+```
+bfd plugin: LLVM gold plugin has failed to create LTO module:
+Opaque pointers are only supported in -opaque-pointers mode
+(Producer: 'LLVM22.1.2-rust-1.96.0-stable' Reader: 'LLVM 14.0.6')
+```
+
+When the plugin fails, the member is reported as having **no symbols at all**, so every
+Rust runtime symbol disappears and the link fails naming Rust internals rather than the
+plugin.
+
+**Why it was slow to find.** The failing object is BYTE-IDENTICAL to one that links on the
+dev laptop — same md5, same 11,599,800 bytes. Everything comparable matched: rustc 1.96.0,
+binutils 2.46, gcc 15.2.0, `Makefile.config`, archive structure (563 members, 470 Rust,
+`std` cgu0 present), and `ar r *.o` glob order (checked under C / en_IN / en_US.UTF-8 —
+identical, so locale collation was NOT it). An archive-wide `nm` under-reports silently:
+the plugin error only appears on **stderr**, and only when `nm` is run on a single
+extracted member. Two hypotheses were tested and refuted first — distro rustc 1.93
+(installing rustup 1.96 did not help) and stale mixed objects (`make clean` did not help,
+and produced *more* missing symbols).
+
+**Fix (`Makefile.mmtk`, MMTK_STRIP_BITCODE).** `objcopy --remove-section=.llvmbc
+--remove-section=.llvmcmd` on the extracted objects before they are bundled. We never LTO
+across the C/Rust boundary, so the bitcode is dead weight; native code and `.symtab` are
+untouched. Verified: the same object goes from "no symbols" to its full **1778**, matching
+the laptop exactly, and church then builds `world.opt` clean with all four plans producing
+byte-identical output.
+
+Best-effort (`-` prefix, `OBJCOPY ?= objcopy`) since the strip is only needed on hosts
+carrying the stale plugin, and objcopy may be absent.
+
+**Worth re-examining:** `SCALABILITY.md` §11's church numbers are retracted as a
+"contaminated build". This is exactly the class of toolchain trap that could produce one —
+a tree that links only because some objects were silently symbol-less is a plausible route
+to a subtly wrong binary. Not investigated.
+
 ## Near-OOM SEGV: root scanning crashes instead of raising Out_of_memory (single-domain, 2026-08-06)
 
 Found while establishing the left edge of the D5 heap sweep. Below a certain heap the

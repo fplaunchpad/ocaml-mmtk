@@ -72,10 +72,37 @@ MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
 # the staging dir; use the absolute archive path since $(MMTK_LIB) is
 # $(ROOTDIR)- relative ("./gc/mmtk/...") and would be wrong after the cd. The
 # stamp tracks freshness against $(MMTK_LIB).
+# Strip the embedded LLVM bitcode from the extracted objects.
+#
+# rustc leaves .llvmbc/.llvmcmd in every object. A binutils ld/nm that
+# auto-loads an LLVM gold plugin will try to read those sections, and if the
+# plugin is OLDER than the LLVM rustc built with, it fails and the member is
+# reported as having NO SYMBOLS AT ALL — so every Rust runtime symbol
+# (core::fmt::write, std::process::abort, __rdl_alloc, ...) silently vanishes
+# and the runtime link dies with undefined references that name Rust internals
+# rather than the plugin. Observed on a host carrying a stale LLVM-14 plugin:
+#
+#   bfd plugin: LLVM gold plugin has failed to create LTO module:
+#   Opaque pointers are only supported in -opaque-pointers mode
+#   (Producer: 'LLVM22.1.2-rust-1.96.0-stable' Reader: 'LLVM 14.0.6')
+#
+# The failure is nasty to diagnose because the object files are BYTE-IDENTICAL
+# to ones that link fine elsewhere (same md5) — only the reader differs — and
+# an archive-wide `nm` under-reports without an obvious error. Stripping costs
+# nothing here: we never LTO across the C/Rust boundary, so the bitcode is dead
+# weight, and native code plus .symtab are untouched (verified: the same object
+# goes from "no symbols" to its full 1778).
+#
+# Best-effort: `-` because objcopy may be absent, and the strip is only needed
+# on hosts with the stale plugin.
+MMTK_STRIP_BITCODE = -$(OBJCOPY) --remove-section=.llvmbc --remove-section=.llvmcmd
+OBJCOPY ?= objcopy
+
 $(MMTK_OBJS_STAMP): $(MMTK_LIB)
 	rm -rf $(MMTK_OBJS_DIR)
 	mkdir -p $(MMTK_OBJS_DIR)
 	cd $(MMTK_OBJS_DIR) && $(ARCMD) x $(abspath $(MMTK_LIB))
+	$(MMTK_STRIP_BITCODE) $(MMTK_OBJS_DIR)/*.o 2>/dev/null || true
 	touch $@
 
 # Canned recipe: bundle the staged MMTk objects into archive $(1). Used in the
