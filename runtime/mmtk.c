@@ -129,6 +129,9 @@ int caml_mmtk_weak_refs = 1;
 
 static void caml_mmtk_report_copied(void);
 static void caml_e1_dump(void);  /* E1 write-barrier counter dump (atexit) */
+static void caml_mmtk_dump_pause_log(void);  /* #R1 per-pause dump (atexit) */
+/* Held from init to atexit; points into the environment, so it stays valid. */
+static const char *caml_mmtk_pause_log_path;
 
 void caml_mmtk_init(void)
 {
@@ -222,6 +225,29 @@ void caml_mmtk_init(void)
 
   if (getenv("MMTK_BARRIER_COUNT") != NULL)
     atexit(caml_e1_dump);
+
+  /* Per-pause STW records (backlog #R1). MMTK_VERBOSE only reports the SUM of
+     pause time, which cannot distinguish many small pauses from a few large
+     ones — the distinction the GC-shape comparison turns on. Arming here keeps
+     the pause path itself free of any I/O: records accumulate in memory and are
+     written once at exit. */
+  caml_mmtk_pause_log_path = getenv("MMTK_PAUSE_LOG");
+  if (caml_mmtk_pause_log_path != NULL && caml_mmtk_pause_log_path[0] != '\0') {
+    mmtk_ocaml_pause_log_enable();
+    atexit(caml_mmtk_dump_pause_log);
+  }
+}
+
+/* Write the per-pause STW records collected during the run. */
+static void caml_mmtk_dump_pause_log(void)
+{
+  int64_t n = mmtk_ocaml_pause_log_dump(caml_mmtk_pause_log_path);
+  if (n < 0)
+    fprintf(stderr, "[mmtk] pause log: could not write %s\n",
+            caml_mmtk_pause_log_path);
+  else if (getenv("MMTK_VERBOSE") != NULL)
+    fprintf(stderr, "[mmtk] pause log: %lld pauses -> %s\n",
+            (long long) n, caml_mmtk_pause_log_path);
 }
 
 /* Report how many objects copying collection relocated (Immix defrag, etc.).

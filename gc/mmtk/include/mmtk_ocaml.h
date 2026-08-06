@@ -186,6 +186,18 @@ size_t mmtk_ocaml_total_gc_count(void);
 /** Total stop-the-world GC time so far, in milliseconds. */
 uint64_t mmtk_ocaml_gc_time_ms(void);
 
+/** Arm per-pause STW recording (backlog #R1). mmtk_ocaml_gc_time_ms is a SUM and
+ *  so cannot distinguish many small pauses from a few large ones — the very
+ *  distinction the GC space-time shape comparison rests on. Records accumulate in
+ *  memory (24 bytes each) so the pause path stays free of I/O; call
+ *  mmtk_ocaml_pause_log_dump at exit to write them. Off by default. */
+void mmtk_ocaml_pause_log_enable(void);
+
+/** Write the recorded pauses to `path` as NDJSON, one {at,dur,full} per line,
+ *  with times in seconds relative to the first pause. Returns the number of
+ *  records written, 0 if recording was never armed, or -1 on I/O failure. */
+int64_t mmtk_ocaml_pause_log_dump(const char *path);
+
 /** Register a custom block (with a finalize op) on MMTk's finalizer queue. Kept
  *  alive + forwarded until unreachable, then returned by mmtk_ocaml_poll_finalizable. */
 void mmtk_ocaml_add_finalizer(const void* addr);
