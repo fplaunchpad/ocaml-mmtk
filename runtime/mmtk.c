@@ -303,6 +303,16 @@ void caml_mmtk_init(void)
   if (getenv("MMTK_BARRIER_COUNT") != NULL)
     atexit(caml_e1_dump);
 
+  {
+    /* Shape experiments: large-object placement (see caml_mmtk_semantics). */
+    const char *lt = getenv("MMTK_LOS_THRESHOLD");
+    if (lt != NULL && lt[0] != '\0') {
+      long v = atol(lt);
+      if (v > 0) caml_mmtk_los_threshold = (size_t)v;
+    }
+    if (getenv("MMTK_ALLOC_JITTER") != NULL) caml_mmtk_alloc_jitter = 1;
+  }
+
   /* D1 mutator-side GC time accounting (see the block comment up top). */
   if (getenv("MMTK_MUTATOR_GC_TIME") != NULL) {
     caml_mut_gc_timing = 1;
@@ -404,11 +414,49 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 #endif
 }
 
+/* Shape experiments (see SHAPE.md, W-tax mechanisms).
+   MMTK_LOS_THRESHOLD (bytes) re-routes "large-ish" objects to the LOS instead
+   of the nursery bump path. Rationale: bump allocation places big regular
+   objects (matmul's 6 KB rows) at a perfectly regular pitch, which at unlucky
+   sizes aliases L2 sets (measured: 12.3x LLC-loads at size 768, collapsing to
+   2.5x at 800). Vanilla dodges this by placing Max_young_wosize+ objects into
+   size-class pools; setting the threshold to 2056 (= Max_young_wosize in
+   bytes, +header) mimics that split with one knob.
+   MMTK_ALLOC_JITTER=1 instead de-regularizes the pitch in place: before a
+   large-ish DEFAULT-semantics allocation, drop a small pseudo-random garbage
+   filler block so consecutive big objects stop sharing a stride. The filler is
+   unreachable immediately and dies at the next collection; cost is <2% of the
+   affected allocation. */
+static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
+static int caml_mmtk_alloc_jitter = 0;
+static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
+
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
 {
   size_t bytes = (size_t)(Whsize_wosize(wosize)) * sizeof(value);
-  return bytes >= CAML_MMTK_LOS_THRESHOLD ? CAML_MMTK_SEM_LOS
+  return bytes >= caml_mmtk_los_threshold ? CAML_MMTK_SEM_LOS
                                           : CAML_MMTK_SEM_DEFAULT;
+}
+
+/* xorshift64*; deterministic per process, no clock involved. */
+Caml_inline uint64_t caml_mmtk_jitter_next(void)
+{
+  uint64_t x = caml_mmtk_jitter_state;
+  x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+  caml_mmtk_jitter_state = x;
+  return x * 0x2545F4914F6CDD1Dull;
+}
+
+/* Pitch-jitter filler: allocate 1..16 words of immediately-dead Abstract_tag
+   garbage ahead of a large-ish bump allocation. Abstract_tag = never scanned,
+   so the GC treats it as an opaque dead blob and reclaims it next cycle. */
+static void caml_mmtk_jitter_pad(size_t bytes, int sem)
+{
+  if (caml_mmtk_alloc_jitter && sem == CAML_MMTK_SEM_DEFAULT && bytes >= 2048) {
+    mlsize_t pad = 1 + (mlsize_t)(caml_mmtk_jitter_next() & 15);
+    (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
+                           CAML_MMTK_SEM_DEFAULT);
+  }
 }
 
 /* Note on the header: the binding writes (wosize << 10) | tag, which is the
@@ -444,10 +492,11 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
   int slot = Caml_state->id & (MUT_GC_DOMS - 1);
+  int sem = caml_mmtk_semantics(wosize);
   (void)reserved;
   if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
-  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                       caml_mmtk_semantics(wosize));
+  caml_mmtk_jitter_pad((size_t)Whsize_wosize(wosize) * sizeof(value), sem);
+  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag, sem);
   if (timed)
     /* Subtract any time spent PARKED for a GC this allocation triggered:
        parked wall is not mutator CPU (see the block comment up top). */
@@ -467,9 +516,10 @@ value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
   int slot = Caml_state->id & (MUT_GC_DOMS - 1);
+  int sem = caml_mmtk_semantics(wosize);
   if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
-  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag,
-                       caml_mmtk_semantics(wosize));
+  caml_mmtk_jitter_pad((size_t)Whsize_wosize(wosize) * sizeof(value), sem);
+  p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag, sem);
   if (timed)
     caml_mut_gc_alloc_tsc[slot] +=
       (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
