@@ -380,3 +380,36 @@ matmul-768, r1 single-rep peek (heap 192 MiB, T=1, cores 0-13, perf governor):
 - Residual after jitter: 1.40× cycles at ~vanilla LLC-loads. The remaining
   stall source is below the LLC (L1/L2 conflicts or dTLB) — round 2 adds
   L1-dcache-load-misses/dTLB-load-misses to the event set.
+
+### Round 1 complete: nursery curve + technique validation (wnight1)
+
+**Technique is sound.** binarytrees ins_ratio (Bactrian/vanilla) = 0.824-0.825
+under std pin (0-13), single core, no pin, and a drift re-pass; rep variance
+0.15%. Only an SMT-sibling pair shifts cyc_ratio (1.14 -> 1.57, expected).
+The sub-1 instruction ratio is real: Bactrian's collector executes fewer
+total instructions (57 vs ~1800 collections' fixed work).
+
+**Small nursery = catastrophe, warmth never materializes (binarytrees 20,
+heap 192, T=1):**
+
+| nursery | GCs | whole cyc | whole ins | wall | corrW |
+|---------|-----|-----------|-----------|------|-------|
+| default (64M scaled) | 57 | 13.1G | 25.1G | 3613ms | 2.46s |
+| 32M | 115 | 19.0G | 36.0G | 4920ms | 2.88s |
+| 16M | 229 | 29.1G | 55.9G | 7087ms | 3.71s |
+| 8M  | 458 | 45.6G | 84.9G | 10231ms | 5.55s |
+| 4M  | 924 | 78.6G | 138.7G | 16337ms | 9.65s |
+| 2M  | 1864 | 140.9G | 239.6G | 27428ms | 17.98s |
+
+kb is nursery-INSENSITIVE in W (corrW ~1.39-1.61 flat) — warmth is not kb's
+mechanism at these sizes either.
+
+**Open mystery (the night's quarry):** at 2M the mutator thread burns 20.36s
+kernel-accounted CPU (wall 27.5s, STW spans 7.1s) — ~16s of real mutator-thread
+CPU inside the park-call windows (parked TSC 23.3s), only 2.39s of it accounted
+by the alloc/barrier wrappers. The Rust park is a proper condvar; the CPU is in
+something the park windows enclose (become_running retry churn, domain-lock
+ops, alloc-retry, or unaccounted slow paths). R2E perf-record profiles nur2
+by comm+symbol to name it. Note vanilla-stock bt at THIS operating point is
+already at wall parity (3613 vs 3630ms) — the bt problem is the 1.14x cycles
+and what happens when GC count rises.
