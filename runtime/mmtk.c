@@ -459,7 +459,13 @@ Caml_inline uint64_t caml_mmtk_jitter_next(void)
 static void caml_mmtk_jitter_pad(size_t bytes, int sem)
 {
   if (caml_mmtk_alloc_jitter && sem == CAML_MMTK_SEM_DEFAULT && bytes >= 2048) {
-    mlsize_t pad = 1 + (mlsize_t)(caml_mmtk_jitter_next() & 15);
+    /* Entropy in LINES, not words: 8-128 B pads (v1) carry <2 lines of
+       set-index entropy — enough to break exact pitch alignment (768) but
+       enough to CREATE near-alignments where the natural pitch was benign
+       (mm800: LLC-loads 140M -> 217M). 0..31 lines spreads consecutive
+       large objects across 32 L2 sets; successive pads accumulate, so
+       absolute offsets decorrelate as a random walk. */
+    mlsize_t pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next() & 31);
     (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
                            CAML_MMTK_SEM_DEFAULT);
     atomic_fetch_add_explicit(&caml_mmtk_jitter_fills, 1,

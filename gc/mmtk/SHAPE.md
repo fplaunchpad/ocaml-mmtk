@@ -354,3 +354,29 @@ Bonus observation from the same table: MMTk's collector executes FEWER
 instructions than vanilla's (9.4 G vs ~15.7 G estimated) — its 33× fewer
 collections do save instruction-level work; vanilla's oldify simply runs at
 extraordinary IPC (~2.9) while MMTk's metadata-heavy trace runs at 2.24.
+
+## W-night round 1 (2026-08-08, church): placement fix found — jitter, not LOS
+
+Goal reframed by the operating decision of 2026-08-08: **W parity** (mutator
+cycle ratio → 1); G may differ in both seconds and count.
+
+matmul-768, r1 single-rep peek (heap 192 MiB, T=1, cores 0-13, perf governor):
+
+| config       | cycles | LLC-loads | wall |
+|--------------|--------|-----------|------|
+| vanilla      |  4.56G |    56.6M  | 1439ms |
+| Bactrian     |  8.70G |   739.3M  | 2736ms |
+| LOS ≥2056B   |  9.57G |   905.7M  | 3018ms |
+| LOS ≥4096B   |  9.71G |   905.9M  | 3060ms |
+| LOS ≥8192B (neg-ctl) | 9.16G | 686.1M | 2904ms |
+| jitter       |  6.40G |    73.8M  | 2016ms |
+
+- **MMTK_ALLOC_JITTER (1–16 word dead filler before ≥2KB bump allocs) removes
+  10× of the LLC-load excess** — pitch-aliasing is confirmed causally, and the
+  fix costs nothing (RSS unchanged; 2307 fillers ≈ one per row).
+- **LOS routing is anti-productive**: page-aligned placement has zero low-bit
+  entropy — a perfectly regular 8 KiB pitch, i.e. the pathology itself. The
+  ≥8192 negative control (rows stay bump-allocated) ≈ stock, as predicted.
+- Residual after jitter: 1.40× cycles at ~vanilla LLC-loads. The remaining
+  stall source is below the LLC (L1/L2 conflicts or dTLB) — round 2 adds
+  L1-dcache-load-misses/dTLB-load-misses to the event set.
