@@ -91,6 +91,7 @@ int caml_mmtk_collection_enabled(void)
 int caml_mmtk_tlab = 0;
 
 static int caml_mmtk_initialised = 0;
+
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
 static int caml_mmtk_collects = 0;
@@ -126,6 +127,11 @@ int caml_mmtk_weak_refs = 1;
 /* AllocationSemantics codes shared with the Rust ABI (see api.rs). */
 #define CAML_MMTK_SEM_DEFAULT   0
 #define CAML_MMTK_SEM_LOS       2
+
+static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
+static int caml_mmtk_alloc_jitter = 0;
+static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
+static _Atomic uint64_t caml_mmtk_jitter_fills = 0;
 
 /* --------------------------------------------------------------------------
    D1 mutator-side GC time (MMTK_MUTATOR_GC_TIME=1).
@@ -182,6 +188,10 @@ static void caml_mut_gc_dump(void)
 {
   uint64_t barrier = 0, alloc = 0, park = 0;
   double secs = caml_mut_gc_now() - caml_mut_gc_mono0;
+  if (caml_mmtk_alloc_jitter)
+    fprintf(stderr, "[mmtk] jitter fillers: %llu\n",
+            (unsigned long long)atomic_load_explicit(
+                &caml_mmtk_jitter_fills, memory_order_relaxed));
   double hz;
   int i;
   for (i = 0; i < MUT_GC_DOMS; i++) {
@@ -427,10 +437,6 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
    filler block so consecutive big objects stop sharing a stride. The filler is
    unreachable immediately and dies at the next collection; cost is <2% of the
    affected allocation. */
-static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
-static int caml_mmtk_alloc_jitter = 0;
-static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
-
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
 {
   size_t bytes = (size_t)(Whsize_wosize(wosize)) * sizeof(value);
@@ -456,6 +462,8 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
     mlsize_t pad = 1 + (mlsize_t)(caml_mmtk_jitter_next() & 15);
     (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
                            CAML_MMTK_SEM_DEFAULT);
+    atomic_fetch_add_explicit(&caml_mmtk_jitter_fills, 1,
+                              memory_order_relaxed);
   }
 }
 
