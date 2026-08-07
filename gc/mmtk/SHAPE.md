@@ -259,3 +259,50 @@ cost sits outside its spans (small, uncorrected, favours vanilla's W); gcpauses
 fails with "corrupt stream" from a detached parent (unresolved — run it from an
 interactive context); threadcpu undercounts by at most one sampling interval per
 thread.
+
+---
+
+## perf attribution — church, 2026-08-07 (paranoid=-1, governor=performance)
+
+**The W-tax is solved: it is L2 misses from allocation geometry, not extra work.**
+matrix_multiplication, vanilla vs GenImmix T=1, whole process:
+
+| | instructions | cycles | LLC-loads (=L2 misses) | LLC-load-misses |
+|---|---|---|---|---|
+| vanilla | 13.88 G | 4.71 G | 56.5 M | 51 k |
+| MMTk | 14.06 G (+1.2%) | **8.70 G (+85%)** | **685.7 M (12.1×)** | 85 k |
+
+Identical instruction stream, +85% cycles, and the entire difference is memory:
+12× more L2 misses that all HIT the LLC (which is why plain "cache-misses"
+looked innocent — nothing reaches DRAM). Vanilla's copying minor compacts the
+live rows into L2-resident pools; MMTk's rows sit at 64-MiB-nursery allocation
+pitch across Immix blocks, so the same traversal pays LLC latency continuously.
+This also explains why the tax appears on every allocating bench and is
+untouchable by GC-side accounting: it is program code executing against a worse
+layout. Replicates SCALABILITY.md's par_matmul artifact note with the mechanism
+now measured directly.
+
+**D1 by symbols needs thread identity — flat classification undercounts G.**
+Flat gcsplit on Bactrian/binarytrees read G/(W+G) = 0.25 against threadcpu's
+0.42, because GC copying runs through libc memmove/memset, which a flat symbol
+map files under W. The reconciled instrument is HYBRID: worker-thread samples
+are G by thread identity, mutator samples classify by symbol. That yields 0.39
+(bt) — agreeing with threadcpu's 0.42 — and 0.14 (kb, fresh run under the
+performance governor).
+
+**Coordination-spin is a non-issue at T=1 — and "spin" was the wrong reading.**
+C = 0.0–0.2% in every profile. Worker CPU beyond the STW windows is real work,
+not spinning: for Bactrian it is concurrent marking (by design), and the
+worker symbols are trace/copy/metadata, with side_metadata_access appearing
+three times independently — matching NOTES' 77% metadata/dispatch
+decomposition of the per-object cost.
+
+**kb correction.** The earlier remset hypothesis (value-unfiltered remset as
+the specific culprit for kb's 2.8× G) is NOT supported by the flat worker
+profile: no remset-processing symbol ranks, and the time sits in generic
+per-object machinery (FieldSlot::from_address, forward_object, metadata
+access). The mutation-rate contrast (barrier time 15 ms vs 0.035 ms) stands,
+but the dominant kb cost is the per-object framework overhead atop the
+per-collection floor. Remset share is unresolved without call graphs (-g);
+the value-filtered-remset experiment on shape/tweaks remains worth running,
+with reduced expectations.
