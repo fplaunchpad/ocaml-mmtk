@@ -306,3 +306,51 @@ but the dominant kb cost is the per-object framework overhead atop the
 per-collection floor. Remset share is unresolved without call graphs (-g);
 the value-filtered-remset experiment on shape/tweaks remains worth running,
 with reduced expectations.
+
+---
+
+## The W-tax, resolved into two distinct mechanisms (church, perf, 2026-08-07)
+
+**Mechanism 1 — allocation-pitch set-aliasing (matmul-class, large regular objects).**
+Sweeping the matrix size changes the row pitch and nothing else of substance;
+MMTk's L2 misses collapse while vanilla's stay flat:
+
+| size | vanilla LLC-loads | MMTk LLC-loads | ratio | cycle ratio |
+|---|---|---|---|---|
+| 768 | 56.5 M | 703.8 M | **12.5×** | 1.92× |
+| 770 | 57.1 M | 317.5 M | 5.6× | 1.46× |
+| 800 | 64.0 M | 159.4 M | 2.5× | 1.39× |
+
+Bump allocation places 6.2-KB rows at a perfectly regular pitch; at size 768
+(row = 6144 B payload, near a power of two) that stride cycles through few L2
+sets — classic set-conflict aliasing. Vanilla's size-class pools place the same
+rows at a different, benign pattern. The 12× headline is therefore a
+size-768 pathology sitting on a real but smaller generic layout tax (~1.4×
+cycles at non-pathological sizes, same instructions). NOT a nursery-size
+effect: a 2 MiB nursery leaves the misses unchanged (672 M) while exploding
+instructions 6× (GC storm).
+
+**Mechanism 2 — nursery reuse-warmth (binarytrees-class, small-object churn).**
+Per-thread counters, binarytrees, GenImmix T=1 vs vanilla:
+
+| thread | cycles | instructions | LLC-loads | cache-misses | faults |
+|---|---|---|---|---|---|
+| vanilla (program+GC inline) | 10.91 G | 29.11 G | 7.9 M | 68.0 M | 18.0 k |
+| MMTk mutator | 7.21 G | 13.40 G | 7.5 M | 66.9 M | **2** |
+| MMTk worker | 4.19 G | 9.41 G | 2.8 M | 13.6 M | 49.1 k |
+
+The mutator executes the same program instructions (13.40 G measured vs ~13.3 G
+estimated for vanilla's program share) at IPC 1.86 vs vanilla's program-share
+~2.4 (estimate: vanilla program cycles ≈ 10.91 G × its 50.3% symbol W-share).
+Demand-LLC traffic is EQUAL — this is not mechanism 1. The difference is
+allocation-region warmth: vanilla re-bumps the same 2 MiB arena (L2-warm every
+lap, page faults on the mutator), MMTk streams through a 64 MiB nursery
+(DRAM-class traffic on fresh lines; note the faults migrated wholesale to the
+worker, which touches the fresh blocks during copying). Unlike matmul, this one
+IS a nursery-size/reuse effect — the two mechanisms want opposite things,
+which is the design tension a shape-matching nursery policy must resolve.
+
+Bonus observation from the same table: MMTk's collector executes FEWER
+instructions than vanilla's (9.4 G vs ~15.7 G estimated) — its 33× fewer
+collections do save instruction-level work; vanilla's oldify simply runs at
+extraordinary IPC (~2.9) while MMTk's metadata-heavy trace runs at 2.24.
