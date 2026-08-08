@@ -695,3 +695,30 @@ Remaining phase-2 (G-side): bt@n16's gcCyc 14.2G (promotion copies at ~1.6k
 ins/object vs vanilla's ~200-400 + full marks) — the per-slot trace-path slim
 and lazy mature reclamation continue as the G work items; W is done pending
 that (the n16 W-parity config costs G until then).
+
+### Round 14: trace-path slim step 1 (phase-dynamic trusted loads) + D1 panel
+
+Concurrent plans were statically excluded from the S1 trusted slot fast path,
+paying TWO SFT lookups per traced slot (classify + load revalidation) even
+inside STW pauses. Trusting now tracks the phase (on at running.is_empty(),
+off before any wake; concurrent marking keeps full revalidation; gates incl.
+forced-always-concurrent passed, outputs identical). Effect: bt-def G
+5.18 -> 4.56G (-12%), bt-n16 G 14.2 -> 12.4G (-13%), gcIns -16%; and bt@n16
+mutator now 5.74G vs vanilla-W 5.79G — W-ratio 0.99.
+
+D1 panel at round-13 defaults (wnight8, symbol-split hybrid, pre-trusted-loads):
+
+| bench | vanilla W/G (D1) | Bactrian W/G (D1) | W-ratio |
+|-------|-----------------|-------------------|---------|
+| binarytrees | 5.71/5.78 (0.503) | 6.87/5.26 (0.433) | 1.20 |
+| kb | 3.96/0.56 (0.124) | 4.02/0.82 (0.170) | 1.02 |
+| spectralnorm | 4.88/0.00 | 5.32/0.08 (0.015) | 1.09 |
+| LU | 5.35/0.01 | 6.40/0.27 (0.041) | 1.20 |
+| matmul | 4.67/0.00 | 5.66/0.03 | 1.21 |
+| nbody / fannkuch / mandelbrot | ~0 G | ~0 G | 1.00 |
+
+Bactrian's GC fraction is now BELOW vanilla's on bt (0.433 vs 0.503) with
+whole-process cycles within 4%. Next slim steps: immediate pre-filter in
+scan_ocaml_object (skip FieldSlot construction for tagged ints — vanilla's
+oldify checks Is_block first), then the mark-bit load-before-CAS in the
+concurrent trace.
