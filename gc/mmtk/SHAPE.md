@@ -722,3 +722,25 @@ whole-process cycles within 4%. Next slim steps: immediate pre-filter in
 scan_ocaml_object (skip FieldSlot construction for tagged ints — vanilla's
 oldify checks Is_block first), then the mark-bit load-before-CAS in the
 concurrent trace.
+
+### Round 15: matmul residual characterized to completion; pre-filter refuted
+
+**matmul (W ~1.15-1.21): GC-side complete.** At current defaults every
+countable resource is at vanilla parity: instructions 14.05 vs 13.88G, L1
+hits 3.31 vs 3.23G, L2 hits 850 vs 849M, L3 57.0 vs 56.4M, L3-miss 0 both,
+SB-full 0.2% both, TLB nil, startup floor 0.017 vs 0.007G, THP tested both
+ways (ON wins everywhere: 6.08 vs 6.93G). MLP counters localize the residual:
+memory-busy time is IDENTICAL in absolute cycles (4.38G vs 4.42G pending),
+but vanilla overlaps compute inside it (94% pending coverage, stalls_mem
+10.5%) while ours bunches loads worse (72% coverage, stalls_mem 18.5%) —
+an instruction-scheduling/overlap artifact of layout below the counter
+level. Further W-closure is program-structure territory (loop blocking),
+out of scope: the benchmark is identical on both sides by methodology.
+
+**Immediate pre-filter in scan_ocaml_object: refuted on bt** (G 4.56->4.70G;
+tree nodes are pointer-only, so the filter pays a duplicate load with zero
+skips) — reverted. classify already short-circuits immediates before any
+SFT work, so the filter can only win on scans where slot-buffer traffic
+dominates; none measured. Next G item: the per-object COPY path (alloc_copy
+dispatch + post_copy metadata, ~1.6k ins/object vs vanilla oldify's
+~200-400) — the dominant remaining term at n16.
