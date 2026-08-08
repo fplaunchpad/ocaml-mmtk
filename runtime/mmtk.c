@@ -129,6 +129,16 @@ int caml_mmtk_weak_refs = 1;
 #define CAML_MMTK_SEM_LOS       2
 
 static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
+/* MMTK_MEDIUM_NONMOVING=1: route "medium" objects (>= 2056 B = stock's
+   Max_young_wosize boundary, < the LOS threshold) to the NonMoving space —
+   with the marksweep_as_nonmoving build this is a swept FREE-LIST space,
+   i.e. size-class pools: stock OCaml's placement for exactly this size band
+   (stock allocates >Max_young_wosize blocks straight into major-heap pools).
+   Bump placement for these objects is chaotically pitch-sensitive (matmul
+   regimes measured at 57M..903M LLC-loads across layouts); pools are the
+   robust fix. Off by default pending panel measurement. */
+static int caml_mmtk_medium_nonmoving = 0;
+#define CAML_MMTK_SEM_NONMOVING 6
 /* Pitch jitter is ON by default (6 bits = 0..63 line pads before >=2KB bump
    allocations). Measured 2026-08-08 (SHAPE.md W-night): removes matmul-768's
    12x LLC-load set-aliasing (739M -> 69M, vanilla 57M), improves the benign
@@ -338,6 +348,8 @@ void caml_mmtk_init(void)
       /* Value = entropy BITS for the line-granular pad (0..2^bits-1 lines).
          "1" (the historical on-switch) means the default 5 bits = 32 lines;
          2..8 select the range explicitly (6 -> 64 lines, up to 4 KiB pads). */
+      if (getenv("MMTK_MEDIUM_NONMOVING") != NULL)
+        caml_mmtk_medium_nonmoving = atoi(getenv("MMTK_MEDIUM_NONMOVING"));
       if (getenv("MMTK_TLAB_PREFETCH") != NULL)
         caml_mmtk_tlab_prefetch = atoi(getenv("MMTK_TLAB_PREFETCH"));
       const char *jv = getenv("MMTK_ALLOC_JITTER");
@@ -468,8 +480,10 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
 {
   size_t bytes = (size_t)(Whsize_wosize(wosize)) * sizeof(value);
-  return bytes >= caml_mmtk_los_threshold ? CAML_MMTK_SEM_LOS
-                                          : CAML_MMTK_SEM_DEFAULT;
+  if (bytes >= caml_mmtk_los_threshold) return CAML_MMTK_SEM_LOS;
+  if (caml_mmtk_medium_nonmoving && bytes >= 2056)
+    return CAML_MMTK_SEM_NONMOVING;
+  return CAML_MMTK_SEM_DEFAULT;
 }
 
 /* xorshift64*; deterministic per process, no clock involved. */
