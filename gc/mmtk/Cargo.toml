@@ -15,7 +15,7 @@ members = ["common", "binding"]
 resolver = "2"
 
 [workspace.dependencies]
-mmtk        = { version = "0.32", features = ["object_pinning", "sticky_immix_non_moving_nursery"] }
+mmtk        = { version = "0.32", features = ["object_pinning", "sticky_immix_non_moving_nursery", "marksweep_as_nonmoving"] }
 lazy_static = "1.5"
 libc        = "0.2"
 
