@@ -85,7 +85,10 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
             let start_env = (closinfo << 8) >> 9;
             for i in start_env..wosize {
                 let slot_addr = base + i * WORD_SIZE;
-                slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
+                let raw: usize = unsafe { slot_addr.load() };
+                if raw & 1 == 0 && raw != 0 {
+                    slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
+                }
             }
         }
 
@@ -100,10 +103,17 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
         _ => {
             // Ordinary block (tag 0..245), Lazy (246), Object (248):
             // all fields are OCaml values — each may be an immediate int or
-            // a heap pointer.  FieldSlot::load() filters out immediates.
+            // a heap pointer. Pre-filter immediates/null with one load + bit
+            // test (vanilla's oldify checks Is_block the same way) instead of
+            // constructing a FieldSlot — whose classify pays the full
+            // foreign-pointer path — for every tagged int. Roughly half of
+            // OCaml fields are immediates; measured on the nursery trace.
             for i in 0..wosize {
                 let slot_addr = base + i * WORD_SIZE;
-                slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
+                let raw: usize = unsafe { slot_addr.load() };
+                if raw & 1 == 0 && raw != 0 {
+                    slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
+                }
             }
         }
     }
