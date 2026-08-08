@@ -138,6 +138,14 @@ static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
 static int caml_mmtk_alloc_jitter = 6;
 static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
 static _Atomic uint64_t caml_mmtk_jitter_fills = 0;
+/* MMTK_TLAB_PREFETCH=1: on each TLAB refill, software-prefetch the fresh
+   block with write intent — top 1 KiB into L1, the rest into L2. Rationale
+   (SHAPE.md W-night round 3b): the residual W-tax is allocation-frontier
+   STORE stalls — bump stores into never-touched cold lines drain through the
+   store buffer at RFO latency (mutator loads hit L1 at 98.9%, yet
+   stalls_mem_any doubles vs vanilla). OCaml bumps DOWNWARD from young_end,
+   so warming proceeds top-down to match store order. */
+static int caml_mmtk_tlab_prefetch = 0;
 
 /* --------------------------------------------------------------------------
    D1 mutator-side GC time (MMTK_MUTATOR_GC_TIME=1).
@@ -330,6 +338,8 @@ void caml_mmtk_init(void)
       /* Value = entropy BITS for the line-granular pad (0..2^bits-1 lines).
          "1" (the historical on-switch) means the default 5 bits = 32 lines;
          2..8 select the range explicitly (6 -> 64 lines, up to 4 KiB pads). */
+      if (getenv("MMTK_TLAB_PREFETCH") != NULL)
+        caml_mmtk_tlab_prefetch = atoi(getenv("MMTK_TLAB_PREFETCH"));
       const char *jv = getenv("MMTK_ALLOC_JITTER");
       if (jv != NULL && jv[0] != '\0') {
         int bits = atoi(jv);
@@ -603,6 +613,14 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
   if (dom->young_end != NULL)
     dom->stat_minor_words +=
       Wsize_bsize((char*)dom->young_end - (char*)dom->young_ptr);
+
+  if (caml_mmtk_tlab_prefetch) {
+    char *base = (char *)start, *top = (char *)end;
+    char *l1_floor = top - 1024 > base ? top - 1024 : base;
+    char *a = top - 64;
+    for (; a >= l1_floor; a -= 64) __builtin_prefetch(a, 1, 3);
+    for (; a >= base; a -= 64)     __builtin_prefetch(a, 1, 2);
+  }
 
   dom->young_start          = (value*)start;
   dom->young_end            = (value*)end;
