@@ -19,6 +19,7 @@
 
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
@@ -488,7 +489,7 @@ static void *caml_mmtk_frontier_warmer(void *arg)
 {
   (void)arg;
 #ifdef __linux__
-  pthread_setname_np(pthread_self(), "mmtk-warmer");
+  prctl(PR_SET_NAME, "mmtk-warmer", 0, 0, 0);
 #endif
   const size_t WINDOW = 24 * 1024;           /* lines ahead of the frontier */
   for (;;) {
