@@ -129,7 +129,13 @@ int caml_mmtk_weak_refs = 1;
 #define CAML_MMTK_SEM_LOS       2
 
 static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
-static int caml_mmtk_alloc_jitter = 0;
+/* Pitch jitter is ON by default (6 bits = 0..63 line pads before >=2KB bump
+   allocations). Measured 2026-08-08 (SHAPE.md W-night): removes matmul-768's
+   12x LLC-load set-aliasing (739M -> 69M, vanilla 57M), improves the benign
+   pitch too (mm800 140M -> 72M), and is neutral on every other panel bench
+   (fillers only precede >=2KB allocations). Output-parity gates passed on the
+   full panel + par_binarytrees d=4. MMTK_ALLOC_JITTER=0 disables. */
+static int caml_mmtk_alloc_jitter = 6;
 static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
 static _Atomic uint64_t caml_mmtk_jitter_fills = 0;
 
@@ -327,7 +333,9 @@ void caml_mmtk_init(void)
       const char *jv = getenv("MMTK_ALLOC_JITTER");
       if (jv != NULL && jv[0] != '\0') {
         int bits = atoi(jv);
-        caml_mmtk_alloc_jitter = (bits >= 2 && bits <= 8) ? bits : 5;
+        /* 0 disables; 1 = the historical on-switch (5 bits); 2..8 explicit. */
+        if (bits == 0) caml_mmtk_alloc_jitter = 0;
+        else caml_mmtk_alloc_jitter = (bits >= 2 && bits <= 8) ? bits : 5;
       }
     }
   }
