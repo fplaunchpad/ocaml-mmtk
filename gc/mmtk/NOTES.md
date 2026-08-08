@@ -5,6 +5,28 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-08 (later) — Bactrian adaptive marking: STW-mark small live sets
+
+A concurrent marker streaming a small live set through the shared LLC while
+the mutator runs costs more in mutator stalls + SATB barrier activity than it
+saves in pause time. Measured (binarytrees-20, ~100 MB live, 1 worker, church):
+mutator 7.84G -> 6.78G cycles AND 14.17G -> 13.40G instructions with STW
+marking; whole-process 11.87G vs stock OCaml's 11.5G. W-cycle ratio ~1.36 ->
+~1.15 estimated; re-certification in the wnight campaign report.
+
+Change: in the Pause decision (plan/concurrent/bactrian/global.rs), a
+requested major cycle runs as Pause::Full when the mature (Immix) reserved
+size is below MMTK_CONC_MARK_MIN_MATURE_MB (default 256; 0 restores
+always-concurrent). Large live sets — where pauses actually hurt — keep the
+concurrent path, so Bactrian's thesis is intact; small ones stop paying LLC
+interference for pause relief they don't need.
+
+Location: mmtk-core FORK, but strictly Bactrian-plan-local (the Pause decision
+in bactrian/global.rs + a file-local helper). LXR does not consult this path.
+BACTRIAN_NO_CONCURRENT retains its unconditional-bisection meaning.
+Verified: outputs identical; BACTRIAN_TRACE shows 7x Full at default vs
+7x InitialMark/FinalMark at threshold 0 on binarytrees-20.
+
 ## 2026-08-08 — full-GC backstop re-denominated: allocation, not minors (W-night)
 
 The GH#5 backstop ("force a full every 8 minors per domain") scaled INVERSELY
