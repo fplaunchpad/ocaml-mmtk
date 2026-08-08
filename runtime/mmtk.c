@@ -320,7 +320,16 @@ void caml_mmtk_init(void)
       long v = atol(lt);
       if (v > 0) caml_mmtk_los_threshold = (size_t)v;
     }
-    if (getenv("MMTK_ALLOC_JITTER") != NULL) caml_mmtk_alloc_jitter = 1;
+    {
+      /* Value = entropy BITS for the line-granular pad (0..2^bits-1 lines).
+         "1" (the historical on-switch) means the default 5 bits = 32 lines;
+         2..8 select the range explicitly (6 -> 64 lines, up to 4 KiB pads). */
+      const char *jv = getenv("MMTK_ALLOC_JITTER");
+      if (jv != NULL && jv[0] != '\0') {
+        int bits = atoi(jv);
+        caml_mmtk_alloc_jitter = (bits >= 2 && bits <= 8) ? bits : 5;
+      }
+    }
   }
 
   /* D1 mutator-side GC time accounting (see the block comment up top). */
@@ -465,7 +474,8 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
        (mm800: LLC-loads 140M -> 217M). 0..31 lines spreads consecutive
        large objects across 32 L2 sets; successive pads accumulate, so
        absolute offsets decorrelate as a random walk. */
-    mlsize_t pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next() & 31);
+    mlsize_t pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next()
+                                      & ((1u << caml_mmtk_alloc_jitter) - 1));
     (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
                            CAML_MMTK_SEM_DEFAULT);
     atomic_fetch_add_explicit(&caml_mmtk_jitter_fills, 1,
