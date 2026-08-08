@@ -98,9 +98,15 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // concurrent plans (ConcurrentImmix/Bactrian/LXR) scan while mutators run, so
     // they must keep revalidating every load — leave it off (default) for them.
     // MMTK_NO_TRUSTED_LOADS=1 forces the fast path off (A/B / bisection knob).
-    let stw_trusted = !matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR")
-        && std::env::var_os("MMTK_NO_TRUSTED_LOADS").is_none();
+    let trusted_allowed = std::env::var_os("MMTK_NO_TRUSTED_LOADS").is_none();
+    let concurrent_plan = matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR");
+    let stw_trusted = !concurrent_plan && trusted_allowed;
     mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
+    // Concurrent plans: trust dynamically — inside STW pauses only (the S1 fast
+    // path toggles on at stop_all_mutators, off at resume_mutators).
+    if concurrent_plan && trusted_allowed {
+        crate::collection::DYNAMIC_TRUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
 
     let mut builder = MMTKBuilder::new();

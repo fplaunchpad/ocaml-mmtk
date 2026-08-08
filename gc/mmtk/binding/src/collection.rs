@@ -60,6 +60,17 @@ pub struct VMCollection;
 /// is always written under the STW lock so a parker cannot miss a transition.
 static GC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Phase-dynamic slot trusting for CONCURRENT plans: their field slots must be
+/// revalidated only while marking runs alongside mutators; inside an STW pause
+/// (all minors, Initial/FinalMark, Full) the world is stopped and the same S1
+/// trusted fast path used by STW plans is sound — one heap-range compare per
+/// slot instead of two SFT lookups (classify + load-time revalidation), a
+/// measured ~15% of nursery-trace worker cycles. stop_all_mutators sets
+/// trusted=true once running.is_empty(); resume_mutators clears it BEFORE any
+/// mutator wakes. Armed at init only for concurrent plans (STW plans keep the
+/// static true; MMTK_NO_TRUSTED_LOADS forces everything off).
+pub(crate) static DYNAMIC_TRUSTED: AtomicBool = AtomicBool::new(false);
+
 struct StwState {
     /// True for the duration of a collection (authoritative; written under the
     /// lock by stop_all_mutators / resume_mutators). Parked domains wait for it to
@@ -528,6 +539,12 @@ impl Collection<OCamlVM> for VMCollection {
             }
         }
 
+        // World stopped: field slots cannot change until resume — enable the
+        // trusted classify/load fast path for this pause (concurrent plans).
+        if DYNAMIC_TRUSTED.load(Ordering::Relaxed) {
+            mmtk_ocaml_common::slot::set_stw_trusted(true);
+        }
+
         for mutator in crate::active_plan::VMActivePlan::mutators() {
             mutator_visitor(mutator);
         }
@@ -535,6 +552,12 @@ impl Collection<OCamlVM> for VMCollection {
 
     /// GC worker: collection finished — un-poison every domain and wake them.
     fn resume_mutators(_tls: VMWorkerThread) {
+        // Mutators are about to run again: back to full revalidation before any
+        // wake (concurrent plans only; see DYNAMIC_TRUSTED).
+        if DYNAMIC_TRUSTED.load(Ordering::Relaxed) {
+            mmtk_ocaml_common::slot::set_stw_trusted(false);
+        }
+
         // Collection accounting + the GH#5 mature-space-pressure full-GC trigger.
         // This runs on the GC worker AFTER `Scheduler::end_of_gc` (which set
         // `next_gc_full_heap`) and BEFORE any mutator resumes, so reading plan state
