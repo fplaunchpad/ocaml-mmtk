@@ -5,6 +5,29 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-08 — full-GC backstop re-denominated: allocation, not minors (W-night)
+
+The GH#5 backstop ("force a full every 8 minors per domain") scaled INVERSELY
+with nursery size: at MMTK_NURSERY=Fixed:2MiB it forced a whole-heap collection
+every ~16 MiB allocated — 186 fulls on binarytrees-20 where the default config
+does 6 (a manufactured full-GC storm; 141G cycles vs 46G with it suppressed).
+The backstop is now denominated in nursery-bytes-collected: a full is forced
+after 8 x 64 MiB x ndomains of allocation, whatever the nursery size — the
+same GH#5-validated timing at the default config, nursery-invariant otherwise.
+MMTK_FULL_GC_CADENCE (a minor count) is still honoured as an explicit override.
+
+Location: binding/src/collection.rs (resume path). NOT in mmtk-core.
+LXR-compat: the whole trigger is gated on plan.generational(); LXR returns
+None there, so the path is inert for it — LXR reclamation stays RC-driven.
+Verified: default nursery behaviour byte-identical (13 GCs / 1 full on bt-18);
+Fixed:4MiB drops from ~26 forced fulls to 4 (mature-pressure only).
+
+Same-day context (SHAPE.md W-night): with this law + a small nursery,
+LU/spectralnorm's store-buffer stalls are erased (SB-full 1.13G -> 0.08G) —
+the store-frontier fix works once the pacer stops punishing small nurseries.
+binarytrees/kb still prefer the large nursery (real survivors -> premature
+promotion); per-minor fixed cost is the next target.
+
 ## Build: stale LLVM gold plugin makes the whole Rust runtime vanish at link (church, 2026-08-06)
 
 Moving the shape campaign to church, the fork would not link — `runtime/ocamlrun` failed

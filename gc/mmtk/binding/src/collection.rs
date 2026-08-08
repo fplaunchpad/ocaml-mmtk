@@ -173,6 +173,43 @@ const MATURE_PRESSURE_OVERHEAD_PCT: usize = 120;
 /// domain-invariant.
 const MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN: usize = 8;
 
+/// Allocation actually run through the nursery since the last full GC, in
+/// bytes (each minor adds the nursery's max capacity — the trigger fired
+/// because the nursery filled, so capacity ~= bytes collected).
+static NURSERY_BYTES_SINCE_FULL: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The configured nursery max in bytes (what one minor collects).
+fn nursery_max_bytes() -> usize {
+    use mmtk::util::options::NurserySize;
+    match *crate::mmtk().get_options().nursery {
+        NurserySize::Bounded { max, .. } => max,
+        NurserySize::ProportionalBounded { .. } => 64 * 1024 * 1024,
+        NurserySize::Fixed(b) => b,
+    }
+}
+
+/// GH#5 backstop budget, denominated in ALLOCATION rather than minors.
+///
+/// The old law ("a full GC every 8 minors per domain") made the forced-full
+/// rate scale INVERSELY with nursery size: at MMTK_NURSERY=Fixed:2MiB it fired
+/// a whole-heap collection every ~16 MiB allocated — 186 fulls on binarytrees
+/// where the default config does 6, i.e. a manufactured full-GC storm (W-night
+/// 2026-08-08, SHAPE.md: 141G cycles at 2 MiB, 46G with the storm suppressed).
+/// Vanilla's analogue paces majors by allocated words and is nursery-invariant.
+/// The budget below reproduces the GH#5-validated timing at the DEFAULT
+/// config (8 minors x 64 MiB per domain) and keeps it whatever the nursery is.
+///
+/// LXR note: this whole trigger block is gated on plan.generational(); LXR
+/// returns None there and is untouched — its reclamation is RC-driven and must
+/// never be forced through this path.
+fn cadence_budget_bytes() -> usize {
+    let ndomains = crate::active_plan::domain_addrs().len().max(1);
+    MATURE_PRESSURE_FULL_GC_NURSERY_CADENCE_PER_DOMAIN
+        * (64 * 1024 * 1024)
+        * ndomains
+}
+
 /// Cadence threshold for the current run: 8 minors per registered domain.
 fn cadence_threshold() -> usize {
     let ndomains = crate::active_plan::domain_addrs().len().max(1);
@@ -523,6 +560,7 @@ impl Collection<OCamlVM> for VMCollection {
                 // the mature-pressure baseline and the nursery-GC cadence counter.
                 LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
                 NURSERY_GCS_SINCE_FULL.store(0, Ordering::Relaxed);
+                NURSERY_BYTES_SINCE_FULL.store(0, Ordering::Relaxed);
             } else {
                 // Nursery (minor) GC. Force the NEXT collection to be a full heap GC
                 // if EITHER trigger fires:
@@ -538,13 +576,23 @@ impl Collection<OCamlVM> for VMCollection {
                 //     A full GC here is cheap precisely when this is the firing
                 //     trigger (small mature heap), so it does not hurt throughput.
                 let n = NURSERY_GCS_SINCE_FULL.fetch_add(1, Ordering::Relaxed) + 1;
+                let nb = NURSERY_BYTES_SINCE_FULL
+                    .fetch_add(nursery_max_bytes(), Ordering::Relaxed)
+                    + nursery_max_bytes();
                 let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
                 let floor = mature_pressure_floor_pages();
                 let threshold = baseline.saturating_add(
                     baseline.saturating_mul(MATURE_PRESSURE_OVERHEAD_PCT) / 100,
                 );
                 let by_mature = mature > floor && mature > threshold;
-                let by_cadence = n >= cadence_threshold();
+                // MMTK_FULL_GC_CADENCE (a minor count) remains the explicit
+                // experiment override; the DEFAULT backstop is allocation-
+                // denominated (see cadence_budget_bytes).
+                let by_cadence = if std::env::var_os("MMTK_FULL_GC_CADENCE").is_some() {
+                    n >= cadence_threshold()
+                } else {
+                    nb >= cadence_budget_bytes()
+                };
                 if by_mature || by_cadence {
                     g.force_full_heap_collection();
                 }
