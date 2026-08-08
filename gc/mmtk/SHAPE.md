@@ -594,3 +594,32 @@ Build-system trap (recorded): runtime/libasmrun.a's bundle rule tracks
 neither mmtk.n*.o nor the Rust staticlib — after ANY cargo change,
 rm -f runtime/libasmrun.a runtime/mmtk.n*.o before rebuilding, else stale
 GC code ships silently (cost us a phantom-panic chase tonight).
+
+### Round 11: the bt W-G dial measured; warmer; jitter economics
+
+**Jitter economics (user Q):** zero GC cost panel-wide (GC counts/copies/STW
+byte-identical jitter on/off). Only matmul fires fillers (2307; band = the
+2307 x 6160B rows; filler avg 2032B => ~33% overhead on that band, ~4.7MB
+total, 0 GCs either way). LU fires ZERO fillers — float arrays take an
+allocation entry that bypasses the alloc_shr hook (explains jitter's
+measured no-op on LU). 16-position random (j=4) beats 6-bit at mm768
+(5.79G/208M vs 5.98G/213M, ~8% waste) but REGRESSES mm800 (306M vs 253M):
+default stays 6-bit (robustness across sizes). Rotating deterministic pads
+(modes 24/25) measured worse than random (253M) — randomness is the point.
+
+**bt: the W<->G dial, measured (pt-attach mutator cycles vs vanilla-W 5.79G):**
+| config | mutCyc | W-ratio | gcCyc |
+|--------|--------|---------|-------|
+| default (61M) | 7.03G | 1.21 | 4.8G |
+| default + frontier warmer | 6.89G | 1.19 | 5.5G (incl warmer) |
+| Fixed:24M | 6.53G | 1.13 | 11.9G |
+| Fixed:16M (L3-resident) | 6.15G | **1.06** | 13.1G |
+
+An L3-resident (16M) frontier brings bt to near W-parity TODAY — at 2.7x G
+(premature promotion). The frontier warmer (helper thread prefetching ahead
+of the downward bump pointer, MMTK_FRONTIER_WARMER=1, default off) gives -2%
+at the default nursery — its prefetchw lands M-state in the helper's cache,
+so stores still pay a cross-core transfer — and adds NOTHING at 16M (already
+warm): clean cross-validation of the store-frontier mechanism. The dial
+confirms phase-2's shape: make G cheap at small nurseries (incremental
+mature) and the W side is already parity-grade.
