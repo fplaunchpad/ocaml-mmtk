@@ -661,3 +661,37 @@ matters more than G. Implementation: a plan mode merging
 plan/sticky/immix (minor path) with plan/concurrent/bactrian (full path) —
 multi-session; the sticky_immix_non_moving_nursery build + knobs above are
 the measurable stand-in until then.
+
+### Round 13: the bump granule — W-parity reached with vanilla's own methodology
+
+Root cause chain closed: mm's placement regimes (739/903/213M LLC-loads) were
+the 32KB bump granule's TAIL-SKIP — ~5 rows fit, ~2KB skipped, every block
+32KB-aligned => 5-position set phase-lock. Vanilla's flat 57M comes from
+malloc-style CONTINUOUS size-pitch (its sizeclass pools cap below this band).
+mi-malloc pools (marksweep_as_nonmoving, release-path bug fixed in cec95292be)
+measured 904M — whole-line slot rounding resonates; pools are NOT vanilla's
+mechanism here. The faithful fix: a larger bump granule => continuous pitch.
+
+MMTK_BUMP_BLOCK_KB (bumpallocator, default now 512; upstream was 32): at 512KB
+matmul lands EXACTLY on vanilla's floor (57.1M; mm800 64.5M vs vanilla 64M) —
+and the rarer TLAB refills pay every allocating bench 2-10% of mutator cycles.
+
+**FINAL W-cycle certification (new defaults; pt-attach, vanilla-W refs):**
+
+| bench | mutCyc | vanilla-W | W-ratio |
+|-------|--------|-----------|---------|
+| kb | 3.86G | 3.95G | **0.98** |
+| binarytrees @ Fixed:16M | 5.84G (3 reps ±0.01) | 5.79G | **1.009 — PARITY** |
+| spectralnorm | 5.13G | 4.89G | 1.05 |
+| matmul-768 | 5.35G | 4.66G | 1.15 |
+| binarytrees (default nursery) | 6.73G | 5.79G | 1.16 |
+| LU | 6.18G | 5.33G | 1.16 |
+
+All with vanilla's methodology intact: copying nursery, allocation-paced
+fulls, malloc-like continuous placement — no scheme departures (sticky data
+retained as diagnostic only). Outputs identical everywhere.
+
+Remaining phase-2 (G-side): bt@n16's gcCyc 14.2G (promotion copies at ~1.6k
+ins/object vs vanilla's ~200-400 + full marks) — the per-slot trace-path slim
+and lazy mature reclamation continue as the G work items; W is done pending
+that (the n16 W-parity config costs G until then).
