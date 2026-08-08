@@ -553,3 +553,15 @@ streaming L2/L3 latency at the 64 MiB nursery — the aging project.
 W-cycle scoreboard after the two architectural changes (pacer + adaptive
 marking): bt 1.24, kb ~1.04-1.12, LU 1.11, sp 1.08, mm 1.31.
 W-instructions: 0.98-1.04 everywhere.
+
+### Round 9: survivor aging — implemented, correct, negative for bt
+
+MMTK_NURSERY_AGE=1 (experimental, default off; mmtk-core fork bdcd5356f9).
+Church, bt-20: default nursery 12.10G->12.46G cycles; Fixed:4MiB
+31.09G->33.12G (fulls 22->14 but copies 34.5M->50.9M). Outputs identical;
+OFF-mode byte-identical. bt's survivor lifetimes exceed any nursery epoch —
+age-1 double-copies. The W-floor insight sharpens: vanilla's tiny warm window
+is affordable because its mature reclamation is incremental — premature
+promotion is cheap there. Next structural lever: incremental mature sweep,
+not aging. Full design + correctness map (finalizer fix shipped, remset hole
+open) in NOTES 2026-08-08 (night).

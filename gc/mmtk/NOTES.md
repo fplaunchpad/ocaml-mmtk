@@ -5,6 +5,48 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-08 (night) — survivor aging: implemented, correct, and a measured negative for bt
+
+MMTK_NURSERY_AGE>=1 (default 0 = off, byte-identical) adds a semispace aged
+pair inside the Bactrian plan: plain minors copy nursery survivors YOUNG into
+the aged to-space; the previous to-space's residents (age 1) promote; the pair
+flips per aging minor. Marking-fused pauses and Fulls promote the whole young
+generation — the SATB barrier skips young objects, which is sound only if no
+young object survives a marking snapshot. Every young-check (write barrier,
+SATB drop, concurrent-marking skip) routes through is_object_in_nursery,
+which now includes the aged pair.
+
+Shipped correctness fix (shared code, flag-gated): FinalizableProcessor's
+nursery_index skip assumed survived-one-minor => mature+immobile; an aged
+survivor moves again at the next minor -> stale candidate -> finalizer on
+freed memory (crashed via stdio channel finalizers). New defaulted
+GenerationalPlan::nursery_keeps_movable_survivors() (true only during aging
+Bactrian minors) makes the scan re-examine all candidates but judge only
+young ones. LXR and all stock plans take the old path verbatim.
+
+KNOWN HOLES while experimental (do not default on):
+1. Remset: ProcessModBuf re-unlogs remembered mature objects after a minor —
+   sound only when no mature->young edge survives. A mature object mutated to
+   point at an aged survivor is forgotten by the next minor. Unsound for
+   mutation-heavy workloads (kb!); binarytrees (no post-construction
+   mutation) is unaffected. Fix sketch: a plan-side slot remset populated in
+   process_slot when a traced slot's new target is young and the slot itself
+   is not young-owned; self-cleaning per minor; cleared at Full.
+2. OCaml's finalise-table young/old split (finalise.c) bakes in the same
+   promoted-after-one-minor invariant.
+
+MEASURED (church, bt-20, heap 192, T=1, outputs identical everywhere):
+default nursery 12.10G -> 12.46G cycles (copies 5.2M -> 7.2M);
+Fixed:4MiB 31.09G -> 33.12G (fulls 22 -> 14, but copies 34.5M -> 50.9M).
+NEGATIVE for binarytrees: its survivors live for a whole depth-class
+iteration, far beyond one aging step, so age-1 double-copies everything.
+Conclusion: bt's W-floor is not an aging problem — vanilla wins its tiny warm
+window because its INCREMENTAL mature reclamation makes premature promotion
+cheap. The next structural lever for bt-class workloads is cheaper mature
+reclamation (incremental/concurrent sweep of promoted garbage), not aging.
+Aging remains available (and sound on non-mutating workloads) for
+medium-lifetime programs once hole 1 is closed.
+
 ## 2026-08-08 (later) — Bactrian adaptive marking: STW-mark small live sets
 
 A concurrent marker streaming a small live set through the shared LLC while
