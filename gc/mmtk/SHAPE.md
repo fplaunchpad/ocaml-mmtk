@@ -489,3 +489,24 @@ kb 13.1% vs 10.8%.
    stalls_mem_any 1.42G -> vanilla-like share.
 3. Promotion scatter: deprioritized — loads are L1-clean; revisit only after
    the store side is fixed.
+
+### Rounds 5-6: diagnosis locked — store-buffer stalls; prefetch refuted; worker cap
+
+- **resource_stalls.sb (store-buffer full) is the unified residual mechanism**:
+  LU 14.9% of cycles vs vanilla 1.4%; spectralnorm 7.6% vs 0.1%; bt 4.4% vs
+  1.1%. LU's profile is >85% the same three OCaml functions on both runtimes —
+  the same code, slower, stalled on stores. (stalls_mem_any missed this: it
+  only counts stalls with pending LOADS; SB-full stalls show in stalls_total.)
+- **TLAB prefetchw refuted**: warming the fresh 32KB block at refill HURTS
+  everywhere (LU 7.38G -> 9.14G, kb 5.24 -> 5.62, bt 12.98 -> 13.46) — burst
+  prefetch floods the fill buffers. Knob stays default-off (MMTK_TLAB_PREFETCH).
+- **Worker cap for d=8** (par_binarytrees, 14 cores): T=4 -> 2.17s vs T=8 ->
+  2.42s (vanilla 1.27s). Policy: domains + workers <= physical cores; T=4-6
+  optimal at d=8. Bactrian already BEATS vanilla at d=1-4 (0.83-0.84x).
+- Jitter entropy: 6 bits optimal (j7/j8 slightly worse on matmul).
+- **Asymptote statement**: with placement + THP + worker-cap banked, the
+  remaining 1.1-1.4x cycle ratios on allocating benches are the store-frontier
+  cost of a 64 MiB streaming nursery vs vanilla's L2-resident 2 MiB arena.
+  Erasing it requires a small nursery, which requires cheap collections
+  (premature-promotion handling, park/futex churn, packet overhead) — the next
+  engineering phase, in mmtk-core scheduling, not an env knob.
