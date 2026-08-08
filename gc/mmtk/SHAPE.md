@@ -539,3 +539,17 @@ small nurseries usable thanks to the allocation-denominated pacer (78ab9698a).
   minors before promotion) to make a small warm nursery viable for
   survivor-heavy workloads — a Bactrian-plan-local change (keep out of
   LXR paths), multi-session scale.
+
+### Round 8: adaptive marking lands — bt W-cyc 1.355 -> 1.239
+
+Bactrian now STW-marks when mature < MMTK_CONC_MARK_MIN_MATURE_MB (default
+256; plan-local, mmtk-core fork commit 6d7588c4c2). Re-certified splits
+(hybrid attribution): bt W-ins 0.978 (SATB barrier instructions gone from the
+marking windows), W-cyc 1.239, G-cyc 5.08 vs vanilla 5.72. kb reads 1.117
+this round (1.04-1.12 = the sampled-split noise band). Remaining bt W-cyc
+excess ~1.4G = store frontier (SB-full 0.45G) + post-GC warmth loss +
+streaming L2/L3 latency at the 64 MiB nursery — the aging project.
+
+W-cycle scoreboard after the two architectural changes (pacer + adaptive
+marking): bt 1.24, kb ~1.04-1.12, LU 1.11, sp 1.08, mm 1.31.
+W-instructions: 0.98-1.04 everywhere.
