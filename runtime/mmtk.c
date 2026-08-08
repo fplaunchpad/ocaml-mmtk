@@ -345,6 +345,7 @@ void caml_mmtk_init(void)
         int bits = atoi(jv);
         /* 0 disables; 1 = the historical on-switch (5 bits); 2..8 explicit. */
         if (bits == 0) caml_mmtk_alloc_jitter = 0;
+        else if (bits >= 16 && bits <= 23) caml_mmtk_alloc_jitter = bits;
         else caml_mmtk_alloc_jitter = (bits >= 2 && bits <= 8) ? bits : 5;
       }
     }
@@ -492,8 +493,21 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
        (mm800: LLC-loads 140M -> 217M). 0..31 lines spreads consecutive
        large objects across 32 L2 sets; successive pads accumulate, so
        absolute offsets decorrelate as a random walk. */
-    mlsize_t pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next()
-                                      & ((1u << caml_mmtk_alloc_jitter) - 1));
+    mlsize_t pad;
+    if (caml_mmtk_alloc_jitter >= 16) {
+      /* Deterministic mode (MMTK_ALLOC_JITTER=17..23): a FIXED pad of L =
+         (value-16) cache lines before every >=2KB allocation. A constant
+         odd-line total pitch steps the cache set index by an odd amount per
+         object — coprime with every power-of-two set count (L1/L2/L3) — so
+         column walks over same-sized rows cover sets uniformly, and unlike
+         the random mode the pitch stays constant (stride-predictable). */
+      int lines = caml_mmtk_alloc_jitter - 16;
+      if (lines <= 0) return;
+      pad = 8 * (mlsize_t)lines - 1;    /* filler + header = exactly L lines */
+    } else {
+      pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next()
+                               & ((1u << caml_mmtk_alloc_jitter) - 1));
+    }
     (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
                            CAML_MMTK_SEM_DEFAULT);
     atomic_fetch_add_explicit(&caml_mmtk_jitter_fills, 1,
