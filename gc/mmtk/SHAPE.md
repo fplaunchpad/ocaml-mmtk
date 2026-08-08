@@ -565,3 +565,32 @@ is affordable because its mature reclamation is incremental — premature
 promotion is cheap there. Next structural lever: incremental mature sweep,
 not aging. Full design + correctness map (finalizer fix shipped, remset hole
 open) in NOTES 2026-08-08 (night).
+
+### Round 10: bt and matmul endgames — mechanisms exhausted, fixes named
+
+**binarytrees (W-cyc 1.239).** Mutator cycles are INVARIANT to: worker cache
+domain (cross-socket L3: 7.05G -> 7.03G), GC count and nursery size (57 GCs /
+61MiB vs 25 GCs / ~128MiB: 7.05G -> 7.09G). The gap is purely cold-frontier
+allocation stores; no collector placement or pacing changes it. Bridging it
+requires the warm-window architecture (small nursery affordable only with
+incremental mature reclamation) — confirmed as the phase-2 target.
+
+**matmul (W-cyc ~1.31-1.37).** Placement under bump allocation is chaotically
+regime-dependent: the SAME binary measured LLC-loads regimes of 213M (current
+default: nursery bump + random jitter), 739M (pre-aging layout, unjittered),
+and 903-1021M (deterministic fixed pads 1..7 lines AND nonmoving-Immix
+routing). Vanilla's 57M floor comes from size-class POOLS. Attempted the
+faithful fix — marksweep_as_nonmoving + MMTK_MEDIUM_NONMOVING routing
+(>=2056B, the stock Max_young_wosize boundary, straight to a swept free-list
+space exactly like stock) — and it PANICS under Bactrian's fused marking
+pauses: MarkSweepSpace::end_of_gc epilogue underflow (pending_release_packets
+-1; InitialMark and FinalMark both drive common-space release). Fixing that
+accounting = the matmul endgame. Routing to the DEFAULT nonmoving space
+(Immix bump) instead is measured counterproductive (903M). Random jitter
+remains the robust guard (protects the catastrophic regimes; cannot reach
+the pool floor).
+
+Build-system trap (recorded): runtime/libasmrun.a's bundle rule tracks
+neither mmtk.n*.o nor the Rust staticlib — after ANY cargo change,
+rm -f runtime/libasmrun.a runtime/mmtk.n*.o before rebuilding, else stale
+GC code ships silently (cost us a phantom-panic chase tonight).
