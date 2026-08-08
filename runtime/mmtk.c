@@ -487,6 +487,9 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 static void *caml_mmtk_frontier_warmer(void *arg)
 {
   (void)arg;
+#ifdef __linux__
+  pthread_setname_np(pthread_self(), "mmtk-warmer");
+#endif
   const size_t WINDOW = 24 * 1024;           /* lines ahead of the frontier */
   for (;;) {
     caml_domain_state *d = caml_mmtk_warm_dom0;
