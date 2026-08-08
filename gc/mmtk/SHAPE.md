@@ -623,3 +623,41 @@ so stores still pay a cross-core transfer — and adds NOTHING at 16M (already
 warm): clean cross-validation of the store-frontier mechanism. The dial
 confirms phase-2's shape: make G cheap at small nurseries (incremental
 mature) and the W side is already parity-grade.
+
+### Round 12 (phase-2 scouting): the decomposition, the existence proof, the design
+
+**Decomposition of the n16 G-explosion (bt-20):** promotion COPIES dominate
+(5.2M -> 18.9M objects; fulls only 7 -> 12). Classic incremental sweep would
+fix ~nothing; the copies themselves are the cost. Aging at n16: marginal.
+GenImmix-n16 == Bactrian-n16 (concurrent machinery ~1G extra).
+
+**Existence proofs (StickyImmix + sticky_immix_non_moving_nursery feature —
+in-place young marking, objects copied = 0 everywhere, outputs identical):**
+
+| config | W (mutCyc) | G (gcCyc) | whole | vs vanilla whole 11.5G |
+|--------|-----------|-----------|-------|------------------------|
+| Bactrian default | 7.02G | 4.80G | 11.8G | 1.03 |
+| sticky-nm default | 7.22G | 3.42G | 10.6G | 0.92 |
+| **sticky-nm h384 cadence128** | 7.17G | **1.97G** | **9.1G** | **0.79** |
+| Bactrian copy-nursery n16 | 6.15G | 13.2G | 19.3G | 1.68 |
+| sticky-nm n16 c128 | 6.80G | 7.40G | 14.2G | 1.23 |
+
+- In-place minors kill the promotion-copy term entirely; at default budget +
+  headroom + relaxed cadence, bt runs at 79% of vanilla's total cycles
+  (1 full GC; RSS ~172MB vs vanilla o500 ~140MB — the same space-for-time
+  trade vanilla itself makes via space_overhead).
+- The W dial persists under sticky (6.80 at n16) but survivors fragment
+  recycled lines, so it warms less than the copying nursery (6.15).
+- Panel spots: sticky-nm slightly WORSE than Bactrian on kb/LU/sp (in-place
+  garbage -> more pressure fulls) — the win is specific to high-promotion
+  workloads; a hybrid/policy choice, not a blanket replacement.
+
+**Phase-2 design (Bactrian v2 = "concurrent sticky" mode):** in-place sticky
+young marking (no copy nursery) fused with Bactrian's existing concurrent /
+adaptive-STW full marking, byte-denominated cadence, and a mature-headroom
+policy. Expected from the proofs above: bt-class whole-process BELOW vanilla
+at W ~1.2, with the W dial (small young budget) available where W-parity
+matters more than G. Implementation: a plan mode merging
+plan/sticky/immix (minor path) with plan/concurrent/bactrian (full path) —
+multi-session; the sticky_immix_non_moving_nursery build + knobs above are
+the measurable stand-in until then.
