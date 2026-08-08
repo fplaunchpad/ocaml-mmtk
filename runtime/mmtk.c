@@ -18,6 +18,8 @@
 #define CAML_INTERNALS
 
 #include <stdlib.h>
+#include <pthread.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 /* usleep: caml_mmtk_quiesce_running_domains poll wait */
@@ -91,6 +93,8 @@ int caml_mmtk_collection_enabled(void)
 int caml_mmtk_tlab = 0;
 
 static int caml_mmtk_initialised = 0;
+static void *caml_mmtk_frontier_warmer(void *arg);
+static caml_domain_state *caml_mmtk_warm_dom0;
 
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
@@ -348,6 +352,13 @@ void caml_mmtk_init(void)
       /* Value = entropy BITS for the line-granular pad (0..2^bits-1 lines).
          "1" (the historical on-switch) means the default 5 bits = 32 lines;
          2..8 select the range explicitly (6 -> 64 lines, up to 4 KiB pads). */
+      if (getenv("MMTK_FRONTIER_WARMER") != NULL
+          && atoi(getenv("MMTK_FRONTIER_WARMER")) > 0) {
+        pthread_t t;
+        caml_mmtk_warm_dom0 = Caml_state;
+        if (pthread_create(&t, NULL, caml_mmtk_frontier_warmer, NULL) == 0)
+          pthread_detach(t);
+      }
       if (getenv("MMTK_MEDIUM_NONMOVING") != NULL)
         caml_mmtk_medium_nonmoving = atoi(getenv("MMTK_MEDIUM_NONMOVING"));
       if (getenv("MMTK_TLAB_PREFETCH") != NULL)
@@ -464,6 +475,38 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 #endif
 }
 
+/* MMTK_FRONTIER_WARMER=1: a helper thread that prefetches (write-intent) the
+   cache lines JUST BELOW domain 0's bump pointer — the lines the mutator is
+   about to allocate into. OCaml bumps DOWNWARD, so the warm window is
+   [young_ptr - WINDOW, young_ptr). The mutator's allocation stores then hit
+   lines already in (or in flight to) the cache hierarchy instead of paying a
+   cold RFO each — the store-frontier mechanism measured in SHAPE.md rounds
+   3b/6. Reads are racy-by-design (young_ptr moves; prefetch of any mapped
+   line is safe) and the thread only issues prefetches — never stores.
+   Single-domain experiment: warms domain 0 only. */
+static void *caml_mmtk_frontier_warmer(void *arg)
+{
+  (void)arg;
+  const size_t WINDOW = 24 * 1024;           /* lines ahead of the frontier */
+  for (;;) {
+    caml_domain_state *d = caml_mmtk_warm_dom0;
+    if (d != NULL) {
+      char *hi = (char *)d->young_ptr;
+      char *lo = (char *)d->young_start;
+      if (hi != NULL && lo != NULL && hi > lo) {
+        char *from = hi - WINDOW > lo ? hi - WINDOW : lo;
+        for (char *a = (char *)((uintptr_t)from & ~63ull); a < hi; a += 64)
+          __builtin_prefetch(a, 1, 2);       /* write intent, into L2 */
+      }
+    }
+    {
+      struct timespec ts = { 0, 8000 };      /* ~8us cadence */
+      nanosleep(&ts, NULL);
+    }
+  }
+  return NULL;
+}
+
 /* Shape experiments (see SHAPE.md, W-tax mechanisms).
    MMTK_LOS_THRESHOLD (bytes) re-routes "large-ish" objects to the LOS instead
    of the nursery bump path. Rationale: bump allocation places big regular
@@ -508,7 +551,20 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
        large objects across 32 L2 sets; successive pads accumulate, so
        absolute offsets decorrelate as a random walk. */
     mlsize_t pad;
-    if (caml_mmtk_alloc_jitter >= 16) {
+    if (caml_mmtk_alloc_jitter == 24 || caml_mmtk_alloc_jitter == 25) {
+      /* Rotating deterministic pad: step the target cache-set position by one
+         line per large allocation (mode 24: 64 positions ~ avg 31.5 lines
+         waste; mode 25: 16 positions ~ avg 7.5 lines ~ 8% on 6KB objects).
+         Deterministic spread without randomness; robust to the 32KB
+         block-alignment phase reset that defeats constant pads (each block's
+         interior continues the rotation, so blocks get different phases). */
+      static _Atomic unsigned caml_mmtk_rot = 0;
+      unsigned mask = caml_mmtk_alloc_jitter == 24 ? 63 : 15;
+      unsigned k = atomic_fetch_add_explicit(&caml_mmtk_rot, 1,
+                                             memory_order_relaxed) & mask;
+      if (k == 0) return;
+      pad = 8 * (mlsize_t)k - 1;
+    } else if (caml_mmtk_alloc_jitter >= 16) {
       /* Deterministic mode (MMTK_ALLOC_JITTER=17..23): a FIXED pad of L =
          (value-16) cache lines before every >=2KB allocation. A constant
          odd-line total pitch steps the cache set index by an odd amount per
