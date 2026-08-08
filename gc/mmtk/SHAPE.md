@@ -413,3 +413,41 @@ ops, alloc-retry, or unaccounted slow paths). R2E perf-record profiles nur2
 by comm+symbol to name it. Note vanilla-stock bt at THIS operating point is
 already at wall parity (3613 vs 3630ms) — the bt problem is the 1.14x cycles
 and what happens when GC count rises.
+
+### Round 2: per-thread decomposition — the bt W-gap is IPC/latency, not misses
+
+Per-thread perf attach (stock configs, heap 192, T=1):
+
+| cell | mutator cyc | worker cyc | mutator ins | worker ins | mut IPC |
+|------|------------|-----------|------------|-----------|---------|
+| vanilla bt20 (1 thread, GC inline) | 11.30G | — | 29.91G | — | 2.65 blended |
+| Bactrian bt20 | 7.92G | 5.00G | 14.17G | 10.64G | 1.79 |
+| Bactrian bt20 nur8 | 19.01G | 26.75G | 22.97G | 61.83G | 1.21 |
+| vanilla kb50 | 4.29G | — | 7.62G | — | 1.77 blended |
+| Bactrian kb50 | 4.40G | 0.78G | 6.65G | 1.33G | 1.51 |
+
+- Instruction closure: Bactrian program 14.2G + worker 10.6G = 24.8G vs vanilla
+  program ~14G + inline GC ~16G = 29.9G. The 0.82x whole-process ins ratio is
+  entirely collector-side instruction economy.
+- bt W-gap = the same ~14G program instructions at IPC 1.79 vs ~2.65 -> mutator
+  7.9G vs ~5.2G cycles (1.5x), matching corrW 2.46s/1.65s from /proc. Two
+  independent instruments agree.
+- Bactrian's mutator has FEWER L1 misses, LLC loads, and similar dTLB than
+  vanilla on bt — stalls are latency, not miss counts. Hypothesis: PROMOTION
+  SCATTER. bt allocates trees depth-first (nursery = parent-child adjacent);
+  vanilla oldify copies survivors first-child-first, preserving spine
+  adjacency; MMTk work-packet tracing copies in BFS batches, so promoted trees
+  lose adjacency and every hop is an unprefetchable dependent load. To test:
+  stall-cycle + hit-level counters (cycle_activity.stalls_mem_any,
+  mem_load_retired.l1_hit/l2_hit/l3_hit) mutator-side; then, if confirmed, a
+  scan-order experiment in the binding (process field 0 eagerly a la oldify).
+- kb W ratio ~1.1x (4.4G-mutGC vs ~3.7G) — near done.
+
+### Tiny-nursery mutator CPU: solved
+
+strace: futex calls scale 56 -> 20,511 (bt16 stock vs 2MiB nursery); the perf
+kernel self-time sits in the syscall ENTRY trampoline (5 buckets within 0x200
+bytes) + Rust park-edge bookkeeping (is_mutator, RUNNING-set HashSet hash_one
+visible at ~1.5%/1.2%). With 1864 GCs the park/wake machinery + full-GC storms
+(186 fulls from premature promotion) explain the 8x mutator CPU inflation.
+No single hot function; the fix is "don't collect 1864 times", not micro-opt.
