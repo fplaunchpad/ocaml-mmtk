@@ -451,3 +451,41 @@ bytes) + Rust park-edge bookkeeping (is_mutator, RUNNING-set HashSet hash_one
 visible at ~1.5%/1.2%). With 1864 GCs the park/wake machinery + full-GC storms
 (186 fulls from premature promotion) explain the 8x mutator CPU inflation.
 No single hot function; the fix is "don't collect 1864 times", not micro-opt.
+
+### Round 3/3b: panel three-way, THP, and the stall verdict
+
+Whole-process cycle ratios vs vanilla (r1, heap 192, T=1): bt 1.14, nbody 1.00,
+fannkuch 1.03, spectral 1.17, mandelbrot 0.98, matmul 1.89 -> 1.36 (jitter),
+LU 1.43 (jitter-neutral, as predicted), kb 1.20. Output gates passed on all 8;
+par_binarytrees d=4 sane.
+
+THP (MMTK_TRANSPARENT_HUGEPAGES=true, supported natively by mmtk-core's env
+reader): uniform 2-3.5% win — bt 13.10G->12.81G, kb 5.43G->5.28G, LU
+7.64G->7.38G; THP + 8MiB nursery on LU = 7.00G with cache-misses erased
+(155M -> 1.0M). 6-bit jitter >= 5-bit everywhere (mm800 LLC 116M -> 72M).
+
+**Stall verdict (round 3b) — scatter hypothesis REFUTED, store-frontier
+confirmed.** Bactrian bt mutator (pt attach): loads hit L1 at 98.9%
+(mem_load_retired: L1hit 3.69G, L2hit 0.04G, L3hit ~0) — pointer chasing is
+FINE. Yet cycle_activity.stalls_mem_any = 1.42G (18% of mutator cycles;
+stalls_total 2.31G = 29%). Memory stalls with a clean load side = STORE
+stalls: bump-allocation stores into never-touched cold lines drain through
+the store buffer at RFO latency, invisible to load counters. One mechanism
+now covers LU (155M demand misses), bt (IPC 1.80 vs 2.65), kb (L2 hits 2x):
+vanilla's 2MiB arena keeps the write frontier L2-resident; Bactrian's 64MiB
+stream cannot. Whole-process stall shares: bt 16.4% vs 8.3% (stallMem/cyc),
+kb 13.1% vs 10.8%.
+
+**Defaults changed (commit 683521d7a):** pitch jitter ON at 6 bits
+(MMTK_ALLOC_JITTER=0 disables), THP ON (explicit env still honoured).
+
+**Engineering plan from here (ranked):**
+1. Cheap collections -> affordable small nursery -> warm store frontier.
+   The blockers measured tonight: park/wake futex churn (56 -> 20.5k calls),
+   full-GC storms from premature promotion (6 -> 186 fulls at 2MiB), worker
+   packet overhead (gcIns 10.6G -> 185.6G across the sweep).
+2. TLAB/store-frontier experiments: prefetchW-ahead on refill, block reuse
+   order (LIFO warm blocks first), non-temporal fills. Target: bt mutator
+   stalls_mem_any 1.42G -> vanilla-like share.
+3. Promotion scatter: deprioritized — loads are L1-clean; revisit only after
+   the store side is fixed.
