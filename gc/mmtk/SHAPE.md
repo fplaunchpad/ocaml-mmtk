@@ -510,3 +510,32 @@ kb 13.1% vs 10.8%.
   Erasing it requires a small nursery, which requires cheap collections
   (premature-promotion handling, park/futex churn, packet overhead) — the next
   engineering phase, in mmtk-core scheduling, not an env knob.
+
+### Round 7 (post-pacer): the definitive WORK-ONLY table
+
+Metric per the operating decision: W = work-only, symbol-classified
+symmetrically (gcsplit; barriers/alloc-slow = G on both sides), hybrid
+attribution on Bactrian (worker comm = G by identity, mutator by symbol).
+Configs: bt/kb/mm stock defaults (jitter+THP), lu Fixed:4MiB, sp Fixed:8MiB —
+small nurseries usable thanks to the allocation-denominated pacer (78ab9698a).
+
+| bench | W-ins ratio | W-cyc ratio | vG-cyc | dG-cyc |
+|-------|------------|-------------|--------|--------|
+| binarytrees | **1.022** | 1.355 | 5.72G | 5.12G |
+| kb | **1.022** | **1.039** | 0.57G | 0.82G |
+| LU | **1.042** | 1.110 | 0.01G | 0.76G |
+| spectralnorm | **1.028** | **1.076** | 0.00G | 0.32G |
+| matmul | **1.005** | 1.311 | 0.02G | 0.04G |
+
+- **W-instruction parity achieved: 1.005-1.042 across the panel.** The
+  mutator executes vanilla's work instruction-for-instruction (jitter fillers
+  and refill slow paths classified G, as on the vanilla side).
+- W-cycles: kb and spectralnorm at ~parity; LU 1.11 (post-GC warmth loss over
+  3282 minors); the stragglers are bt 1.355 (store frontier at the 64 MiB
+  nursery — small nursery blocked by real survivors/premature promotion) and
+  matmul 1.311 (residual conflict-miss stalls after jitter).
+- Note bt's collector is now CHEAPER than vanilla's in cycles (5.12 vs 5.72G).
+- The bt/mm W-cycle path forward is architectural: nursery AGING (survive N
+  minors before promotion) to make a small warm nursery viable for
+  survivor-heavy workloads — a Bactrian-plan-local change (keep out of
+  LXR paths), multi-session scale.
