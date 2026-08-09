@@ -815,3 +815,41 @@ periodic 6192B (96.75-line) pitch; (3) it tolerates the 4KB-page STLB cost
 exact-fit pool pretenuring for the medium band (mi-bins failed on slot
 rounding; an exact-size boundary-tag pool would replicate malloc), bundled
 with the pools/lazy-sweep phase-2 work.
+
+### Round 19: the matmul residual — my placement story REFUTED by experiment
+
+Challenged (rightly) on whether "MMTk blocked allocation vs vanilla exact-fit
+malloc" was established or hallucinated. Verification campaign:
+
+CONFIRMED: vanilla mallocs this band individually (shared_heap.c:504/481,
+SIZECLASS_MAX=128 words; ltrace: 914 mallocs >=2KB for matmul-300 vs OUR 0 —
+MMTk never calls malloc for objects).
+
+REFUTED — the causal test: MMTK_TEST_MALLOC_MEDIUM (measurement instrument:
+>=2056B blocks via plain malloc as out-of-heap foreign objects — literal
+glibc placement, checksums identical) changed NOTHING: 5.73-5.78G vs stock
+5.82-5.88G, vanilla 4.65-4.71G. Exact-fit placement is NOT the mechanism;
+the pools/malloc_ms quest would NOT close matmul.
+
+Also refuted this round: DSB/MITE frontend (fork binary runs the loop from
+the legacy decoder — real, but alignment-nudged pads restoring full DSB
+service left cycles unchanged); DSB+malloc combined (5.59G best, gap
+persists); branch misses (0.7M vs 0.9M); uop replays (issued==executed==
+retired; ours retires FEWER uops); frequency (3.18 vs 3.12 GHz measured via
+task-clock); address-layout lottery (10 ASLR draws per side: v 4.48-4.71,
+d 5.52-5.88 — disjoint distributions, systematic).
+
+VERDICT: MMTK_PLAN=NoGC = 5.80G — the residual is identical across NoGC/
+Immix/GenImmix/Bactrian (5.6-6.1G). It is ambient to the FORK RUNTIME
+PROCESS, independent of GC, barriers, plan, placement, alignment, frequency
+and layout, concentrated on one dependent-load chain (identical 101-instr
+function, byte-for-byte). Cause below PMU visibility; next tools would be
+uncore PMU / VTune / pagetable-structure analysis — a separate
+investigation, NOT a GC work item.
+
+Consequences: (1) matmul's ~1.2 W-ratio should be reported as a fork-runtime
+ambient effect, not a GC/placement cost — the GC-controlled dimensions are
+at parity (LLC floor, counts equal); (2) medium-object pretenuring loses its
+matmul justification; its remaining (real) value is liberating the nursery
+dial (mm@16M nursery = 8.9x catastrophe stands); (3) 17 falsified hypotheses
+are the strongest possible evidence the instruments and methodology work.
