@@ -1315,6 +1315,17 @@ void caml_poll_gc_work(void)
        this domain has passed a safepoint. Plain atomic store, no lock. */
     caml_mmtk_quiesce_ack(d);
     caml_reset_young_limit(d);
+    /* An EXHAUSTED TLAB re-arms the safepoint trap: young_ptr sits at/below
+       young_limit and only the allocation path (caml_alloc_small_dispatch)
+       ever refills. An allocation-free compute phase after a draining
+       allocation then traps on EVERY loop back-edge poll, through the whole
+       caml_call_gc machinery, doing nothing — measured 453M traps / 82G
+       mutator instructions on matmul-768 with a 16MB nursery ("the 8.9x
+       catastrophe", SHAPE.md round 20). Refill here to clear the trap; if
+       the refill fails (heap genuinely exhausted) leave state as-is — the
+       next real allocation raises Out_of_memory as before. */
+    if (Caml_check_gc_interrupt(d))
+      (void)caml_mmtk_refill_tlab(d, Whsize_wosize(0));
     return;
   }
 
