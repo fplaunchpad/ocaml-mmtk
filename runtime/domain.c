@@ -1324,8 +1324,22 @@ void caml_poll_gc_work(void)
        catastrophe", SHAPE.md round 20). Refill here to clear the trap; if
        the refill fails (heap genuinely exhausted) leave state as-is — the
        next real allocation raises Out_of_memory as before. */
-    if (Caml_check_gc_interrupt(d))
-      (void)caml_mmtk_refill_tlab(d, Whsize_wosize(0));
+    if (Caml_check_gc_interrupt(d)) {
+      static _Atomic long caml_mmtk_poll_traps = 0, caml_mmtk_poll_refill_fail = 0;
+      int ok = caml_mmtk_refill_tlab(d, Whsize_wosize(0));
+      if (!ok) caml_mmtk_poll_refill_fail++;
+      if (getenv("MMTK_POLL_DEBUG") != NULL) {
+        long n = ++caml_mmtk_poll_traps;
+        if (n <= 5 || n % 10000000 == 0)
+          fprintf(stderr,
+                  "[poll-debug] trap#%ld refill=%d young=[%p,%p) ptr=%p "
+                  "trigger=%p limit=%#lx fails=%ld\n",
+                  n, ok, (void *)d->young_start, (void *)d->young_end,
+                  (void *)d->young_ptr, (void *)d->young_trigger,
+                  (unsigned long)atomic_load_relaxed(&d->young_limit),
+                  (long)caml_mmtk_poll_refill_fail);
+      }
+    }
     return;
   }
 
