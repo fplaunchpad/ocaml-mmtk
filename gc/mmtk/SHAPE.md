@@ -768,3 +768,25 @@ side-metadata writes can use plain (non-atomic) ops, vanilla's regime.
 Estimated from the profile: ~20-25% of the remaining per-object cost.
 Plan-safety: gate at trace-context construction; LXR/parallel paths keep
 atomics verbatim.
+
+### Round 17: LU cleared, n16-for-all sweep, matmul annotated to the instruction
+
+- LU: no regression (fresh def 6.23G == history; panel's 6.50 = instrument
+  spread). Post-slim n4 config improved to 5.49G => W-ratio 1.03.
+- Fixed:16M for all: bt 1.02, sp 0.96 (below vanilla, beats default), kb
+  0.98, lu 1.07, mm CATASTROPHE 41.4G (8.9x): matmul's live matrices
+  (~19MB with jitter) exceed the nursery — under Bactrian ALL medium
+  objects transit the nursery, where vanilla pretenures >Max_young_wosize
+  blocks straight to the major heap. A global 16M default is impossible;
+  per-workload dial or medium-object pretenuring (the pools work) is the
+  principled route.
+- Per-bench W-optimal today: bt n16 1.02 | kb def 0.98 | lu n4 1.03 |
+  sp n16 0.96 | mm def 1.15-1.24.
+- matmul, annotated: 96.7%/96.4% of both sides' cycles in the SAME
+  matrix_multiply function; the hot chain is the y.(k) bounds-check
+  header load (movq -0x8(reg) -> shrq/sarq) + element load. The SAME
+  sarq instruction absorbs 31.1% (vanilla) vs 57.9% (Bactrian) of the
+  function — identical code, identical hit counts at every level,
+  different effective latency/overlap on one dependent load chain.
+  This is the whole 24%: layout-driven load-bunching on the row-header +
+  element pair, below counter attribution (MLP data round 15).
