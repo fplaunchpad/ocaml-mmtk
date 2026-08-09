@@ -744,3 +744,27 @@ SFT work, so the filter can only win on scans where slot-buffer traffic
 dominates; none measured. Next G item: the per-object COPY path (alloc_copy
 dispatch + post_copy metadata, ~1.6k ins/object vs vanilla oldify's
 ~200-400) — the dominant remaining term at n16.
+
+### Round 16: copy-path economics + G-slim progress at n16
+
+Worker profile at n16 (self): forwarding+metadata CAS pairs 11.6%, THREE
+side-metadata ops per promoted object (unlog + object mark + line mark)
+11.5%, forward_object 4.4%, slot machinery ~10%, header store 2.8%.
+
+All-in per-object cost: Bactrian ~650 cy/object (11.9G / 18.9M) vs vanilla
+~300 (5.78G total G over MORE promotions — its window is 8x smaller). The
+delta is architectural: vanilla's domain-local minor uses ZERO atomics and
+ZERO side metadata; MMTk pays them for parallel-tracer generality even at
+MMTK_THREADS=1.
+
+G-slim ledger at n16: 14.2G -> 12.4G (phase-dynamic trusted loads, -13%)
+-> 11.9G (copy-telemetry counter gated behind MMTK_VERBOSE/PAUSE_LOG,
+-0.45G). W held at 5.91G (ratio 1.02).
+
+Identified next lever (fork design, not yet built): UP-trace mode — when
+worker count == 1 AND the pause is STW AND concurrent marking is inactive,
+exactly one thread traces, so forwarding-word installs and mark/unlog
+side-metadata writes can use plain (non-atomic) ops, vanilla's regime.
+Estimated from the profile: ~20-25% of the remaining per-object cost.
+Plan-safety: gate at trace-context construction; LXR/parallel paths keep
+atomics verbatim.
