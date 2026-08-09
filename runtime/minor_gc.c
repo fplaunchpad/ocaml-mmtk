@@ -261,6 +261,14 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
        minor GC; otherwise we empty the minor heap. */
     CAML_EV_COUNTER(EV_C_FORCE_MINOR_ALLOC_SMALL, 1);
     if (caml_mmtk_tlab) {
+      if (getenv("MMTK_POLL_DEBUG") != NULL) {
+        static _Atomic long n = 0;
+        long k = ++n;
+        if (k <= 5 || k % 1000000 == 0)
+          fprintf(stderr, "[dispatch] #%ld wh=%ld young=[%p,%p) ptr=%p\n",
+                  k, (long)whsize, (void *)dom_st->young_start,
+                  (void *)dom_st->young_end, (void *)dom_st->young_ptr);
+      }
       if (!caml_mmtk_refill_tlab(dom_st, whsize)) {
         /* MMTk bug #4: this raise happens from inside caml_call_gc's saved-regs
            window (caml_garbage_collection -> here). Recycle the popped gc_regs

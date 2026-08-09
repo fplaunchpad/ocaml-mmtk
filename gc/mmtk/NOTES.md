@@ -5,6 +5,33 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-09 — the poll-trap livelock: generated <= vs C-side < (the "8.9x catastrophe")
+
+Root-caused and fixed the biggest hidden mutator tax in the TLAB design.
+Chain: (1) caml_mmtk_uninterrupt discards the TLAB after EVERY GC, leaving
+young_ptr == young_start == young_end and young_limit == young_trigger ==
+young_start — an EQUALITY state; (2) ocamlopt-emitted poll points trap on
+young_ptr <= young_limit (jbe), but every C-side check
+(caml_check_gc_interrupt) tests STRICT < — equality reads as "no interrupt";
+(3) with an allocation-free phase following a GC (matmul's multiply: the
+loop ref is unboxed, so ZERO allocations for ~1.5s), no allocation ever
+refills the region, and EVERY generated poll traps through caml_call_gc ->
+caml_garbage_collection -> process_pending_actions (frame-descriptor lookup,
+signal scan, memprof, finaliser checks) and returns with the trap still
+armed. matmul-768 @ Fixed:16M: ~453M round-trips, 82G mutator instructions,
+8.9x wall. The same mechanism taxed every exhausted-TLAB window since M9 —
+it is the long-suspected component of tiny-nursery mutator-CPU explosions
+(wnight1) previously misattributed to park machinery.
+
+Fix (runtime/domain.c): the TLAB branch of caml_poll_gc_work now refills the
+young region when young_ptr <= young_limit — the EMITTED condition, not the
+C-side strict one. One trap, one refill, storm over: mm@16M local 3.66s ->
+0.95s (default 0.83s); outputs identical; all gates pass. Env-gated
+MMTK_POLL_DEBUG counters retained.
+
+LXR note: runtime-side fix in the shared TLAB path; plan-independent and
+required for any plan using the TLAB nursery protocol.
+
 ## 2026-08-08 (night) — survivor aging: implemented, correct, and a measured negative for bt
 
 MMTK_NURSERY_AGE>=1 (default 0 = off, byte-identical) adds a semispace aged

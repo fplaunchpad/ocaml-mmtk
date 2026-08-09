@@ -1324,7 +1324,16 @@ void caml_poll_gc_work(void)
        catastrophe", SHAPE.md round 20). Refill here to clear the trap; if
        the refill fails (heap genuinely exhausted) leave state as-is — the
        next real allocation raises Out_of_memory as before. */
-    if (Caml_check_gc_interrupt(d)) {
+    /* NOTE the comparison: ocamlopt-emitted poll points trap on
+       young_ptr <= young_limit (jbe), while Caml_check_gc_interrupt tests
+       the STRICT young_ptr < young_limit. The discarded-TLAB state
+       (uninterrupt sets young_ptr == young_start == young_end, and
+       young_limit == young_trigger == young_start) therefore traps at
+       every generated poll while every C-side check answers "no
+       interrupt" — an unfixable-from-C livelock unless this guard uses
+       the emitted condition. matmul-768 @ 16MB nursery: ~453M no-op trap
+       round-trips, 82G mutator instructions (SHAPE round 20). */
+    if ((uintnat)d->young_ptr <= atomic_load_relaxed(&d->young_limit)) {
       static _Atomic long caml_mmtk_poll_traps = 0, caml_mmtk_poll_refill_fail = 0;
       int ok = caml_mmtk_refill_tlab(d, Whsize_wosize(0));
       if (!ok) caml_mmtk_poll_refill_fail++;
