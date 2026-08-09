@@ -144,6 +144,15 @@ static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
    robust fix. Off by default pending panel measurement. */
 static int caml_mmtk_medium_nonmoving = 0;
 #define CAML_MMTK_SEM_NONMOVING 6
+/* MMTK_TEST_MALLOC_MEDIUM=1 — MEASUREMENT INSTRUMENT ONLY, NEVER a default.
+   Allocates >=2056B blocks via plain malloc as OUT-OF-HEAP (foreign) objects:
+   the GC never traces, moves, or frees them (they leak). This gives Bactrian
+   byte-for-byte glibc placement for the medium band — the causal test for
+   the matmul residual (SHAPE.md round 18): if exact-fit malloc placement is
+   the mechanism, the W gap must collapse under this knob. Only sound for
+   workloads whose medium objects carry no outgoing heap pointers that the
+   GC must trace (matmul: int arrays; 0 GCs at the operating point). */
+static int caml_mmtk_test_malloc_medium = 0;
 /* Pitch jitter is ON by default (6 bits = 0..63 line pads before >=2KB bump
    allocations). Measured 2026-08-08 (SHAPE.md W-night): removes matmul-768's
    12x LLC-load set-aliasing (739M -> 69M, vanilla 57M), improves the benign
@@ -360,6 +369,8 @@ void caml_mmtk_init(void)
         if (pthread_create(&t, NULL, caml_mmtk_frontier_warmer, NULL) == 0)
           pthread_detach(t);
       }
+      if (getenv("MMTK_TEST_MALLOC_MEDIUM") != NULL)
+        caml_mmtk_test_malloc_medium = atoi(getenv("MMTK_TEST_MALLOC_MEDIUM"));
       if (getenv("MMTK_MEDIUM_NONMOVING") != NULL)
         caml_mmtk_medium_nonmoving = atoi(getenv("MMTK_MEDIUM_NONMOVING"));
       if (getenv("MMTK_TLAB_PREFETCH") != NULL)
@@ -624,6 +635,14 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   int slot = Caml_state->id & (MUT_GC_DOMS - 1);
   int sem = caml_mmtk_semantics(wosize);
   (void)reserved;
+  if (caml_mmtk_test_malloc_medium
+      && (size_t)(Whsize_wosize(wosize)) * sizeof(value) >= 2056) {
+    header_t *hp = malloc(Bhsize_wosize(wosize));
+    if (hp != NULL) {
+      *hp = Caml_out_of_heap_header(wosize, tag);
+      return Val_hp(hp);
+    }
+  }
   if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
   caml_mmtk_jitter_pad((size_t)Whsize_wosize(wosize) * sizeof(value), sem);
   p = mmtk_ocaml_alloc(Caml_state->mmtk_mutator, wosize, tag, sem);
