@@ -790,3 +790,28 @@ atomics verbatim.
   different effective latency/overlap on one dependent load chain.
   This is the whole 24%: layout-driven load-bunching on the row-header +
   element pair, below counter attribution (MLP data round 15).
+
+### Round 18: matmul — the complete refutation ledger
+
+New probes: TLB regime (vanilla eats 889M STLB hits ~8cy each IN the load
+chain and still wins; our THP run has 0.3M and loses; our 4K run pays both
+STLB 879M AND stays slow => physical-page entropy REFUTED); IP-stride
+prefetch via mem_load_retired.fb_hit (7.6M vanilla / 7.2M jittered /
+7.3M exact-pitch — equal => prefetch-difference REFUTED).
+
+Refuted in total: LLC conflicts (fixed by granule), L1/L2/L3 hit counts
+(equal), TLB (both regimes), physical entropy, store-buffer, MLP occupancy
+(memory-busy time equal), fill-buffer/prefetch, instruction count, startup,
+4K-aliasing (2.6M, negligible), THP direction. The ~20% (best config
+noj+granule2048: 5.65G = 1.20) sits on one two-load dependent chain
+(row header + element) as pure effective-latency/scheduling difference
+below PMU attribution — L1D banking / replay territory.
+
+Vanilla's established differences on this workload: (1) PRETENURING —
+rows never transit the minor heap, are never copied by any GC (malloc'd
+individually, >sizeclass-max); (2) exact-fit malloc placement at perfectly
+periodic 6192B (96.75-line) pitch; (3) it tolerates the 4KB-page STLB cost
+(889M hits) our THP policy avoids. The remaining actionable replication:
+exact-fit pool pretenuring for the medium band (mi-bins failed on slot
+rounding; an exact-size boundary-tag pool would replicate malloc), bundled
+with the pools/lazy-sweep phase-2 work.
