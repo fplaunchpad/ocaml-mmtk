@@ -19,6 +19,11 @@ use crate::header::{tag_of, wosize_of, WORD_SIZE};
 /// Count of objects relocated by copying collectors (Immix defrag, etc.).
 /// Exposed so the runtime can confirm/report that movement actually happened.
 pub static OBJECTS_COPIED: AtomicUsize = AtomicUsize::new(0);
+/// Whether to count copies (MMTK_VERBOSE / MMTK_PAUSE_LOG runs). A locked
+/// fetch_add per copied object costs ~20-40 cycles; at 19M copies per run
+/// (binarytrees@16M nursery) that is ~0.4-0.8G cycles of pure telemetry.
+pub static COUNT_COPIES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Byte offset from the MMTk allocation result to the OCaml object reference.
 pub const OBJECT_REF_OFFSET: usize = WORD_SIZE;
@@ -101,7 +106,9 @@ pub fn copy_object<VM: VMBinding>(
         ObjectReference::from_raw_address_unchecked(to_start + OBJECT_REF_OFFSET)
     };
     copy_context.post_copy(to_ref, size, semantics);
-    OBJECTS_COPIED.fetch_add(1, Ordering::Relaxed);
+    if COUNT_COPIES.load(Ordering::Relaxed) {
+        OBJECTS_COPIED.fetch_add(1, Ordering::Relaxed);
+    }
     to_ref
 }
 

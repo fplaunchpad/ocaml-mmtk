@@ -102,6 +102,13 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     let concurrent_plan = matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR");
     let stw_trusted = !concurrent_plan && trusted_allowed;
     mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
+    // Copy counting is telemetry: arm it only when someone will read it.
+    if std::env::var_os("MMTK_VERBOSE").is_some()
+        || std::env::var_os("MMTK_PAUSE_LOG").is_some()
+    {
+        mmtk_ocaml_common::object_model::COUNT_COPIES
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // Concurrent plans: trust dynamically — inside STW pauses only (the S1 fast
     // path toggles on at stop_all_mutators, off at resume_mutators).
     if concurrent_plan && trusted_allowed {
