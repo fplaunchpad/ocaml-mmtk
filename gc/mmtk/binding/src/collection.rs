@@ -610,21 +610,44 @@ impl Collection<OCamlVM> for VMCollection {
         // non-generational plan `.generational()` is None, so EVERY GC counts as a
         // full GC and the trigger is inert — behaviour is unchanged there.
         let plan = crate::mmtk().get_plan();
+        // A completed CONCURRENT cycle (FinalMark just ended) is a major
+        // collection for pacing purposes, exactly like a STW Full: the mature
+        // heap was retraced + swept, so the pressure baseline and the
+        // allocation-denominated cadence counters must reset. Stock OCaml's
+        // pacing likewise resets when its (incremental) major cycle completes.
+        // Without this, sliced/concurrent cycles never reset the counters and
+        // the trigger law diverges from the STW mode's.
         let was_full = match plan.generational() {
             None => true,
-            Some(g) => g.last_collection_full_heap(),
+            Some(g) => {
+                g.last_collection_full_heap()
+                    || plan
+                        .concurrent()
+                        .is_some_and(|c| c.previous_pause_finished_mark())
+            }
         };
         if was_full {
             FULL_GC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(g) = plan.generational() {
             let mature = g.get_mature_reserved_pages();
-            if was_full {
-                // A full GC just (re)traced + reclaimed the mature heap. Reset both
-                // the mature-pressure baseline and the nursery-GC cadence counter.
-                LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
+            // Cycle-START reset for the allocation-denominated cadence: stock's
+            // pacing measures the budget from cycle start to next cycle start,
+            // so allocation during a (sliced/concurrent) marking window counts
+            // toward the NEXT trigger. A STW Full is start+finish in one pause
+            // (both resets fire together — the historical behaviour, unchanged).
+            let started_cycle = plan
+                .concurrent()
+                .is_some_and(|c| c.previous_pause_started_cycle());
+            if started_cycle || (was_full && plan.concurrent().is_none()) {
                 NURSERY_GCS_SINCE_FULL.store(0, Ordering::Relaxed);
                 NURSERY_BYTES_SINCE_FULL.store(0, Ordering::Relaxed);
+            }
+            if was_full {
+                // A major cycle just finished (FinalMark or Full): the mature heap
+                // was retraced + swept, so its size is authoritative — reset the
+                // mature-pressure baseline.
+                LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
             } else {
                 // Nursery (minor) GC. Force the NEXT collection to be a full heap GC
                 // if EITHER trigger fires:
@@ -658,6 +681,15 @@ impl Collection<OCamlVM> for VMCollection {
                     nb >= cadence_budget_bytes()
                 };
                 if by_mature || by_cadence {
+                    // MMTK_PACE_DEBUG: which pacing law fired (mature-pressure
+                    // vs allocation-cadence) — for cadence attribution against
+                    // stock's space_overhead pacing.
+                    if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
+                        eprintln!(
+                            "[pace] trigger by_mature={} by_cadence={} mature={}p baseline={}p n={} nb={}MB",
+                            by_mature, by_cadence, mature, baseline, n, nb / (1 << 20)
+                        );
+                    }
                     g.force_full_heap_collection();
                 }
             }
