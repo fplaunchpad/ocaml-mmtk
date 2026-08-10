@@ -28,11 +28,11 @@ mmtk = { path = "../mmtk-core" }
 [profile.release]
 # Bring-up: keep debug info in the release staticlib for easier gdb/lldb work.
 debug = true
-# Fat LTO + one codegen unit: the binding's slot/scanning layer
+# Thin LTO + one codegen unit: the binding's slot/scanning layer
 # (mmtk-ocaml-common) is called from mmtk-core generics across a crate
 # boundary — without LTO those calls stay outlined (FieldSlot::from_address
 # alone measured 6% of GC-worker cycles on bt@16M; scan_ocaml_object 6.3%,
 # visit_slot 4.0%). Vanilla's oldify is one inlined C loop; this is the
 # build-config half of matching its per-object economics.
-lto = "fat"
+lto = "thin"
 codegen-units = 1
