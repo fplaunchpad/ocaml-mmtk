@@ -54,6 +54,16 @@ pub fn set_forwarding_bits_spec(spec: SideMetadataSpec) {
     let _ = FORWARDING_BITS_SPEC.set(spec);
 }
 
+/// The MMTk heap's start address, injected once by the binding at init.
+/// Enables the value-range forwarding discriminator below.
+static HEAP_RANGE_START: OnceLock<usize> = OnceLock::new();
+
+/// Register the MMTk heap's start address (`vm_layout().heap_start`).
+/// Call once, at MMTk init.
+pub fn set_heap_range_start(start: usize) {
+    let _ = HEAP_RANGE_START.set(start);
+}
+
 /// True if the object at `addr` has been (or is being) forwarded by a moving GC.
 ///
 /// MMTk overwrites a forwarded object's header word with the forwarding pointer,
@@ -65,6 +75,24 @@ pub fn set_forwarding_bits_spec(spec: SideMetadataSpec) {
 /// and on non-moving builds, where nothing is ever forwarded.
 #[inline]
 fn is_forwarded(addr: Address) -> bool {
+    // Value-range discriminator (preferred): "forwarded" means the header word
+    // was overwritten with a forwarding pointer, and a forwarding pointer is
+    // necessarily inside the MMTk heap (>= heap start) while every genuine
+    // OCaml header `(wosize << 10) | colour | tag` is far below it — stock
+    // OCaml's own `hd == 0` idiom, generalized to the value range. This holds
+    // in every trace mode: single-tracer (UP) pauses write ONLY the header
+    // pointer (the side bits are skipped entirely — HEADER_FORWARDING_SENTINEL),
+    // and in multi-worker pauses the pointer store is the completion step, so
+    // a header that still reads as a small value is a genuine header. It also
+    // needs no side-metadata mapping check (issue #12's SIGSEGV class): the
+    // header word itself is always mapped. Plans that never overwrite headers
+    // in-place (mark-compact family) always read a genuine header -> false,
+    // which is the correct answer there too.
+    if let Some(&start) = HEAP_RANGE_START.get() {
+        return unsafe { (addr - WORD_SIZE).load::<usize>() } >= start;
+    }
+    // Startup-window fallback (heap start not yet registered): the historical
+    // side-bits read.
     match FORWARDING_BITS_SPEC.get() {
         Some(spec) => {
             // Forwarding-bits side metadata is mapped ONLY by in-place moving spaces

@@ -272,6 +272,13 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
                 .extract_side_spec(),
         );
     }
+    // Value-range forwarding discriminator (all plans): a header word >= heap
+    // start is a forwarding pointer, below it a genuine header. Registered
+    // unconditionally — for never-in-place-forwarding plans the check simply
+    // always reads a genuine header (false), matching the unset-spec answer.
+    mmtk_ocaml_common::slot::set_heap_range_start(
+        mmtk::util::heap::vm_layout::vm_layout().heap_start.as_usize(),
+    );
 }
 
 /// Start MMTk GC worker threads.  Call once after `mmtk_ocaml_init`, before
