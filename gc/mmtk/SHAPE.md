@@ -977,3 +977,56 @@ flat; the lottery, item 4). Remaining G buckets: the drained closure itself
 (scan + trace dispatch + copy, now intrinsic MMTk-vs-hand-loop overhead) and
 full-GC marking — both better addressed by item 2's mark-cycle slicing than
 by further micro-folds.
+
+### Round 25: sliced-STW marking — the D3 tail matched (2026-08-11)
+
+Item-2 campaign. Design: stock's mutator mark slices, executed as bounded
+STW quanta by the single worker inside nursery pauses (2ms budget,
+MMTK_MARK_SLICE_MS), one per minor — allocation-paced exactly like stock.
+Marking work parks in a plan-owned queue (never the Concurrent bucket);
+FinalMark drains the remainder unbudgeted in its Closure stage. Default ON
+(MMTK_MARK_SLICED=0 restores worker-concurrent/adaptive-STW). UP-trace
+stays armed through the whole cycle: quanta run world-stopped on the one
+worker, so the tracer is single — the item-1 economics apply to marking.
+
+Why not worker-concurrent (measured, bt@2M): pauses drop 122 -> 14ms but
+the mutator pays +7.9G cycles in cross-core LLC interference (marker
+streams the live set through shared L3 while the mutator runs) — vanilla
+avoids this by serializing slices with mutation, and so do we.
+
+Two pacing bugs found by cadence tracing en route: (1) the scheduler's
+parked-workers self-request raced the marking-state clear at FinalMark end
+-> zero-allocation second collection -> emergency STW Full (15/run,
+spuriously resetting the pacing); (2) FinalMark never reset the pacing
+baseline (was_full only recognized Pause::Full) and the allocation budget
+was measured from cycle END not START. Both fixed (self-request suppressed
+under sliced; completion resets baseline, start resets budget — a STW Full
+is both at once, that mode bit-identical).
+
+FULL SHAPE COMPARISON (church, wshape battery, vanilla o=500 vs sliced
+default, T=1, 192MB pinned):
+
+D1 (cycles/ins ratios):
+  bt 0.84x/0.64x | nbody 1.00 | fannkuch 1.03 | spectral 1.07 |
+  mandelbrot 0.97 | matmul 1.16* | LU 1.26* | kb 1.05  (*layout draws)
+
+D3 (pause streams):
+  bt@2M:  2411 minors mean 1.66ms p95 6.7 MAX 8.0ms; 15 cycle pauses
+          mean 3.6ms max 6.8ms.  VANILLA: 3554 pauses mean 0.55 MAX 15.2ms.
+          The 78-122ms Full tail is GONE; whole-run max is BELOW vanilla's.
+  kb def: max 8.8ms. bt def: minors to 67ms (64MB-nursery evacuations —
+          the default-config minor size, not cycle work).
+
+D2 (cycles + attribution): bt@2M 15 cycles, trigger 321x mature-pressure /
+  6x cadence vs vanilla's 29 cycles at o=500. The pacing LAW is now
+  structurally identical (pressure % over post-cycle baseline + allocation
+  budget from cycle start); the 15-vs-29 period delta is the operating
+  point: our post-cycle baseline includes the marking window's floating
+  garbage and the 40% margin compounds over it. Calibration of
+  MATURE_PRESSURE_OVERHEAD_PCT (the space_overhead analog) against
+  vanilla's o is the remaining dial — a constant, not a mechanism.
+
+W: bt@2M whole-process 18.0G vs 20.6G STW-fulls (-13%: UP armed through
+IM/FM + quanta) vs 30.7G worker-concurrent. Total STW 4067ms vs vanilla
+1970ms — the residual is mean minor cost (1.66 vs 0.55ms), i.e. item-1's
+per-object economics, not the tail.
