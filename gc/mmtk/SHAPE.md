@@ -896,3 +896,40 @@ matmul@16M verified at 8.11G (1.75x): mutator-side nursery thrash of the
 19MB init burst (vanilla pretenures the band; the pools gate). Unchanged
 by UP as predicted. mm/LU/mm default-nursery ~20%: the fork-ambient
 runtime effect (NoGC-reproducible), documented refutation ledger.
+
+### Round 23: Max_young_wosize pretenuring — matmul joins the panel floor (2026-08-10)
+
+The pools gate closed. The >=2056B band is now born in the mature Immix
+space under Bactrian (default ON; MMTK_MEDIUM_NONMOVING=0 reverts), stock's
+Max_young_wosize law. Three mechanisms had to land together:
+
+1. **Placement** (mmtk-core ebb8f58e3c): NonMoving semantic -> reserved
+   plan-local ImmixAllocator on the mature space; unlog-at-birth;
+   allocate-as-live during marking windows. (Two worker panics en route:
+   mismatched reserved sets between allocator/space mappings, and the
+   common FreeList allocator's release-packet handshake — see NOTES.)
+2. **Phase** (mmtk-core 2a390e0fc8): overflow blocks re-align every 32KB, so
+   the medium stream's cache-set phase resets each block — object pads
+   cannot fix that (904M unpadded / 205M padded / 57M floor LLC-loads).
+   Rotating each fresh overflow block's start phase by one line (16
+   positions, mutator-only) hits the floor: 58M.
+3. **Remset economics** (runtime 9027ed6b9): initialising stores of
+   IMMEDIATES no longer enter the remembered set (stock's own filter) —
+   born-mature int arrays were buffering per-slot entries: 46MB retained
+   modbuf on matmul, RSS 81 -> ~29MB.
+
+wpret2 battery (church, 3-rep medians, T=1, 192MB), cycles vs vanilla:
+
+    bench    v       d0(off)  d1(ON)   d1@16M  d1@2M
+    matmul   1.00x   1.25x    1.08x    1.07x   1.05x
+    LU       1.00x   1.24x    1.24x    1.16x   1.33x
+    bt       1.00x   0.91x    0.91x    —       —
+    kb       1.00x   1.02x    1.02x    —       —
+
+matmul is now NURSERY-INDEPENDENT — the same shape as vanilla, whose
+mediums never see the minor heap either. Knob-off is an alignment lottery
+(the same build drew 118M- and 900M-class LLC regimes across batteries);
+pretenure removes the die roll. bt/kb worker shares identical to 0.1pp; LU
+neutral (its matrix is allocated once — LU's residual is the fork-ambient
+item, not medium placement). At the vanilla-matched 2MB-nursery operating
+point (round 22), matmul improves 1.80x -> 1.05x.

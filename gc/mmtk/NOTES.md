@@ -5,6 +5,68 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-10 — Max_young_wosize pretenuring lands (default ON for Bactrian)
+
+Stock's law: a >Max_young_wosize block never transits the minor heap
+(caml_alloc_shr births it in the major heap — pools <=1KB, malloc above).
+Bactrian now has the same law. Plumbing (3 commits, mmtk-core
+ebb8f58e3c/2a390e0fc8 + runtime 3def0a88c/16169a12a/9027ed6b9):
+
+- Runtime routes the >=2056B band (below the 16KB LOS threshold) to
+  CAML_MMTK_SEM_NONMOVING; Bactrian remaps AllocationSemantics::NonMoving to
+  a reserved plan-local ImmixAllocator on the MATURE space. Born-mature
+  objects are unlogged at birth (binding post_alloc, PromoteToMature's
+  treatment); allocate-as-live covers births during marking windows.
+  Default ON under Bactrian only; MMTK_MEDIUM_NONMOVING=0/1 overrides.
+- Debug war stories, for the record: (a) allocator+space mappings must be
+  built from the SAME ReservedAllocators set (reusing the generational
+  space mapping shifts the common spaces' selector indices — worker
+  copy-context construction unwraps None); (b) the common mark-sweep
+  nonmoving FreeList allocator must still be prepared/released BY SELECTOR
+  (FreeList(0)) — common_prepare/release_func's semantic-keyed typed
+  downcast panics on the remapped semantic, and skipping release entirely
+  starves the pending_release_packets handshake (num_mutators+1).
+- Jitter pads now follow the object's semantics (a pad diverted to the
+  nursery leaves the pretenure stream at exact pitch).
+- NEW mmtk-core knob: overflow-block line-phase rotation
+  (MMTK_OVERFLOW_PHASE_LINES, default 16, mutator allocators only). A clean
+  block's overflow cursor always started at the 32KB-aligned block start,
+  so same-sized medium streams re-enter the same cache-set phase every
+  block (~4-5 objects/block): matmul-768 measured 904M LLC-loads unpadded /
+  205M padded vs the 57M contiguous floor. Rotating the fresh-block start
+  phase reaches the floor (58M) — the layout glibc's contiguous arena gives
+  vanilla for free.
+- Remset immediate filter (9027ed6b9): caml_initialize/write_barrier's
+  generational half now skip immediates, stock's own ref-table filter.
+  Without it, born-mature Array.init of int arrays buffered one remset
+  entry PER SLOT — 46MB of retained modbuf on matmul (721 x 64KB segments,
+  caught with an LD_PRELOAD malloc-backtrace shim; RSS 81 -> ~29MB).
+
+Measured (church, wpret2 battery, 3-rep medians, MMTK_THREADS=1, 192MB):
+matmul-768 vanilla-relative cycles 1.25x (knob off, default nursery;
+1.8-1.9x at 2-16MB nurseries, and the knob-off promoted layout is an
+alignment lottery — same build drew 118M and 900M-class LLC regimes across
+batteries) -> **1.05-1.08x pretenured, nursery-INDEPENDENT** — the same
+shape vanilla has (its mediums never see the minor heap either). bt/kb:
+cycle- and worker-share-identical; LU neutral. Outputs byte-identical
+across the 16-cell golden battery + forced-concurrent canaries.
+
+## 2026-08-10 — KNOWN FAILURE: StickyImmix pending_release_packets underflow (pre-existing)
+
+`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=192 setarch x86_64 -R kb.native 50`
+aborts at gc/mmtk-core/src/util/epilogue.rs:11: "pending_release_packets is
+still 18446744073709551614" (= -2: the mark-sweep release-packet counter was
+DECREMENTED two more times than armed, i.e. release_packet_done ran without a
+matching MarkSweepSpace::release arm — suspect fused/immediately-consecutive
+pauses re-running mutator release). Verified PRE-EXISTING: reproduces
+identically with mmtk-core rolled back to 2ad2feecdd (pre-pretenuring) — NOT
+introduced by the 2026-08-10 pretenuring/barrier work. GenImmix (default
+plan) and Bactrian run the same bench clean. Distinct from the older
+StickyImmix moving-GC crash note. Open item; fix belongs with the
+marksweep_as_nonmoving release-protocol work (cec95292be lineage).
+
+---
+
 ## 2026-08-09 — the poll-trap livelock: generated <= vs C-side < (the "8.9x catastrophe")
 
 Root-caused and fixed the biggest hidden mutator tax in the TLAB design.
