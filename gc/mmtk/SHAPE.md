@@ -933,3 +933,47 @@ pretenure removes the die roll. bt/kb worker shares identical to 0.1pp; LU
 neutral (its matrix is allocated once — LU's residual is the fork-ambient
 item, not medium placement). At the vanilla-matched 2MB-nursery operating
 point (round 22), matmul improves 1.80x -> 1.05x.
+
+### Round 24: G economics — vanilla's oldify protocol lands in the worker (2026-08-11)
+
+Item-1 campaign: bridge per-minor-object collection cost (~340 cy at round 23)
+toward vanilla oldify's ~80. Fixed workload throughout: bt-20 @ Fixed:16M,
+233 GCs / 13 fulls / 19,676,902 promoted objects, byte-identical output.
+
+Landed, in order (each gated on the full battery + T=4 + forced-concurrent +
+GenImmix/SemiSpace canaries):
+
+1. **Thin LTO + codegen-units=1** — the binding's slot/scanning layer crossed
+   a crate boundary outlined (FieldSlot::from_address alone 6% of worker).
+   GC 3100 -> 2686ms. Matched-pair discovery: fat-vs-thin (same semantics,
+   different layout) re-rolls the MUTATOR-side draw on matmul/kb/fannkuch —
+   the fork-ambient mechanism is a code-layout lottery, now reproducible at
+   will (item-4 handle).
+2. **inline(always) on side-metadata paths** — neutral (cost re-homed to the
+   dispatch layer): proof the expense was the dispatched work, not calls.
+3. **Header-sentinel forwarding** — stock oldify's value-range protocol under
+   UP: header word >= heap_start ⟺ forwarded; zero side-metadata traffic in
+   the forwarding path (status load per visit + FORWARDED store + new-copy
+   clear all gone). Broke kb first: the slot.rs Infix_tag disambiguator read
+   the no-longer-written side bits — a forwarding pointer ending 0xf9 parsed
+   as an infix header (garbage parent offset, worker SIGSEGV). Fixed by
+   making that check value-range too (valid in all modes; kills its side
+   load + is_mapped probe). GC 2686 -> 2544ms; bt whole-process 0.85x.
+4. **UP direct-trace closure (nursery)** — the whole transitive closure in
+   one packet with an explicit work list; per object the packet path's exact
+   protocol. GC 2544 -> 2382ms. Copy order becomes parent-then-children.
+5. **REFUTED x2 — the same drain for FULL traces**: layer-at-a-time
+   materializes the full-heap BFS frontier (millions of objects, one
+   cache-cold Vec): 2382 -> 2581ms. LIFO variant pays a pop_nodes Vec swap
+   per object: 3426ms — worse than campaign start. Both reverted; the packet
+   system's 4096-object interleaved units are the RIGHT structure at
+   full-heap scale. Fulls stay on packets (item 2 restructures them anyway).
+
+Net: **GC time -23%** (3100 -> 2381ms; ~340 -> ~260 cy/object), bt
+whole-process **0.84x vanilla** (9.69-9.74G vs 11.48G). Panel: nbody/
+fannkuch/mandelbrot ~1.0x; spectralnorm 1.08x (item 3); matmul 1.17x / kb
+1.06x / LU 1.26x — mutator-side layout draws of this build (all counters
+flat; the lottery, item 4). Remaining G buckets: the drained closure itself
+(scan + trace dispatch + copy, now intrinsic MMTk-vs-hand-loop overhead) and
+full-GC marking — both better addressed by item 2's mark-cycle slicing than
+by further micro-folds.
