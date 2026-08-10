@@ -563,6 +563,14 @@ impl Collection<OCamlVM> for VMCollection {
                         )
                 }
             };
+            if std::env::var_os("MMTK_UP_DEBUG").is_some() {
+                eprintln!(
+                    "[up-debug] single={} marking_safe={} pause={:?}",
+                    single,
+                    marking_safe,
+                    crate::mmtk().get_plan().concurrent().and_then(|c| c.current_pause())
+                );
+            }
             if single && marking_safe {
                 mmtk::util::up_trace::set_up_trace(true);
             }
