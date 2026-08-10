@@ -141,7 +141,16 @@ static size_t caml_mmtk_los_threshold = CAML_MMTK_LOS_THRESHOLD;
    (stock allocates >Max_young_wosize blocks straight into major-heap pools).
    Bump placement for these objects is chaotically pitch-sensitive (matmul
    regimes measured at 57M..903M LLC-loads across layouts); pools are the
-   robust fix. Off by default pending panel measurement. */
+   robust fix. ON by default (measured, wpret2 battery + overflow-block
+   line-phase rotation in the Immix allocator): matmul reaches the vanilla
+   LLC floor (58M) and goes nursery-independent at 1.05-1.08x vanilla
+   (knob-off swings 1.25-1.89x with nursery size and draws an
+   alignment-lottery promoted layout); bt/kb/LU byte- and cycle-neutral.
+   This is stock's Max_young_wosize law: the medium band never transits
+   the minor heap. Default ON for Bactrian only (set at init once the plan
+   is known): other plans map the NonMoving semantic to the common
+   mark-sweep space, a placement not yet measured on them.
+   MMTK_MEDIUM_NONMOVING=0/1 overrides either way. */
 static int caml_mmtk_medium_nonmoving = 0;
 #define CAML_MMTK_SEM_NONMOVING 6
 /* MMTK_TEST_MALLOC_MEDIUM=1 — MEASUREMENT INSTRUMENT ONLY, NEVER a default.
@@ -371,6 +380,10 @@ void caml_mmtk_init(void)
       }
       if (getenv("MMTK_TEST_MALLOC_MEDIUM") != NULL)
         caml_mmtk_test_malloc_medium = atoi(getenv("MMTK_TEST_MALLOC_MEDIUM"));
+      /* Default ON under Bactrian (see caml_mmtk_medium_nonmoving); the env
+         var overrides in both directions. */
+      if (strcmp(plan, "Bactrian") == 0)
+        caml_mmtk_medium_nonmoving = 1;
       if (getenv("MMTK_MEDIUM_NONMOVING") != NULL)
         caml_mmtk_medium_nonmoving = atoi(getenv("MMTK_MEDIUM_NONMOVING"));
       if (getenv("MMTK_TLAB_PREFETCH") != NULL)
