@@ -349,6 +349,17 @@ pub extern "C" fn mmtk_ocaml_alloc(
     let object = unsafe { ObjectReference::from_raw_address_unchecked(obj_ref) };
     memory_manager::post_alloc::<OCamlVM>(mutator, object, total_bytes, semantics);
 
+    // Max_young_wosize pretenuring: NonMoving-semantics objects are born in
+    // the MATURE Immix space (stock allocates this band straight into the
+    // major heap). They must be born UNLOGGED so the generational object
+    // barrier logs their first young-pointer store into the remembered set —
+    // the same treatment PromoteToMature's post_copy gives promoted objects.
+    if matches!(semantics, AllocationSemantics::NonMoving) {
+        use mmtk::vm::ObjectModel;
+        <OCamlVM as mmtk::vm::VMBinding>::VMObjectModel::GLOBAL_LOG_BIT_SPEC
+            .mark_byte_as_unlogged::<OCamlVM>(object, std::sync::atomic::Ordering::Relaxed);
+    }
+
     obj_ref.to_mut_ptr::<libc::c_void>()
 }
 

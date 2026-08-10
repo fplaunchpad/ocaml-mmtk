@@ -558,7 +558,8 @@ Caml_inline uint64_t caml_mmtk_jitter_next(void)
    so the GC treats it as an opaque dead blob and reclaims it next cycle. */
 static void caml_mmtk_jitter_pad(size_t bytes, int sem)
 {
-  if (caml_mmtk_alloc_jitter && sem == CAML_MMTK_SEM_DEFAULT && bytes >= 2048) {
+  if (caml_mmtk_alloc_jitter && bytes >= 2048
+      && (sem == CAML_MMTK_SEM_DEFAULT || sem == CAML_MMTK_SEM_NONMOVING)) {
     /* Entropy in LINES, not words: 8-128 B pads (v1) carry <2 lines of
        set-index entropy — enough to break exact pitch alignment (768) but
        enough to CREATE near-alignments where the natural pitch was benign
@@ -593,8 +594,11 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
       pad = 1 + 8 * (mlsize_t)(caml_mmtk_jitter_next()
                                & ((1u << caml_mmtk_alloc_jitter) - 1));
     }
-    (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag,
-                           CAML_MMTK_SEM_DEFAULT);
+    /* The pad must land in the SAME allocation stream as the object it
+       jitters: under medium pretenuring the >=2056B band bumps through the
+       mature Immix allocator, and a pad diverted to the nursery would leave
+       that stream at exact pitch (and litter the nursery with dead blobs). */
+    (void)mmtk_ocaml_alloc(Caml_state->mmtk_mutator, pad, Abstract_tag, sem);
     atomic_fetch_add_explicit(&caml_mmtk_jitter_fills, 1,
                               memory_order_relaxed);
   }
