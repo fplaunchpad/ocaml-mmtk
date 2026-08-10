@@ -866,3 +866,33 @@ byte-identical across all configs incl. forced-concurrent and T=4 exclusion
 gates. bt@16M: W 5.73 = 0.99 ratio. Two stale-deploy traps caught mid-
 session (visible fetch/reset now mandatory). Remaining locks (21M): packet/
 queue ops — next slim; fulls' marks -> incremental mature (unchanged).
+
+### Round 22: the vanilla-matching frontier (post-UP nursery curve)
+
+Directive: match vanilla's shape, not beat aggregates. Post-UP curve (bt-20):
+
+| nursery | W (ratio) | G | pauses | minors n/ms | fulls n/ms | p50 |
+|---------|-----------|---|--------|-------------|------------|-----|
+| 16M | 5.72 (0.99) | 9.6 | 233 | 220/1786 | 13/1298 | 0.35 |
+| 8M | 5.46 (0.95) | 11.7 | 466 | 450/2217 | 16/1543 | 0.33 |
+| 4M | 5.44 (0.95) | 17.8 | 998 | 975/3551 | 23/2131 | 0.33 |
+| 2M | **5.38 (0.94)** | 19.9 | 2330 | 2303/3955 | **27**/2431 | 0.28 |
+| vanilla | 5.74 | 5.76 | 3554 | 1763/1138 | 29 cycles/832ms slices | 0.04 |
+
+MATCHED at 2M: W (0.94 — warmth confirmed: W improves monotonically as the
+nursery shrinks now that the livelock is dead and UP is in), D2 pause count
+(2330 vs 3554), and the MARK-CYCLE CADENCE (27 fulls vs vanilla's 29 major
+cycles — the byte-pacer reproduces vanilla's law exactly).
+
+REMAINING GAP (verified, single-axis): collection economics.
+- Per-minor-object: ~340 cy vs vanilla 80 (post-UP; was 415). Left: 3x
+  side-table addressing arithmetic, packet machinery, scan/SFT dispatch.
+- Per-mark-cycle: 90ms STW fulls vs vanilla's ~29ms-equivalent sliced
+  incrementally. Same volume, 3x machinery cost + un-sliced delivery.
+Targets: per-object -> ~100-150cy (metadata fold + packet slim); mark
+slicing (incremental mature) for the D3 tail (140ms max vs 15ms).
+
+matmul@16M verified at 8.11G (1.75x): mutator-side nursery thrash of the
+19MB init burst (vanilla pretenures the band; the pools gate). Unchanged
+by UP as predicted. mm/LU/mm default-nursery ~20%: the fork-ambient
+runtime effect (NoGC-reproducible), documented refutation ledger.
