@@ -89,7 +89,9 @@ ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --
 **Wall.** **`Bactrian` (RQ7) — the stock-*architecture* plan (copying nursery + concurrently-marked,
 (near-)non-moving Immix mature + SATB deletion barrier — vanilla's collector *architecture*, though not
 its implementation: vanilla marks AND sweeps in mutator slices with only tiny colour-flip STW sections,
-while Bactrian marks on GC workers and still sweeps STW at FinalMark) —
+while Bactrian marks on GC workers and still sweeps STW at FinalMark; since 2026-08-10 it also enforces
+stock's `Max_young_wosize` law — ≥ 2056 B blocks are born in the mature space, never transiting the
+nursery, see `MMTK_MEDIUM_NONMOVING` in **Configuration**) —
 tracks vanilla within ~8% on 7 of 8 benches** (`binarytrees` 1.08× where GenImmix is 1.40×; `LU` 1.04×;
 `spectralnorm` 0.97×; `matmul` 0.87×), with `kb` the lone loss (1.22×, = GenImmix — the per-minor-GC
 framework floor, see NOTES 2026-06-24/07-02). That is the RQ7 apples-to-apples readout: **most of the
@@ -213,6 +215,8 @@ OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
 | `MMTK_MIN_HEAP_MB` | `32` | Dynamic-heap floor (MiB). The smallest the `live × 2.2` target may shrink to; a too-low floor lets a nursery GC fire mid-build for a low-live/high-alloc program, promoting the half-built object → the generational write barrier then dominates (GH#6; matmul-768 was 19.6s at 16 MiB, 3.2s at 32 MiB). Only applies to the default dynamic heap. |
 | `MMTK_NURSERY` | `Bounded:2097152,67108864` (2–64 MiB) **× live domain count** | Generational-plan nursery (GenImmix/GenCopy/StickyImmix/Bactrian), bounded/absolute and commit-on-demand (adapts down to fit small heaps). The default budget is scaled by the live domain count (N×2–N×64 MiB — stock parity: stock's minor arenas are 2 MiB *per domain*), latched at domain spawn/termination and applied lazily at the next trigger check; the dynamic heap gets matching headroom (`SCALABILITY.md` UPDATE 6: par_binarytrees d=8 5.7× faster). An explicit pin is never scaled; `MMTK_NURSERY_PER_DOMAIN=0` disables scaling the default. **Value must be raw BYTES** — e.g. `Fixed:33554432`, `Bounded:2097152,134217728`; the `2m,128m` suffix form does **not** parse (silently falls back to the default). |
 | `MMTK_THREADS` | _nproc_ | GC worker threads. **Set `MMTK_THREADS=1` for single-/few-domain runs** — the `nproc` default oversubscribes and slows high-collection workloads (a domain-aware pool is the open fix). |
+| `MMTK_MEDIUM_NONMOVING` | `1` under `Bactrian`, else `0` | Stock's `Max_young_wosize` law: ≥ 2056 B blocks (over `Max_young_wosize` incl. header, below the 16 KiB LOS threshold) are **born in the mature Immix space**, never transiting the nursery — exactly stock's `caml_alloc_shr` placement for the band. Default ON for `Bactrian` (measured: matmul-768 1.03× vanilla and nursery-independent vs a 1.25–1.89× nursery-dependent alignment lottery; bt/kb/LU neutral — SHAPE.md round 23). Off elsewhere (other plans map the band to the common mark-sweep space, unmeasured). `0`/`1` overrides either way. |
+| `MMTK_OVERFLOW_PHASE_LINES` | `16` | mmtk-core: fresh Immix *overflow* blocks start a rotating number of 256 B lines in (mutator allocators only), instead of always at the 32 KiB-aligned block start. Kills the per-block cache-set phase reset that conflict-thrashes same-sized medium-object streams (matmul LLC-loads 904 M → 58 M = the vanilla floor); stands in for the phase continuity glibc's contiguous arena gives stock. `0`/`1` disables. |
 | `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
 
 mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
