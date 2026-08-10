@@ -548,19 +548,26 @@ impl Collection<OCamlVM> for VMCollection {
         // UP-trace: with exactly one GC worker, mutators quiesced, and no
         // concurrent-marking window in flight or being opened, the trace hot
         // path may use plain operations (see mmtk::util::up_trace). Fused
-        // marking pauses (InitialMark/FinalMark) stay atomic: their mark
-        // state is shared with the concurrent window that follows/precedes.
+        // marking pauses (InitialMark/FinalMark) stay atomic when marking runs
+        // WORKER-CONCURRENT: their mark state is shared with the concurrent
+        // window that follows/precedes. Under SLICED-STW marking
+        // (marking_confined_to_pauses) no marking packet ever runs while
+        // mutators run — every quantum executes on this single worker inside a
+        // stopped-world pause, pause-end fences publish between quanta — so the
+        // tracer is single across the whole cycle and UP stays armed for ALL
+        // pauses, marking quanta included.
         {
             use mmtk::plan::concurrent::Pause;
             let single = crate::mmtk().worker_count() == 1;
             let marking_safe = match crate::mmtk().get_plan().concurrent() {
                 None => true,
                 Some(c) => {
-                    !c.concurrent_work_in_progress()
-                        && !matches!(
-                            c.current_pause(),
-                            Some(Pause::InitialMark) | Some(Pause::FinalMark)
-                        )
+                    c.marking_confined_to_pauses()
+                        || (!c.concurrent_work_in_progress()
+                            && !matches!(
+                                c.current_pause(),
+                                Some(Pause::InitialMark) | Some(Pause::FinalMark)
+                            ))
                 }
             };
             if std::env::var_os("MMTK_UP_DEBUG").is_some() {
