@@ -853,3 +853,16 @@ at parity (LLC floor, counts equal); (2) medium-object pretenuring loses its
 matmul justification; its remaining (real) value is liberating the nursery
 dial (mm@16M nursery = 8.9x catastrophe stands); (3) 17 falsified hypotheses
 are the strongest possible evidence the instruments and methodology work.
+
+### Round 21: UP-trace lands — bt whole-process 0.90x vanilla
+
+Single-tracer plain-op mode (util::up_trace; binding arms per pause when
+worker==1 + quiesced + no marking window). Forwarding claim-CAS skipped,
+SeqCst stores -> plain MOVs, side/header metadata primitives take non-atomic
+twins. Locked RMWs per copied object 5.7 -> 1.1 (112.6M -> 21.3M); worker G
+-22-25% (def 4.49->3.48G, n16 12.26->9.20G); D3 totSTW 1468->1169ms.
+CERTIFIED: bt whole-process 10.30G +-0.01 vs vanilla 11.5 = 0.90x, outputs
+byte-identical across all configs incl. forced-concurrent and T=4 exclusion
+gates. bt@16M: W 5.73 = 0.99 ratio. Two stale-deploy traps caught mid-
+session (visible fetch/reset now mandatory). Remaining locks (21M): packet/
+queue ops — next slim; fulls' marks -> incremental mature (unchanged).
