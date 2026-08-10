@@ -545,6 +545,29 @@ impl Collection<OCamlVM> for VMCollection {
             mmtk_ocaml_common::slot::set_stw_trusted(true);
         }
 
+        // UP-trace: with exactly one GC worker, mutators quiesced, and no
+        // concurrent-marking window in flight or being opened, the trace hot
+        // path may use plain operations (see mmtk::util::up_trace). Fused
+        // marking pauses (InitialMark/FinalMark) stay atomic: their mark
+        // state is shared with the concurrent window that follows/precedes.
+        {
+            use mmtk::plan::concurrent::Pause;
+            let single = crate::mmtk().worker_count() == 1;
+            let marking_safe = match crate::mmtk().get_plan().concurrent() {
+                None => true,
+                Some(c) => {
+                    !c.concurrent_work_in_progress()
+                        && !matches!(
+                            c.current_pause(),
+                            Some(Pause::InitialMark) | Some(Pause::FinalMark)
+                        )
+                }
+            };
+            if single && marking_safe {
+                mmtk::util::up_trace::set_up_trace(true);
+            }
+        }
+
         for mutator in crate::active_plan::VMActivePlan::mutators() {
             mutator_visitor(mutator);
         }
@@ -557,6 +580,9 @@ impl Collection<OCamlVM> for VMCollection {
         if DYNAMIC_TRUSTED.load(Ordering::Relaxed) {
             mmtk_ocaml_common::slot::set_stw_trusted(false);
         }
+        // End of the single-tracer window (the lock sequences below publish
+        // its plain writes before any mutator observes them).
+        mmtk::util::up_trace::set_up_trace(false);
 
         // Collection accounting + the GH#5 mature-space-pressure full-GC trigger.
         // This runs on the GC worker AFTER `Scheduler::end_of_gc` (which set
