@@ -333,6 +333,20 @@ fn note_swept_baseline(_baseline_pages: usize) {
     }
     let plan = crate::mmtk().get_plan();
     let Some(c) = plan.concurrent() else { return };
+    // MONOLITHIC-FULL REGIME ONLY (round 30d, wcomp7 lesson): the
+    // reserved-vs-marked-live ratio is exact only when the major was a
+    // single STW Full — one pause, complete trace, in-pause sweep. A
+    // concurrent cycle's post-sweep reserved additionally carries SATB
+    // floating garbage and the marking window's promotions (marked by
+    // post_copy, NOT in the trace tally), which inflated the ratio into
+    // false compact-alls: bt@2M grew a 193ms monolithic evacuation of its
+    // 140MB live set, and fragmed's tick-paced cycles overfired to 11x
+    // vanilla. A monolithic Full is `previous_pause_started_cycle() &&
+ // previous_pause_finished_mark()` (a cycle's FinalMark finishes but
+    // did not start it).
+    if !(c.previous_pause_started_cycle() && c.previous_pause_finished_mark()) {
+        return;
+    }
     let Some((reserved, live)) = c.mature_footprint_and_live() else {
         return;
     };
