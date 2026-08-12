@@ -5,6 +5,41 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-12 — KNOWN FAILURE (OPEN, top priority): sliced-marking x LOS corruption
+
+Armed-probe spectralnorm under Bactrian dies with OCaml-level
+Invalid_argument "index out of bounds" — a corrupted value, i.e. a REAL GC
+bug, found the moment probe coverage was extended to the LOS bench.
+
+Repro (deterministic, ~2s, laptop or church):
+  MMTK_PLAN=Bactrian MMTK_HEAP_SIZE_MB=192 MMTK_THREADS=1 \
+    PROBE_OUT=/tmp/x setarch x86_64 -R \
+    ./build/mmtk/spectralnorm.probe.native 3000
+
+Bisect matrix (all deterministic):
+  sliced default (T1, UP)          CRASH
+  sliced + MMTK_THREADS=4 (no UP)  CRASH   -> not UP-trace
+  MMTK_MEDIUM_NONMOVING=0          CRASH   -> not pretenuring
+  MMTK_MARK_SLICED=0 (worker-conc) clean
+  MMTK_MARK_SLICED=0 + forced conc clean
+  BACTRIAN_NO_CONCURRENT=1         clean
+  GenImmix                         clean
+  bt/kb armed probes, sliced       clean   -> LOS-band specific (sp = 24KB
+                                              vectors; probe arrays also LOS)
+
+=> The defect is in SLICED-STW MARKING (rounds 25) interacting with
+LargeObjectSpace state — suspect: LOS nursery/mark-bit handling when
+marking quanta run INSIDE nursery pauses (the in-place "promotion" of
+young LOS objects and the quantum's ConcurrentTraceObjects marking may
+disagree about LOS mark state mid-cycle). Probe adds early-allocated LOS
+arrays + periodic Gc.quick_stat, sharpening the window.
+
+Next: mmtk sanity feature at a small heap on the repro (deterministic
+Invalid-reference expected), then rr if needed. Sliced marking stays
+default pending the fix ONLY because no non-probe workload has shown it —
+if a fix is not fast, flip MMTK_MARK_SLICED default off and re-gate.
+Also: PROBE binaries are now part of the standing gate battery.
+
 ## 2026-08-12 — LU's residual = allocation-frontier warmth (store-side, tiered)
 
 LU 1.22x (post-JCC-mitigation) decomposed: topdown store_bound 0.2 -> 16.2%
