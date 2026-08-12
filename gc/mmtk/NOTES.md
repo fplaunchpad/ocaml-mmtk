@@ -58,6 +58,19 @@ v5 battery rerun required. The "8.0 ms max pause" sliced-marking result
 (round 25) was measured before the hijack landed with the round-30
 recalibration; v5 restores and betters it at n2.
 
+**Addendum (same day): tick-origin cycles bypass the nursery gate.** The
+v5 battery showed fragmed 3.4→5.0×: the nursery gate had degraded its
+cycles to 11 monolithic Fulls (GC 293 vs 195 ms as cycles). The gate's
+premise — big nursery ⇒ promotion-bound minors dwarf any quantum — holds
+only for MINOR-paced cycles; fragmed is mature-direct (zero minors), its
+pauses are tick-driven near-empty nursery collections, small at any cap.
+`set_mark_quantum_hint_ms` now carries the firing site; tick-origin
+cycles skip the nursery gate and size quanta by the ~2 MiB tick batch
+(a 16 MiB-nursery estimate under-counted fragmed's pauses 8×). Core
+`8634966611`. bt-def stays Full-regime (14 Fulls), bt-n2 max 17.4 ms,
+all goldens + fragmed T4@192 12/12 + GenImmix pass. v6 battery is the
+reporting battery.
+
 ---
 
 ## 2026-08-12 — fragmed lands: two pacing holes fixed, one T>1 race OPEN

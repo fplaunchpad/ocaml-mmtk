@@ -382,8 +382,12 @@ fn effective_mature_threshold_pages(baseline: usize) -> usize {
 /// this the static 2ms quantum absorbs only a sliver of a large live set's
 /// marking inside a short runway and the remainder used to drain in one
 /// giant FinalMark pause (bt@2M: 29 cycle-completing pauses of 80-130ms).
-/// quantum_ms = (debt / rate) / (runway / nursery), clamped 2..200ms.
-fn hint_mark_quantum(baseline_pages: usize, mature_pages: usize) {
+/// quantum_ms = (debt / rate) / (runway / pause_cadence), clamped 2..200ms.
+/// The pause cadence is what actually yields pauses for this cycle: the
+/// nursery cap for minor-paced cycles, the ~2 MiB tick batch for
+/// mature-direct (tick-origin) ones — fragmed's pauses come only from
+/// ticks, so sizing by a 16 MiB nursery under-counted them 8x.
+fn hint_mark_quantum(baseline_pages: usize, mature_pages: usize, tick_origin: bool) {
     let plan = crate::mmtk().get_plan();
     let Some(c) = plan.concurrent() else { return };
     let pg = mmtk::util::constants::BYTES_IN_PAGE;
@@ -393,18 +397,23 @@ fn hint_mark_quantum(baseline_pages: usize, mature_pages: usize) {
         .policy
         .get_current_heap_size_in_pages();
     let runway_bytes = heap_pages.saturating_sub(mature_pages).max(1) * pg;
-    let nursery = nursery_max_bytes().max(1);
-    let pauses = (runway_bytes / nursery).max(1) as f64;
+    let cadence = if tick_origin {
+        (2 * 1024 * 1024).min(nursery_max_bytes().max(1))
+    } else {
+        nursery_max_bytes().max(1)
+    };
+    let pauses = (runway_bytes / cadence).max(1) as f64;
     let debt_ms = (baseline_pages * pg) as f64 / mark_rate_bytes_per_ms();
     let q = (debt_ms / pauses).clamp(2.0, 200.0);
-    c.set_mark_quantum_hint_ms(q);
+    c.set_mark_quantum_hint_ms(q, tick_origin);
     if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
         eprintln!(
-            "[pace] quantum hint {:.1}ms (debt {}MB, runway {}MB, {} pauses)",
+            "[pace] quantum hint {:.1}ms (debt {}MB, runway {}MB, {} pauses, tick={})",
             q,
             baseline_pages * pg / (1 << 20),
             runway_bytes / (1 << 20),
-            pauses as usize
+            pauses as usize,
+            tick_origin
         );
     }
 }
@@ -440,7 +449,7 @@ pub extern "C" fn mmtk_ocaml_mature_alloc_tick(bytes: usize) {
                 by_mature, by_cadence, mature, baseline, nb / (1 << 20)
             );
         }
-        hint_mark_quantum(baseline, mature);
+        hint_mark_quantum(baseline, mature, true);
         g.force_full_heap_collection();
     }
     // In-flight cycle/sweep: this allocation must also DRIVE the quanta
@@ -891,7 +900,7 @@ impl Collection<OCamlVM> for VMCollection {
                             by_mature, by_cadence, mature, baseline, n, nb / (1 << 20)
                         );
                     }
-                    hint_mark_quantum(baseline, mature);
+                    hint_mark_quantum(baseline, mature, false);
                     g.force_full_heap_collection();
                 }
             }
