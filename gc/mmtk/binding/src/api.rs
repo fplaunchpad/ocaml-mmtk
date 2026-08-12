@@ -188,17 +188,19 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // space-overhead trigger above, so the nursery must NOT be a proportion of it (a
     // proportional nursery grows with the heap → footprint blows up and it stops being
     // generational). Bounded keeps it absolute and commit-on-demand, so small programs do
-    // not pay the full max. The max is 64 MiB: the prior 2–8 MiB default was too small for
-    // high-allocation-rate workloads — it forced hundreds-to-thousands of near-empty minor
-    // collections (e.g. spectralnorm 723 GCs → 89; binarytrees 110 → 20), making GenImmix
-    // 1.3–3× slower single-domain *and* using more RSS than a larger nursery. 64 MiB makes
-    // GenImmix competitive-to-best single-domain at memory parity (see SCALABILITY.md §10).
-    // (It does NOT fix the multi-domain STW-pause anti-scaling — that is structural; use
-    // MMTK_PLAN=Immix/ConcurrentImmix for parallel-heavy workloads.) Overridable via
-    // MMTK_NURSERY (read by MMTKBuilder::new): only install our default when unset.
+    // not pay the full max. History of the max: 2–8 MiB (too small: hundreds-to-thousands
+    // of near-empty minors, GenImmix 1.3–3× slower) → 64 MiB (SCALABILITY.md §10) →
+    // **16 MiB** (2026-08-12, SHAPE rounds 26–28): the nursery-policy sweep on the
+    // JCC-mitigated builds showed 64 MiB buys binarytrees its 0.83× at the cost of a
+    // 1.23× LU outlier (allocation-frontier warmth: a 64 MiB frontier wraps outside the
+    // LLC, so fresh-allocation stores are DRAM-cold; NOTES 2026-08-12). 16 MiB is the
+    // balanced point — bt/sp/kb within ~10 %, LU 1.14× — trading bt's below-vanilla
+    // surplus for panel consistency (the shape-matching goal; per-workload tuning stays
+    // available via MMTK_NURSERY). Overridable via MMTK_NURSERY (read by
+    // MMTKBuilder::new): only install our default when unset.
     if std::env::var_os("MMTK_NURSERY").is_none() {
         assert!(
-            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,67108864"),
+            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,16777216"),
             "failed to set default nursery"
         );
         // Per-domain nursery scaling (stock parity: stock's minor-heap capacity is
