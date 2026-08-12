@@ -5,6 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-12 — the layout lottery IS the JCC erratum (matmul nailed at instruction level)
+
+The fork-ambient / layout-lottery mystery (matmul/LU/kb/fannkuch mutator
+cycles moving ±5-12% between semantically identical builds, all data-side
+PMU counters flat, NoGC-reproducible) is now mechanically explained for
+matmul, with a causal test:
+
+- Topdown splits the class: matmul is FRONTEND-bound (1.0% -> 18.7%),
+  LU is BACKEND (4.6% -> 20.3%: mem 0.7->8.7, core 3.3->11.5),
+  spectralnorm mildly memory-bound (its LOS placement hypothesis was
+  refuted by a null-result experiment — LOS start-phase rotation changed
+  nothing and was reverted, b89f18bcfe).
+- matmul's DSB (uop cache) coverage: vanilla 99.4% (11.59G dsb_uops vs
+  72M mite_uops) — Bactrian build 1.7% (195M vs 11.02G). Icache misses
+  FLAT (1.2 vs 1.3M): not fetch misses — DSB EXCLUSION.
+- Geometry: ocamlopt aligns functions to 16B; whether a function lands at
+  0 or 16 mod 32 is decided by total upstream .text size (hence: any
+  build-size change re-rolls it — the fat/thin LTO matched pair). At
+  mod32=16, matrix_multiply_411's inner-loop jbe back-edge sits at
+  s32=30 len=2 — TOUCHING a 32-byte boundary. Skylake JCC-erratum
+  microcode excludes that whole 32B window from the DSB -> the inner loop
+  cannot stream from the uop cache -> 99% legacy decode -> +16% cycles.
+  Vanilla's draw put the function at mod32=0; its only boundary hits are
+  prologue/cold-tail.
+- CAUSAL TEST: relinking the same .cmx with
+  -Wl,--section-start=.text=+16 moves the function to mod32=0: DSB uops
+  x13 (195M -> 2.48G), cycles 5.40 -> 5.19G. Recovery is PARTIAL (~22%
+  DSB vs vanilla's 99%): the lone-jcc scan misses MACRO-FUSED cmp+jcc
+  pairs crossing boundaries, which the erratum also excludes.
+
+Fix direction (not yet applied): the assembler mitigation
+-Wa,-mbranches-within-32B-boundaries (pads so no branch or fused pair
+touches a 32B boundary — handles fusion, unlike manual shifts), applied
+to BOTH toolchains (vanilla too: this is a CPU-microcode artifact, not a
+GC property — a single-build W comparison at this granularity is not
+methodologically sound either way). Needs a reconfigure+world rebuild of
+both sides on church, then the full panel. LU's backend signature is a
+DIFFERENT mechanism — next specimen after matmul's mitigation validates.
+
 ## 2026-08-10 — Max_young_wosize pretenuring lands (default ON for Bactrian)
 
 Stock's law: a >Max_young_wosize block never transits the minor heap
