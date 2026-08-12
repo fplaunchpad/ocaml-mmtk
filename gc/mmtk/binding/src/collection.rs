@@ -277,15 +277,16 @@ fn mature_pressure_floor_pages() -> usize {
     // trigger can serve. At the historical 32 MiB, any bench with live below
     // ~28 MiB was paced ONLY by the allocation backstop and its mature
     // ballooned to ~10x live (kb: 24 MiB touched vs 2.5 MiB live), where
-    // vanilla's o-law keeps overhead uniform at any live size. Tunable for
-    // the calibration sweep; default set from it.
+    // vanilla's o-law keeps overhead uniform at any live size. Sweep (round 29): 32->8 gives kb -8% RSS (5 fulls
+    // vs 3, wall flat), saturates below 8 (block-occupancy slack dominates);
+    // sp/LU/bt neutral. Default 8.
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
         let mb = std::env::var("MMTK_MATURE_FLOOR_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|m| (1..=1024).contains(m))
-            .unwrap_or(32);
+            .unwrap_or(8);
         let pg = mmtk::util::constants::BYTES_IN_PAGE;
         let nursery_pages = crate::mmtk()
             .get_plan()
