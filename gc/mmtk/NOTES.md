@@ -5,6 +5,37 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-12 — LU's residual = allocation-frontier warmth (store-side, tiered)
+
+LU 1.22x (post-JCC-mitigation) decomposed: topdown store_bound 0.2 -> 16.2%
++ dram_bound 0.1 -> 6.6% (core flat), l2_rqsts.rfo_miss 418K -> 7.7M (18x)
+— the RMW stores of LU's row updates miss L2 in our build, hit in
+vanilla's. The old "all counters at parity" fork-ambient ledger measured
+only LOAD-side events; store-side was never instrumented.
+
+Refuted for THIS mechanism: dTLB stores (small absolutes), THP off
+(worse), pretenure off (no change), jitter 0-24 and granule 512K-4M (RFO
+invariant — NOT pitch conflicts), frontier warmer (worse).
+
+Confirmed: nursery-size sweep. RFO L2-miss count stays ~7.5M from n4 to
+n64, but cycles swing 6.00 -> 6.65G: the misses' DESTINATION tier moves.
+n8 (frontier fits LLC): store misses are L3 hits — LU 6.00G = 1.10x, the
+best ever measured. n64 default: DRAM-cold frontier — 6.65G = 1.22x.
+Vanilla's 2MB arena is one tier better still (L2-warm, 418K L2 misses).
+Our n2 does NOT replicate vanilla's arena: minor-GC copy traffic doubles
+RFO to 15M and per-minor cost dominates (7.14G) — item-1's ~260cy/object
+floor bounds the small end.
+
+The complete LU story: allocation-frontier warmth is a THREE-tier
+economy (L2-warm arena / LLC-warm nursery / DRAM-cold nursery), and the
+64MB default buys bt's throughput at LU's expense. Options (user
+decision, affects every bench): (a) LLC-sized default nursery
+(min(64MB, LLC) — principled, machine-adaptive); (b) keep 64MB and
+document; (c) close the per-minor gap first, then shrink the default
+toward stock's 2MB. spectralnorm 1.10x (memory-bound, placement-refuted)
+is likely this same frontier economy — its 24KB LOS vectors are
+fresh-page cold every allocation.
+
 ## 2026-08-12 — the layout lottery IS the JCC erratum (matmul nailed at instruction level)
 
 The fork-ambient / layout-lottery mystery (matmul/LU/kb/fannkuch mutator
