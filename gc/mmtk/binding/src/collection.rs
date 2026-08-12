@@ -302,6 +302,48 @@ fn mature_pressure_floor_pages() -> usize {
     })
 }
 
+/// Mature-direct allocation tick (pretenured >= 2056B band + LOS): the
+/// pacing law's counters were historically advanced only at minors, so a
+/// pretenure-heavy workload (fragmed) grew mature to the space-full edge
+/// before any cycle fired. The C alloc path calls this every ~2 MiB of
+/// mature-direct allocation; it advances the SAME allocation budget the
+/// post-minor path uses and evaluates the SAME two triggers (pressure %
+/// over baseline, allocation budget), requesting a cycle via
+/// force_full_heap_collection — honored at poll time by
+/// Bactrian::collection_required, no minor required.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_mature_alloc_tick(bytes: usize) {
+    let plan = crate::mmtk().get_plan();
+    let Some(g) = plan.generational() else { return };
+    let nb = NURSERY_BYTES_SINCE_FULL.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    let mature = g.get_mature_reserved_pages();
+    let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
+    let floor = mature_pressure_floor_pages();
+    let threshold = baseline
+        .saturating_add(baseline.saturating_mul(mature_pressure_overhead_pct()) / 100);
+    let by_mature = mature > floor && mature > threshold;
+    let by_cadence = if std::env::var_os("MMTK_FULL_GC_CADENCE").is_some() {
+        false // minor-count override is post-minor-only by definition
+    } else {
+        nb >= cadence_budget_bytes()
+    };
+    if by_mature || by_cadence {
+        if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
+            eprintln!(
+                "[pace] mature-alloc tick trigger by_mature={} by_cadence={} mature={}p baseline={}p nb={}MB",
+                by_mature, by_cadence, mature, baseline, nb / (1 << 20)
+            );
+        }
+        g.force_full_heap_collection();
+    }
+    // In-flight cycle/sweep: this allocation must also DRIVE the quanta
+    // (stock runs major slices off major-heap allocation). Without this, a
+    // no-minor workload's cycle floats forever (fragmed OOM, SHAPE round 30).
+    if let Some(c) = plan.concurrent() {
+        c.request_progress_pause();
+    }
+}
+
 /// Number of collections reported as `Gc.major_collections` (and the field tests
 /// poll to confirm a *major* cycle ran). Full GCs only — see `FULL_GC_COUNT`.
 #[no_mangle]

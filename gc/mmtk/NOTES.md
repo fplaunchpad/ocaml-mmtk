@@ -5,6 +5,46 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-12 — fragmed lands: two pacing holes fixed, one T>1 race OPEN
+
+The new fragmentation-driver bench found three real defects within an hour
+of existing (suite-gap report vindicated a third time):
+
+FIXED (this commit series):
+1. Mature-direct allocation was invisible to cycle pacing (counters only
+   advanced at minors) — fragmed pretenures ~everything, barely minors, and
+   grew mature to the space-full edge (187/192MB) where the calibrated law
+   wanted a cycle at baseline x 1.14. Fix: the C alloc path ticks
+   mmtk_ocaml_mature_alloc_tick every ~2MB of pretenure/LOS allocation; the
+   binding evaluates the SAME pressure/cadence law and requests the cycle;
+   Bactrian::collection_required honors it at poll time (no minor needed).
+2. In-flight cycles also need allocation-driven progress (stock runs major
+   slices off major-heap allocation): request_progress_pause drives
+   mark/sweep quanta from mature-direct allocation.
+3. INCREMENTAL-SWEEP HOLE: a pretenured object born after FinalMark into a
+   freshly-acquired block has zeroed line marks; the DEFERRED SweepChunk
+   visiting its chunk freed the live block (promotions were safe via
+   scan-time line marking; mutator-side pretenured births were not — my
+   round-29 audit missed exactly this case). Fix: allocate-as-live stays
+   armed from InitialMark until the sweep DRAINS (disarmed in
+   sweep_queue_emptied), not until FinalMark.
+
+OPEN — KNOWN FAILURE (T>1 only): fragmed under MMTK_THREADS=4 + sliced
+marking + pretenure crashes nondeterministically (SIGSEGV / OCaml
+Invalid_argument) right after the first InitialMark. T1 is clean (5x + the
+full gate battery); workerconc/noconc/nopret at T4 all clean; the pacing
+tick is NOT the trigger (crashes with margin=2000). This is a genuine
+multi-worker race in the sliced machinery's InitialMark interplay with
+mature-direct allocation; needs rr on church (rr record -c N per the
+playbook). All benchmark configs and the default run MMTK_THREADS with a
+single worker on these workloads; the race does not affect the shipped
+numbers. Repro: MMTK_PLAN=Bactrian MMTK_THREADS=4 fragmed.native 150.
+
+Also noted: fragmed-300 OOMs at 192MB under Bactrian (GenImmix completes):
+pretenure pacing keeps mature+floating above what the nursery-routed
+GenImmix carries; acceptable at the bench's default size (150, which both
+complete) — a pacing-tightness item, not corruption.
+
 ## 2026-08-12 — FIXED same day (mmtk-core 2685ff30f7): sliced-marking x LOS corruption
 
 Armed-probe spectralnorm under Bactrian dies with OCaml-level

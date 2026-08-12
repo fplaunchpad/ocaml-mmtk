@@ -669,6 +669,20 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
     caml_mut_gc_alloc_tsc[slot] +=
       (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
   if (p == NULL) caml_raise_out_of_memory();
+  /* Mature-direct pacing tick (pretenure + LOS): batches ~2MB then lets the
+     binding evaluate the cycle-trigger law — without this, a workload that
+     allocates straight to mature runs to the space-full edge before any
+     cycle fires (fragmed; SHAPE round 30). */
+  if (sem != CAML_MMTK_SEM_DEFAULT) {
+    static _Atomic size_t mature_tick_acc = 0;
+    size_t b = (size_t)Whsize_wosize(wosize) * sizeof(value);
+    size_t acc = atomic_fetch_add_explicit(&mature_tick_acc, b,
+                                           memory_order_relaxed) + b;
+    if (acc >= (2u << 20)) {
+      atomic_fetch_sub_explicit(&mature_tick_acc, acc, memory_order_relaxed);
+      mmtk_ocaml_mature_alloc_tick(acc);
+    }
+  }
   return (value)p;
 }
 
