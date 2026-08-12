@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-12 (later) — round 30b: the concurrent cycle path never fired; emergency hijack + trigger clamp + slice sizing
+
+The v4 campaign's D3 streams showed 80–140 ms cycle-completing pauses at
+bt@192M — and `BACTRIAN_TRACE` showed why: **every major ran as an emergency
+monolithic `Pause::Full`; zero InitialMarks**. Three stacked causes, all
+fixed (core `ba82e68273`, binding commit this tree):
+
+1. **The emergency hijack.** A binding-forced pressure cycle is honored at
+   the first poll after the minor that armed it — which is the triggering
+   allocation's own TLAB-refill poll, so *no successful allocation happens
+   between the two GCs*. mmtk-core counts that as a failed-allocation retry
+   (`cur_collection_attempts = 2`), and `decide_pause` read `attempts > 1`
+   as an allocation emergency → STW Full. Every post-minor pressure trigger
+   degraded this way (tick-path triggers survived: the mature alloc that
+   ticks succeeds first). The sweep quantum's emergency test suffered the
+   same hijack — silently draining unbudgeted after every force. All three
+   consumers now use `genuine_allocation_emergency()` (`attempts > 2`); a
+   real OOM loop still degrades, one bounded nursery-class pause later.
+2. **The margin could out-range the heap.** With the round-30 150% margin,
+   `live×2.5` exceeds a fixed 192 MiB heap for a 140 MB live set (and every
+   dynamic heap: 120% growth < 150% margin) — the pressure target was
+   unreachable, so exhaustion always won. The trigger is now
+   `min(baseline×(1+margin), heap_limit×MMTK_CONC_TRIGGER_PCT%)` (default
+   80, concurrent plans only, one-nursery thrash guard).
+3. **The 2 ms quantum couldn't carry a big live set.** Marking 140 MB
+   inside a ~40 MB runway needs ~7 ms/pause at n2 — the static budget
+   absorbed a sliver and FinalMark drained the rest in one 80–130 ms gulp.
+   The binding now hints `debt/(runway/nursery)` per cycle
+   (`ConcurrentPlan::set_mark_quantum_hint_ms`, stock's slice law;
+   `MMTK_MARK_RATE_MBPMS`), and mid-cycle allocation emergencies upgrade
+   the quantum to unbudgeted so the freeing sweep can follow.
+
+**Feasibility gates** (matching doctrine: slicing must *earn* its overhead):
+at n16 the minors are promotion-bound (~45 ms) and the runway fits 1–2
+pauses — no quantum gets under the existing pauses, while sliced cycles cost
++9% GC time over the monolithic Full (3181 vs 2946 ms measured). So sliced
+cycles now run only when `nursery ≤ MMTK_SLICE_MAX_NURSERY_MB` (4) and the
+hinted budget ≤ `MMTK_MAX_QUANTUM_MS` (50); otherwise monolithic Full.
+
+Measured, bt-20@192M fixed, 1 worker: **n2 max pause 130.6 → 19.4 ms** (17
+true cycles, 0 Fulls; GC time 5100 → 6231 ms — the honest slice tax,
++22%, notable as floating-garbage/allocate-as-live copies: 39.9 M → 52.0 M
+objects). def (n16) keeps the Full regime by the nursery gate: 13 Fulls,
+GC ≈ v4. Canaries: def/n2/oldify × 7 benches vs goldens PASS, fragmed
+T4@192 12/12, GenImmix bt/kb/fragmed PASS. (fragmed@64M T4 OOMs — pre-
+existing, church's pre-fix build OOMs identically; needs its own look.)
+
+Consequence for the campaign: v4's def-config numbers stand (same Full
+regime), but every n2 stream (D3/D2) and small-heap pareto cell changes —
+v5 battery rerun required. The "8.0 ms max pause" sliced-marking result
+(round 25) was measured before the hijack landed with the round-30
+recalibration; v5 restores and betters it at n2.
+
+---
+
 ## 2026-08-12 — fragmed lands: two pacing holes fixed, one T>1 race OPEN
 
 The new fragmentation-driver bench found three real defects within an hour

@@ -175,6 +175,13 @@ static AWAITING_SWEEP_BASELINE: AtomicBool = AtomicBool::new(false);
 /// promotions land mature continuously, so a small margin over a large
 /// baseline fires at the same allocation period as vanilla's large margin
 /// over its swept-live base. MMTK_MATURE_OVERHEAD_PCT overrides.
+///
+/// ROUND 30: the margin is one half of a two-tier law — concurrent plans
+/// additionally clamp the trigger to a fraction of the heap limit
+/// (`conc_trigger_pct`), because a margin target above the heap limit can
+/// never fire and every major then degrades to an emergency STW Full.
+/// The margin governs small live sets; the clamp governs big-live-set and
+/// fixed/tight-heap regimes.
 fn mature_pressure_overhead_pct() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
@@ -308,6 +315,100 @@ fn mature_pressure_floor_pages() -> usize {
     })
 }
 
+/// Concurrent early-trigger clamp, as a percentage of the CURRENT heap
+/// limit (round 30). The margin law alone breaks on big-live-set programs:
+/// with `live x (1+margin)` above the heap limit the pressure target can
+/// never be reached, the heap physically fills first, and every major
+/// degrades to an emergency monolithic STW Full (binarytrees@192M: all 13
+/// majors ran as 80-140ms Fulls — the concurrent cycle path never fired;
+/// same on every dynamic heap, whose 120% growth budget is below the 150%
+/// margin). Every concurrent collector starts its cycle before exhaustion —
+/// stock OCaml's slice pacing likewise targets cycle completion before
+/// heap-full. The trigger therefore fires at
+///   min(baseline x (1+margin), heap_limit x MMTK_CONC_TRIGGER_PCT%)
+/// for concurrent plans (a thrash guard keeps the clamp at least one
+/// nursery of growth above the baseline: a live set parked at ~clamp size
+/// must actually allocate before a new cycle fires). Non-concurrent plans
+/// (GenImmix) keep the pure margin law — firing early buys a monolithic
+/// STW plan nothing. 0 disables the clamp.
+fn conc_trigger_pct() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MMTK_CONC_TRIGGER_PCT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|p| *p <= 100)
+            .unwrap_or(80)
+    })
+}
+
+/// Assumed mark throughput for the quantum-sizing law, MB per ms
+/// (MMTK_MARK_RATE_MBPMS overrides; ~1.0 measured on the Skylake bench
+/// host: a 140MB live set monolithically marks in ~138ms).
+fn mark_rate_bytes_per_ms() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MMTK_MARK_RATE_MBPMS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|r| *r > 0.0)
+            .unwrap_or(1.0)
+            * 1048576.0
+    })
+}
+
+/// The mature-pressure threshold with the concurrent early-trigger clamp
+/// applied (see `conc_trigger_pct`). Shared by the post-minor path and the
+/// mature-direct allocation tick.
+fn effective_mature_threshold_pages(baseline: usize) -> usize {
+    let margin = baseline.saturating_add(
+        baseline.saturating_mul(mature_pressure_overhead_pct()) / 100,
+    );
+    let pct = conc_trigger_pct();
+    let plan = crate::mmtk().get_plan();
+    if pct == 0 || plan.concurrent().is_none() {
+        return margin;
+    }
+    let trig = &plan.base().gc_trigger;
+    let clamp = trig.policy.get_current_heap_size_in_pages() * pct / 100;
+    // Thrash guard: at least one nursery of growth over the baseline.
+    let clamp = clamp.max(baseline.saturating_add(trig.get_max_nursery_pages()));
+    margin.min(clamp)
+}
+
+/// Stock's mark-slice sizing law, applied at cycle-trigger time: spread the
+/// mark debt (post-sweep live ~= baseline) over the pauses the remaining
+/// runway will yield, and hint the plan's per-pause quantum budget. Without
+/// this the static 2ms quantum absorbs only a sliver of a large live set's
+/// marking inside a short runway and the remainder used to drain in one
+/// giant FinalMark pause (bt@2M: 29 cycle-completing pauses of 80-130ms).
+/// quantum_ms = (debt / rate) / (runway / nursery), clamped 2..200ms.
+fn hint_mark_quantum(baseline_pages: usize, mature_pages: usize) {
+    let plan = crate::mmtk().get_plan();
+    let Some(c) = plan.concurrent() else { return };
+    let pg = mmtk::util::constants::BYTES_IN_PAGE;
+    let heap_pages = plan
+        .base()
+        .gc_trigger
+        .policy
+        .get_current_heap_size_in_pages();
+    let runway_bytes = heap_pages.saturating_sub(mature_pages).max(1) * pg;
+    let nursery = nursery_max_bytes().max(1);
+    let pauses = (runway_bytes / nursery).max(1) as f64;
+    let debt_ms = (baseline_pages * pg) as f64 / mark_rate_bytes_per_ms();
+    let q = (debt_ms / pauses).clamp(2.0, 200.0);
+    c.set_mark_quantum_hint_ms(q);
+    if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
+        eprintln!(
+            "[pace] quantum hint {:.1}ms (debt {}MB, runway {}MB, {} pauses)",
+            q,
+            baseline_pages * pg / (1 << 20),
+            runway_bytes / (1 << 20),
+            pauses as usize
+        );
+    }
+}
+
 /// Mature-direct allocation tick (pretenured >= 2056B band + LOS): the
 /// pacing law's counters were historically advanced only at minors, so a
 /// pretenure-heavy workload (fragmed) grew mature to the space-full edge
@@ -325,8 +426,7 @@ pub extern "C" fn mmtk_ocaml_mature_alloc_tick(bytes: usize) {
     let mature = g.get_mature_reserved_pages();
     let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
     let floor = mature_pressure_floor_pages();
-    let threshold = baseline
-        .saturating_add(baseline.saturating_mul(mature_pressure_overhead_pct()) / 100);
+    let threshold = effective_mature_threshold_pages(baseline);
     let by_mature = mature > floor && mature > threshold;
     let by_cadence = if std::env::var_os("MMTK_FULL_GC_CADENCE").is_some() {
         false // minor-count override is post-minor-only by definition
@@ -340,6 +440,7 @@ pub extern "C" fn mmtk_ocaml_mature_alloc_tick(bytes: usize) {
                 by_mature, by_cadence, mature, baseline, nb / (1 << 20)
             );
         }
+        hint_mark_quantum(baseline, mature);
         g.force_full_heap_collection();
     }
     // In-flight cycle/sweep: this allocation must also DRIVE the quanta
@@ -770,9 +871,7 @@ impl Collection<OCamlVM> for VMCollection {
                     + nursery_max_bytes();
                 let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
                 let floor = mature_pressure_floor_pages();
-                let threshold = baseline.saturating_add(
-                    baseline.saturating_mul(mature_pressure_overhead_pct()) / 100,
-                );
+                let threshold = effective_mature_threshold_pages(baseline);
                 let by_mature = mature > floor && mature > threshold;
                 // MMTK_FULL_GC_CADENCE (a minor count) remains the explicit
                 // experiment override; the DEFAULT backstop is allocation-
@@ -792,6 +891,7 @@ impl Collection<OCamlVM> for VMCollection {
                             by_mature, by_cadence, mature, baseline, n, nb / (1 << 20)
                         );
                     }
+                    hint_mark_quantum(baseline, mature);
                     g.force_full_heap_collection();
                 }
             }
