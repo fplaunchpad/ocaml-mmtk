@@ -1142,3 +1142,24 @@ recently-freed blocks (LIFO reuse) would cap touched pages near the
 working-set AND serve allocation from cache-warm pages — the same
 mechanism as LU/sp's frontier-warmth gap. One change, both dimensions;
 D1-gated as always.
+
+### Round 29: incremental sweep + auto-compaction law — measured, one adopted, one parked (2026-08-12)
+
+Incremental sweep (v3 addendum has the numbers): cycle pauses 2.03ms mean
+/ 6.16 max; bt mid-front wall −13% at constant RSS; kb front left-shifted.
+D1 regression resolved (pause-gate hoist + wobble band; GC time itself
+IMPROVED 2422→2196ms on bt). Refuted en route: margin recalibration (14%
+stands, 28≈29 cycles on the post-sweep baseline), opt-level=z (−0.1MiB /
++37% GC), eager drain-on-pending-cycle (doubled minor tail; emergency-only
+now).
+
+Auto-compaction (the v3 addendum's option A) implemented knob-gated and
+CALIBRATION-REFUTED for the current panel: sp stormed the trigger via a
+tiny denominator (fixed: >=64 live-block floor), kb turned out NOT to be
+steady-state fragmented — its occupancy slack was floating-garbage TIMING
+(mid-run smaps vs post-sweep state), which incremental sweep already
+addresses — and bt/LU blocks are full. Default OFF; the law and its
+metric (post_sweep_fragmentation) are in place awaiting a genuinely
+fragmenting workload. This is the second time a suite gap (no
+fragmentation driver) has bounded what we can measure — the add-benches
+decision now blocks two calibrations.
