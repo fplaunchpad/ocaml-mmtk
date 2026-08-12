@@ -158,6 +158,11 @@ static LAST_FULL_GC_MATURE_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// way stock OCaml's pacing bounds the minor GCs between full major cycles.
 static NURSERY_GCS_SINCE_FULL: AtomicUsize = AtomicUsize::new(0);
 
+/// Incremental sweep (Bactrian sliced mode): FinalMark ended but its deferred
+/// sweep is still draining — the mature-pressure baseline reset is postponed
+/// until the first pause that reports the sweep queue empty.
+static AWAITING_SWEEP_BASELINE: AtomicBool = AtomicBool::new(false);
+
 /// Mature-space growth (over the post-full-GC baseline) that forces the next
 /// collection to be a full heap GC, as a percentage. 120% ≈ stock OCaml's default
 /// `space_overhead` (a full major cycle's worth of mature growth between full GCs).
@@ -676,11 +681,27 @@ impl Collection<OCamlVM> for VMCollection {
                 NURSERY_GCS_SINCE_FULL.store(0, Ordering::Relaxed);
                 NURSERY_BYTES_SINCE_FULL.store(0, Ordering::Relaxed);
             }
-            if was_full {
-                // A major cycle just finished (FinalMark or Full): the mature heap
-                // was retraced + swept, so its size is authoritative — reset the
-                // mature-pressure baseline.
+            // INCREMENTAL SWEEP: with the sweep deferred into quanta, the
+            // mature page count at FinalMark still contains the whole cycle's
+            // garbage — resetting the pressure baseline there would inflate it
+            // and stretch the period. Latch "cycle finished, awaiting sweep"
+            // and reset the baseline at the first pause whose sweep queue is
+            // drained (plans that sweep in-pause report drained immediately,
+            // so the STW mode and Full pauses keep the historical behaviour).
+            let sweep_done = plan.concurrent().map(|c| c.sweep_drained()).unwrap_or(true);
+            if was_full && sweep_done {
                 LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
+                AWAITING_SWEEP_BASELINE.store(false, Ordering::Relaxed);
+            } else if was_full {
+                AWAITING_SWEEP_BASELINE.store(true, Ordering::Relaxed);
+            } else if AWAITING_SWEEP_BASELINE.load(Ordering::Relaxed) && sweep_done {
+                // First post-FinalMark pause with the sweep complete: the
+                // mature count is now authoritative.
+                LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
+                AWAITING_SWEEP_BASELINE.store(false, Ordering::Relaxed);
+            }
+            if was_full {
+                // (kept: was_full also feeds the pause-log flag below)
             } else {
                 // Nursery (minor) GC. Force the NEXT collection to be a full heap GC
                 // if EITHER trigger fires:
