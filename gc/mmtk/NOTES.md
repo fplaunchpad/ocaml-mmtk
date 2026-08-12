@@ -5,7 +5,7 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## 2026-08-12 — KNOWN FAILURE (OPEN, top priority): sliced-marking x LOS corruption
+## 2026-08-12 — FIXED same day (mmtk-core 2685ff30f7): sliced-marking x LOS corruption
 
 Armed-probe spectralnorm under Bactrian dies with OCaml-level
 Invalid_argument "index out of bounds" — a corrupted value, i.e. a REAL GC
@@ -34,7 +34,20 @@ young LOS objects and the quantum's ConcurrentTraceObjects marking may
 disagree about LOS mark state mid-cycle). Probe adds early-allocated LOS
 arrays + periodic Gc.quick_stat, sharpening the window.
 
-Next: mmtk sanity feature at a small heap on the repro (deterministic
+RESOLVED: sanity was CLEAN (freed LOS pages stay mapped — the checker
+cannot see this class); gdb on caml_array_bound_error_asm placed the
+crash inside Probe.tick — the probe's own LOS gap buffers freed live.
+Root cause: los.trace_object skips MATURE objects when in_nursery_gc
+(latched by the enclosing NURSERY pause), so sliced quanta no-op'd their
+mature-LOS marking and FinalMark swept live objects. Fix: quanta scope
+full-heap LOS semantics (AtomicBool + scoped override); plus young-LOS
+now counts as young in is_object_in_nursery/should_skip_concurrent_trace
+(admission side of the same window). Worker-concurrent has the same
+LATENT window upstream (drain racing the next minor's re-latch) — noted
+in the commit for an upstream report. Probe binaries are now a standing
+gate battery.
+
+Was: Next: mmtk sanity feature at a small heap on the repro (deterministic
 Invalid-reference expected), then rr if needed. Sliced marking stays
 default pending the fix ONLY because no non-probe workload has shown it —
 if a fix is not fast, flip MMTK_MARK_SLICED default off and re-gate.
