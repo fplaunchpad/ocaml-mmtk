@@ -185,7 +185,13 @@ fn mature_pressure_overhead_pct() -> usize {
             .unwrap_or(MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT)
     })
 }
-const MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT: usize = 14;
+// Recalibrated 2026-08-12 (round 30): the incremental-sweep work moved the
+// baseline to POST-SWEEP reserved pages (≈ live, compact) — the old 14%
+// margin was calibrated against the inflated post-FinalMark baseline and
+// became razor-thin over the new base (bt-def stormed 46 fulls). Joint
+// sweep on the new base: 150% gives bt@2M 28 cycles (vanilla o=500: 29)
+// and bt-def 13 fulls (historical 10).
+const MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT: usize = 150;
 
 /// Cadence backstop: force a full heap GC after at most this many nursery (minor)
 /// GCs since the last full GC, even if the mature heap has not grown enough to trip
