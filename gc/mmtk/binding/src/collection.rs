@@ -161,7 +161,23 @@ static NURSERY_GCS_SINCE_FULL: AtomicUsize = AtomicUsize::new(0);
 /// Mature-space growth (over the post-full-GC baseline) that forces the next
 /// collection to be a full heap GC, as a percentage. 120% ≈ stock OCaml's default
 /// `space_overhead` (a full major cycle's worth of mature growth between full GCs).
-const MATURE_PRESSURE_OVERHEAD_PCT: usize = 120;
+/// D2 calibration (SHAPE round 28): 120% ran 15 mark cycles on bt@2M where
+/// vanilla at space_overhead=500 (the benchmark baseline setting) runs 29 —
+/// our post-cycle baseline includes the marking window's floating garbage,
+/// so the same nominal margin compounds to a longer period.
+/// MMTK_MATURE_OVERHEAD_PCT overrides for experiments; the default is the
+/// value calibrated so bt@2M matches vanilla's cycle count.
+fn mature_pressure_overhead_pct() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MMTK_MATURE_OVERHEAD_PCT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|p| (5..=2000).contains(p))
+            .unwrap_or(MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT)
+    })
+}
+const MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT: usize = 120;
 
 /// Cadence backstop: force a full heap GC after at most this many nursery (minor)
 /// GCs since the last full GC, even if the mature heap has not grown enough to trip
@@ -669,7 +685,7 @@ impl Collection<OCamlVM> for VMCollection {
                 let baseline = LAST_FULL_GC_MATURE_PAGES.load(Ordering::Relaxed);
                 let floor = mature_pressure_floor_pages();
                 let threshold = baseline.saturating_add(
-                    baseline.saturating_mul(MATURE_PRESSURE_OVERHEAD_PCT) / 100,
+                    baseline.saturating_mul(mature_pressure_overhead_pct()) / 100,
                 );
                 let by_mature = mature > floor && mature > threshold;
                 // MMTK_FULL_GC_CADENCE (a minor count) remains the explicit
