@@ -1163,3 +1163,46 @@ metric (post_sweep_fragmentation) are in place awaiting a genuinely
 fragmenting workload. This is the second time a suite gap (no
 fragmentation driver) has bounded what we can measure — the add-benches
 decision now blocks two calibrations.
+
+### Round 30: three new benches, UP-oldify, and the trigger law repaired end-to-end (2026-08-12)
+
+The round the suite additions paid for themselves twice. Full narrative in
+NOTES 2026-08-12 (both entries); reporting battery `wcomp6` on church.
+
+**a) Suite: mature_mutation / weak_memo / fragmed land** (vanilla-matching
+outputs, goldens committed). Instant returns: fragmed exposed two pacing
+holes (mature-direct allocation invisible to the trigger law; in-flight
+quanta stalling without minors → tick + request_progress_pause) and the
+FinalMark sweep-parking race (fixed, 0/12 T4).
+
+**b) UP-oldify (MMTK_UP_OLDIFY=1, opt-in)**: the binding walks the nursery
+closure natively (minor_gc.c's structure — header-sentinel forwarding,
+layer-batched drain, monomorphized ops). bt@n8 GC time 2981→2574 ms;
+attribution 387→345 cy/object with the drain-loop bucket 135→47 (the loop
+now lives in the binding at 123, cheaper than plan+core dispatch). Two
+refuted shapes en route (dyn-dispatch vtable per slot; per-object stack) —
+the round-24 lesson held both times.
+
+**c) The pacing regression v4 caught, and the repair (30b/30c)**: the 150%
+recalibration made the margin target unreachable (fixed 192M: 2.5×live >
+heap; every dynamic heap: 120% growth < 150% margin) — and an
+`attempts>1` emergency-detection hijack was ALSO degrading every
+post-minor-forced cycle to a monolithic STW Full regardless. Bactrian's
+concurrent path was silently dead at every campaign config. Repair:
+genuine-emergency = attempts>2; trigger = min(margin, heap×80%); quantum
+sized debt/(runway/cadence) per stock's slice law; slicing gated to
+small-nursery (≤4M) or tick-paced cycles — big-nursery minor-paced majors
+KEEP the monolithic Full (measured cheaper at the same worst-case pause).
+
+**v6 readout (11 benches, church, 192M/n16 vs vanilla o=500):**
+D1 geomean 1.22 default / 1.19 oldify; original-8 panel with oldify ≈
+1.05 (bt 1.11, LU 1.14, kb 1.07, sp 1.06, matmul 0.99, rest ≤1.01).
+New-bench gaps are the research findings: mature_mutation 1.62–1.77
+(promotion cost × slot-grain remset — the #27 target), fragmed 3.06
+(pretenure band + mature churn — vanilla's free-list reuse regime).
+D3 @2M: bt max pause 16.6 ms vs vanilla 15.0 (was 130 before the repair);
+matmut 20 vs 41 at n16. D2 (cumulative STW vs wall): bt default tracks
+vanilla's curve; LU/sp cycle more often than vanilla's o=500 (which does
+0–2 majors) at negligible absolute cost (34–85 ms). D5: kb frontier floor
+~19M vs vanilla ~8M (block+metadata floor), bt fronts converge at the
+memory-rich end.
