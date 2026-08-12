@@ -148,7 +148,11 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `Bactrian` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
   Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix/Bactrian.
   `Bactrian` (RQ7) = copying nursery + concurrently-marked STW-evacuated Immix mature + SATB —
-  stock-ARCHITECTURE (not implementation: sweep is STW at FinalMark, marking on GC workers — NOTES 2026-07-02); debug knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
+  stock-ARCHITECTURE (sweep is STW at FinalMark; since 2026-08-11 marking runs as **sliced-STW
+  quanta inside nursery pauses** by default — stock's mark-slice discipline on the GC worker,
+  `MMTK_MARK_SLICED=0` restores worker-concurrent marking; SHAPE.md rounds 23–26 cover the
+  W-parity campaign: pretenuring, UP-trace, sliced marking, JCC-erratum methodology); debug
+  knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
 - `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
   full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 16 MiB..physical-RAM, so
   RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set
