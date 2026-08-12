@@ -315,6 +315,66 @@ fn mature_pressure_floor_pages() -> usize {
     })
 }
 
+/// Evaluate the compaction law at a post-sweep baseline latch (stock's
+/// `Gc.max_overhead` analog, round 30). The inputs are the mature Immix
+/// space's post-sweep RESERVED bytes vs the LIVE bytes its last major
+/// marking epoch actually marked — the only pair that separates the three
+/// regimes: a dense growing heap (binarytrees: reserved ≈ live, never
+/// fires), an effectively swept heap (fragmed: reserved ≈ live, never
+/// fires), and line-pinned waste (mature_mutation: 6.6MB live pinning
+/// 17-46MB of lines whose 256B granularity cannot free interleaved dead
+/// cells — fires, and the COMPACT-ALL evacuation is the only mechanism
+/// that reclaims it). Post-compaction, reserved collapses to ≈live and the
+/// law is quiet until waste re-accumulates — self-limiting cadence.
+fn note_swept_baseline(_baseline_pages: usize) {
+    let pct = compact_overhead_pct();
+    if pct == 0 {
+        return;
+    }
+    let plan = crate::mmtk().get_plan();
+    let Some(c) = plan.concurrent() else { return };
+    let Some((reserved, live)) = c.mature_footprint_and_live() else {
+        return;
+    };
+    if live == 0 {
+        return;
+    }
+    let floor = mature_pressure_floor_pages() * mmtk::util::constants::BYTES_IN_PAGE;
+    let threshold = live.saturating_add(live.saturating_mul(pct) / 100);
+    if reserved > floor && reserved > threshold {
+        if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
+            eprintln!(
+                "[compact] mature {}KB reserved vs {}KB live (+{}%) — compact-all next major",
+                reserved / 1024,
+                live / 1024,
+                pct
+            );
+        }
+        c.request_mature_compaction();
+        if let Some(g) = plan.generational() {
+            g.force_full_heap_collection();
+        }
+    }
+}
+
+/// Mature-compaction overhead threshold, percent (stock's `Gc.max_overhead`
+/// analog, round 30): when mature reserved pages exceed the live estimate
+/// by this margin, request a COMPACT-ALL Full (every block a defrag source
+/// — hole-based selection cannot see intra-line waste). 0 disables.
+/// Measured driver: mature_mutation's dynamic-heap RSS staircased to 120MB
+/// over ~8MB truly live. MMTK_COMPACT_OVERHEAD_PCT overrides.
+fn compact_overhead_pct() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("MMTK_COMPACT_OVERHEAD_PCT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|p| *p <= 10000)
+            .unwrap_or(100)
+    })
+}
+
+
 /// Concurrent early-trigger clamp, as a percentage of the CURRENT heap
 /// limit (round 30). The margin law alone breaks on big-live-set programs:
 /// with `live x (1+margin)` above the heap limit the pressure target can
@@ -850,6 +910,7 @@ impl Collection<OCamlVM> for VMCollection {
             if was_full && sweep_done {
                 LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
                 AWAITING_SWEEP_BASELINE.store(false, Ordering::Relaxed);
+                note_swept_baseline(mature);
             } else if was_full {
                 AWAITING_SWEEP_BASELINE.store(true, Ordering::Relaxed);
             } else if AWAITING_SWEEP_BASELINE.load(Ordering::Relaxed) && sweep_done {
@@ -857,6 +918,7 @@ impl Collection<OCamlVM> for VMCollection {
                 // mature count is now authoritative.
                 LAST_FULL_GC_MATURE_PAGES.store(mature, Ordering::Relaxed);
                 AWAITING_SWEEP_BASELINE.store(false, Ordering::Relaxed);
+                note_swept_baseline(mature);
             }
             if was_full {
                 // (kept: was_full also feeds the pause-log flag below)

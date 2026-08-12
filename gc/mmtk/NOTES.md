@@ -5,7 +5,49 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## 2026-08-12 (later) — round 30b: the concurrent cycle path never fired; emergency hijack + trigger clamp + slice sizing
+## 2026-08-13 — round 30d: line-blind waste, the compaction law, and the staged free-list band
+
+**The mature_mutation D4 excursion** (user-flagged: RSS 120MB vs ~26 vanilla,
+>>the accepted ~25MB overhead): its dead 24B cells interleave with live ones
+on the same 256B lines, so line-granular reclamation frees NOTHING — 6.6MB
+live pinned 46→120MB of lines while every block reported itself fully
+occupied. Every line/block statistic is equally blind (holes=0), so both
+the round-29 partial/live trigger AND hole-bucket defrag selection can
+never see it. Only the trace knows: `ImmixSpace::major_live_bytes` now
+tallies bytes marked per major epoch (~one relaxed add per marked object).
+
+**The law** (`note_swept_baseline`, stock `Gc.max_overhead` analog,
+MMTK_COMPACT_OVERHEAD_PCT=100, 0=off): at each post-sweep baseline latch,
+if immix reserved > live×2 (and > the pressure floor) → the next major is
+a **COMPACT-ALL Full**: every in-use block a defrag source
+(`Defrag::compact_all_once` + PrepareBlockState.compact_all), bounded by
+copy headroom (leftovers stay; convergent), pages of compaction-freed
+blocks madvised back unconditionally (`release_block_with` — reserved
+collapsed 46→7MB but RSS stayed flat without it; steady-state recycling
+keeps the MMTK_RELEASE_FREED_PAGES fast path). Discrimination measured:
+bt/kb/sp fire ZERO (dense/floored/LOS-immune); matmut fires ~7 (D4 peak
+120→68, steady 60 ✓ doctrine); fragmed fires ~15 (D4 189→~98, at a D1
+cost: GC 195→793ms — the compaction tax; see below). A geometric
+hysteresis variant was tried and dropped: it let matmut's slack re-ratchet
+to 105 (its rebuild is perpetual; spacing must not be geometric for the
+law's actual target).
+
+**The staged free-list band (MMTK_MEDIUM_TO=freelist, DEFAULT OFF).**
+fragmed's root fix is vanilla's regime: the ≥2056B band in the common
+mark-sweep nonmoving space (free-list reuse in place, no cycles). Landed
+but staged off after finding it UNSOUND under concurrent cycles: the MS
+lazy sweep runs at block-acquisition using the in-flight cycle's
+incomplete marks and frees not-yet-marked live cells (reproduced: marking
+quantum scanning a freed cell whose header was a free-list link);
+`eager_sweeping` deadlocks under Bactrian's pause schedule. Landed
+groundwork: allocate-black in FreeListAllocator (mid-cycle births carry
+the mark bit; the free-list analog of Immix allocate-as-live) and
+`get_mature_reserved_pages` now counts the nonmoving space (a band-heavy
+workload was invisible to pacing: 1 GC, 203MB). Sound design for the next
+round: mid-cycle MS block acquisition must serve CLEAN blocks only.
+
+Validation: goldens ×3 variants, fragmed T4@192 12/12 (+10 more),
+matmut T4 6/6, GenImmix, D4 curves. wcomp7 is the reporting battery.
 
 The v4 campaign's D3 streams showed 80–140 ms cycle-completing pauses at
 bt@192M — and `BACTRIAN_TRACE` showed why: **every major ran as an emergency
