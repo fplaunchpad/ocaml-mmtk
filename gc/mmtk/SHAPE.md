@@ -1103,3 +1103,42 @@ defaults, church): panel geomean **1.009x vanilla** — bt 0.83 / matmul
 0.98 / kb 0.98 / nbody+fannkuch+mandelbrot 1.00 / sp 1.10 / LU 1.23,
 instruction parity throughout, max pause 8.0ms vs vanilla 15.2, outputs
 byte-identical, every residual mechanism named and measured.
+
+### Round 28: D5 pareto — the honest frontier, front-to-front (2026-08-12)
+
+KC's priority dimension, measured properly for the first time: BOTH sides
+swept over BOTH their knobs (Bactrian heap x nursery, 24 grid cells/bench;
+vanilla space_overhead x minor-size s, 18 cells/bench), pareto fronts
+extracted. Prior D5 charts swept our heap at a fixed nursery against
+vanilla's o at its default s — understating both sides.
+
+Key methodological discovery: vanilla's own front moves ENORMOUSLY with s —
+bt at o500 default-s runs 3.65s, at s=4M (a 32MB minor arena — the analog
+of our n16!) it runs 2.80s. The D1 panel's "vanilla baseline" (default s =
+2MB arena) is vanilla's SMALL-nursery config while ours is n16: the
+front-to-front comparison is the only fair D5 (and arguably D1) view.
+
+Fronts (RSS MiB / wall s, best cells):
+  bt: vanilla 61/8.6 .. 155/2.8   Bactrian 113/6.8 .. 384/4.0
+  kb: vanilla 8/1.6 .. 16/1.4     Bactrian 29/1.7 .. 37/1.6
+  LU: vanilla 17/1.7 (one point)  Bactrian 28/2.2 .. 34/1.9
+  sp: vanilla 5/1.5 .. 16/1.4     Bactrian 14/1.8 .. 28/1.6
+
+Verdict: vanilla's front DOMINATES ours on all four benches. The gap
+decomposes into three named components:
+  (i) constant floor ~7.5 MiB (staticlib pages 4.9 + side-metadata 2.6 —
+      the "MMTk exists" cost, documented);
+  (ii) space overhead on the front: nursery residency + mature
+      block-granularity + copy headroom — our tight points run ~1.8-3x
+      vanilla's RSS at matched wall;
+  (iii) bt's wall FLOOR: vanilla reaches 2.8s at any memory >=155M; our
+      floor is 4.0s — that is per-minor economics (option c), not memory.
+
+Next lever (hypothesis, from the anatomy): block-reuse ordering. At
+generous heaps our touched-high-water grows toward the pinned heap (Immix
+acquires fresh blocks while recently-freed ones sit in the free list),
+where vanilla recycles its arena + pool chunks continuously. Preferring
+recently-freed blocks (LIFO reuse) would cap touched pages near the
+working-set AND serve allocation from cache-warm pages — the same
+mechanism as LU/sp's frontier-warmth gap. One change, both dimensions;
+D1-gated as always.
