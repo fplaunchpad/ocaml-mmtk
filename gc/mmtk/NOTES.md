@@ -29,16 +29,22 @@ FIXED (this commit series):
    armed from InitialMark until the sweep DRAINS (disarmed in
    sweep_queue_emptied), not until FinalMark.
 
-OPEN — KNOWN FAILURE (T>1 only): fragmed under MMTK_THREADS=4 + sliced
-marking + pretenure crashes nondeterministically (SIGSEGV / OCaml
-Invalid_argument) right after the first InitialMark. T1 is clean (5x + the
-full gate battery); workerconc/noconc/nopret at T4 all clean; the pacing
-tick is NOT the trigger (crashes with margin=2000). This is a genuine
-multi-worker race in the sliced machinery's InitialMark interplay with
-mature-direct allocation; needs rr on church (rr record -c N per the
-playbook). All benchmark configs and the default run MMTK_THREADS with a
-single worker on these workloads; the race does not affect the shipped
-numbers. Repro: MMTK_PLAN=Bactrian MMTK_THREADS=4 fragmed.native 150.
+FIXED same day (mmtk-core, sweep-quantum scheduling): the T>1 race was a
+TORN-INITIALIZATION window — FinalMark's first sweep quantum was scheduled
+at schedule_collection time while the sweep packets are parked by the
+Release<C> packet in the SAME stage. At T>1 the quantum could run
+mid-parking: empty pop -> "sweep complete" -> allocate-as-live DISARMED
+while parking continued; pretenured objects born after that had unmarked
+lines and the real deferred sweeps later freed their LIVE blocks (gdb
+autopsy: a keeper array's header slot contained wave-fill integers — an
+overlapping newer allocation). T1 was safe purely by bucket FIFO ordering.
+Fix: the FinalMark quantum is scheduled from the release arm strictly
+AFTER parking + pending are published, and sweep_queue_emptied only acts
+on the true->false transition (swap guard). fragmed T4: 0/12 fails (was
+~8/12); full battery + T4 canaries clean. Debug notes: rr on church is
+blocked by glibc-loader madvise(MADV_COLLAPSE=102) raw syscalls (rr 5.9
+table gap; LD_PRELOAD can't intercept ld.so) — the register/memory
+autopsy via the caml_array_bound_error_asm trap was sufficient.
 
 Also noted: fragmed-300 OOMs at 192MB under Bactrian (GenImmix completes):
 pretenure pacing keeps mature+floating above what the nursery-routed
