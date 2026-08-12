@@ -1074,3 +1074,32 @@ Methodology note for the paper: single-build W comparisons at the <15%
 granularity are unsound on JCC-era x86 — a 16-byte layout shift moves a
 bench 16%. Either build with the mitigation on both sides (deterministic,
 small uniform NOP tax) or report W across link draws.
+
+### Round 27: the nursery-policy trade — 64MB defends itself; campaign geomean 1.009 (2026-08-12)
+
+Item-4 close-out. The frontier-warmth diagnosis (round 26 / NOTES
+2026-08-12: LU + spectralnorm store-side RFO, three warmth tiers) raised
+the policy question: should the default nursery shrink toward the LLC to
+keep the allocation frontier warm? Full-panel sweep answers NO:
+
+    (ratios vs mitigated vanilla)   n64    n8     n16    n20
+    binarytrees                     0.83   1.15   1.08   1.08
+    LU_decomposition                1.23   1.10   1.14   1.20
+    kb                              0.98   1.13   1.09   1.08
+    spectralnorm                    1.10   1.08   1.05   1.07
+    geomean (8 benches)             1.009  1.054  1.041  1.045
+
+Warmth benches (LU/sp) and survivor benches (bt/kb) want OPPOSITE
+nursery sizes; every point LU gains costs bt/kb more. The 64MB default
+is the best global operating point of the four — the tier economy is a
+per-workload dial (MMTK_NURSERY, documented), not a better default.
+The three-way trade (frontier warmth vs per-minor cost vs survivor
+retention) is itself a finding for the paper: vanilla's 2MB arena wins
+warmth ONLY because its per-minor cost (~80cy/object) makes tiny
+nurseries affordable — the two gaps are one design equation.
+
+CAMPAIGN BOTTOM LINE (both toolchains JCC-mitigated, bare Bactrian
+defaults, church): panel geomean **1.009x vanilla** — bt 0.83 / matmul
+0.98 / kb 0.98 / nbody+fannkuch+mandelbrot 1.00 / sp 1.10 / LU 1.23,
+instruction parity throughout, max pause 8.0ms vs vanilla 15.2, outputs
+byte-identical, every residual mechanism named and measured.
