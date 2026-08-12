@@ -273,14 +273,27 @@ fn cadence_threshold() -> usize {
 /// with the same knob that scales promotion volume. Stock's analogue is its
 /// allocated-words slice budget against `space_overhead`.
 fn mature_pressure_floor_pages() -> usize {
-    const FLOOR_BYTES: usize = 32 * 1024 * 1024;
-    let pg = mmtk::util::constants::BYTES_IN_PAGE;
-    let nursery_pages = crate::mmtk()
-        .get_plan()
-        .base()
-        .gc_trigger
-        .get_max_nursery_pages();
-    (FLOOR_BYTES / pg).max(nursery_pages)
+    // D5 (SHAPE round 29): the floor gates how small a live set the pressure
+    // trigger can serve. At the historical 32 MiB, any bench with live below
+    // ~28 MiB was paced ONLY by the allocation backstop and its mature
+    // ballooned to ~10x live (kb: 24 MiB touched vs 2.5 MiB live), where
+    // vanilla's o-law keeps overhead uniform at any live size. Tunable for
+    // the calibration sweep; default set from it.
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let mb = std::env::var("MMTK_MATURE_FLOOR_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|m| (1..=1024).contains(m))
+            .unwrap_or(32);
+        let pg = mmtk::util::constants::BYTES_IN_PAGE;
+        let nursery_pages = crate::mmtk()
+            .get_plan()
+            .base()
+            .gc_trigger
+            .get_max_nursery_pages();
+        (mb * 1024 * 1024 / pg).max(nursery_pages)
+    })
 }
 
 /// Number of collections reported as `Gc.major_collections` (and the field tests
