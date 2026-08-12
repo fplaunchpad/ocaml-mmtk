@@ -1030,3 +1030,47 @@ W: bt@2M whole-process 18.0G vs 20.6G STW-fulls (-13%: UP armed through
 IM/FM + quanta) vs 30.7G worker-concurrent. Total STW 4067ms vs vanilla
 1970ms — the residual is mean minor cost (1.66 vs 0.55ms), i.e. item-1's
 per-object economics, not the tail.
+
+### Round 26: JCC mitigation on both toolchains — the lottery neutralized (2026-08-12)
+
+Both compilers rebuilt with `-mbranches-within-32B-boundaries` (as) /
+`-Wa,...` (cc): the assembler pads so no branch or macro-fused cmp+jcc
+pair touches a 32-byte boundary — the complete fix for the Skylake JCC
+erratum's DSB exclusion (NOTES 2026-08-12). Vanilla's SOURCE stays
+pristine; this is a build-flag experiment, restore = reconfigure with
+default flags (one command, documented here).
+
+Verdict battery (church, 3-rep medians, outputs byte-identical):
+
+  matmul DSB coverage: v 99.3% / B 99.2% — IDENTICAL (was 99.4% / 1.7%).
+  Both hot functions land mod32=0.
+
+  bench       before -> after     note
+  bt          0.84x  -> 0.82x
+  nbody       1.00x  -> 1.00x
+  fannkuch    1.03x  -> 1.00x     BOTH sides -16% (v 10.59 -> 8.93G!)
+  spectral    1.07x  -> 1.10x     unchanged-class; NOT a JCC bench
+  mandelbrot  0.97x  -> 1.00x
+  matmul      1.16x  -> 0.98x     RESOLVED (v 5.11G, B 5.00G)
+  LU          1.26x  -> 1.22x     barely moved, as predicted (backend)
+  kb          1.05x  -> 0.98x     resolved
+
+Two findings beyond the fix:
+
+1. **Vanilla was a lottery victim too.** fannkuch's vanilla dropped 16%
+   (10.59 -> 8.93G) under mitigation — its stock build had its own JCC
+   hit all campaign, invisible because we only ever compared ratios.
+   "Vanilla always won its draws" is refuted: the mitigated build is the
+   first FAIR W comparison this campaign has had. (matmul's vanilla went
+   4.63 -> 5.11G: its lucky draw was real, and the padding NOPs cost the
+   hot loop ~10% on both sides equally — the price of determinism.)
+2. **The residual gap list is now short and mechanistic**: LU 1.22x
+   (backend: mem 0.7->8.7 / core 3.3->11.5 — next specimen) and
+   spectralnorm 1.10x (memory-bound rise, all placement hypotheses
+   refuted). Everything else is at or below parity: bt 0.82, matmul 0.98,
+   kb 0.98, fannkuch/nbody/mandelbrot 1.00.
+
+Methodology note for the paper: single-build W comparisons at the <15%
+granularity are unsound on JCC-era x86 — a 16-byte layout shift moves a
+bench 16%. Either build with the mitigation on both sides (deterministic,
+small uniform NOP tax) or report W across link draws.
