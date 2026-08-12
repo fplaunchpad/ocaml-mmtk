@@ -154,7 +154,7 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   W-parity campaign: pretenuring, UP-trace, sliced marking, JCC-erratum methodology); debug
   knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
 - `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
-  full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 16 MiB..physical-RAM, so
+  full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 32 MiB (MMTK_MIN_HEAP_MB)..physical-RAM, so
   RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set
   programs — binarytrees was 3.5× slower; now 1.27×. Override via `MMTK_GC_TRIGGER`), `MMTK_NURSERY`
   (raw BYTES only, e.g. `Fixed:8388608` / `Bounded:2097152,8388608`; the `2m,8m` *suffix* form does **not**
