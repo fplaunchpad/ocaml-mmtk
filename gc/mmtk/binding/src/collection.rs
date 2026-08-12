@@ -161,12 +161,15 @@ static NURSERY_GCS_SINCE_FULL: AtomicUsize = AtomicUsize::new(0);
 /// Mature-space growth (over the post-full-GC baseline) that forces the next
 /// collection to be a full heap GC, as a percentage. 120% ≈ stock OCaml's default
 /// `space_overhead` (a full major cycle's worth of mature growth between full GCs).
-/// D2 calibration (SHAPE round 28): 120% ran 15 mark cycles on bt@2M where
-/// vanilla at space_overhead=500 (the benchmark baseline setting) runs 29 —
-/// our post-cycle baseline includes the marking window's floating garbage,
-/// so the same nominal margin compounds to a longer period.
-/// MMTK_MATURE_OVERHEAD_PCT overrides for experiments; the default is the
-/// value calibrated so bt@2M matches vanilla's cycle count.
+/// D2 calibration (SHAPE round 28): the margin is calibrated so the mark-
+/// cycle PERIOD matches vanilla's at the stock-parity config — bt@2M sweeps
+/// 120%->15 cycles, 20%->26, 15%->28, 12%->30 against vanilla's 29 at
+/// space_overhead=500, so the default is 14%. The nominal percentage is far
+/// below vanilla's o=500 because the two laws measure different bases: our
+/// post-cycle baseline includes the marking window's floating garbage and
+/// promotions land mature continuously, so a small margin over a large
+/// baseline fires at the same allocation period as vanilla's large margin
+/// over its swept-live base. MMTK_MATURE_OVERHEAD_PCT overrides.
 fn mature_pressure_overhead_pct() -> usize {
     static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
@@ -177,7 +180,7 @@ fn mature_pressure_overhead_pct() -> usize {
             .unwrap_or(MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT)
     })
 }
-const MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT: usize = 120;
+const MATURE_PRESSURE_OVERHEAD_PCT_DEFAULT: usize = 14;
 
 /// Cadence backstop: force a full heap GC after at most this many nursery (minor)
 /// GCs since the last full GC, even if the mature heap has not grown enough to trip
