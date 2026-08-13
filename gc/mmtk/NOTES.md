@@ -5,6 +5,48 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-14 — round 31: the MS-as-nonmoving space was generationally unsound; fixed; freelist band verdict
+
+The freelist-band round (user-approved): make `MMTK_MEDIUM_TO=freelist`
+sound, A/B it, decide the default.
+
+**Three stacked soundness holes, all fixed (core `c9d9a4af5b`):**
+1. The mark-sweep nonmoving space was prepared AND released at every
+   generational NURSERY GC (`prepare_nonmoving_space`/`release_nonmoving_
+   space` ignore `full_heap`; `MarkSweepSpace::prepare/release` ignore it
+   too): prepare zeroed the mark bits, no nursery trace re-marks mature
+   objects, release freed every state-Unmarked block — live cells
+   included. Now full-heap-only, with the generic mutator hooks
+   (`common_prepare_func`/`common_release_func`) paired via
+   `is_nursery_gc` (they were also underflowing the unarmed
+   `pending_release_packets` handshake). GenImmix's band-in-MS (the
+   README's "unmeasured" default) was corrupt this whole time —
+   fragmed-under-GenImmix passes for what is likely the first time.
+2. Mid-cycle lazy sweeps: block-acquisition sweeps (local unswept pop +
+   abandoned-unswept) consumed the in-flight cycle's incomplete marks —
+   clean-blocks-only while the window is armed.
+3. Allocate-black marked the OBJECT but not the BLOCK: release frees
+   whole state-Unmarked blocks without consulting object bits, so a
+   recycled block whose only live contents were born-during-cycle (live
+   by SATB birth, never traced) was freed with them. gdb autopsy: the
+   fragmed keeper failing bounds-check was exactly such a birth.
+
+Bisection methodology that cracked it: cycles fail / BACTRIAN_NO_
+CONCURRENT passes / MMTK_MARK_SLICED=0 passes → the corruption was
+specific to sliced windows (long windows, many mid-window births).
+
+**A/B verdict — the band STAYS ON IMMIX.** Sound ≠ fast: MMTk's
+FreeListAllocator costs ~3–4× vanilla's size-class pools per allocation
+(local A/B: matmul 1.33→4.52 s (!), LU 2.63→3.31 s, fragmed 0.25→0.37 s
+— 16/16 torture passes but slower than the Immix band everywhere).
+fragmed's remaining D1 gap is therefore an ALLOCATOR-SPEED problem
+(mimalloc-style fast paths for FreeListAllocator — #27-class core work),
+not a reclamation-policy one; the policy win it was designed to capture
+is real but capped by per-alloc cost. The sound freelist route stays as
+the opt-in experimental platform for that future round, and the
+soundness fixes stand on their own (they are upstream-relevant: any
+generational plan using `marksweep_as_nonmoving` corrupts without them).
+
 ## 2026-08-13 — round 30d: line-blind waste, the compaction law, and the staged free-list band
 
 **The mature_mutation D4 excursion** (user-flagged: RSS 120MB vs ~26 vanilla,
