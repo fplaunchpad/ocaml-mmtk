@@ -1206,3 +1206,18 @@ vanilla's curve; LU/sp cycle more often than vanilla's o=500 (which does
 0–2 majors) at negligible absolute cost (34–85 ms). D5: kb frontier floor
 ~19M vs vanilla ~8M (block+metadata floor), bt fronts converge at the
 memory-rich end.
+
+### Round 32: fused-metadata promotion — the last uniform D1 lever (2026-08-14)
+
+Under the UP window (single tracer, stopped world — UP-trace's invariant)
+the per-object metadata atomics became plain ops: post_copy's SeqCst mark
+store (XCHG per promoted object), attempt_mark's SeqCst load+CAS loop
+(per marked object in majors), the live-tally's LOCK XADD. Multi-worker
+keeps atomics (UP never arms there). wcomp9: bt 1.26→1.18 (1.08 with
+UP-oldify), kb 1.04 oldify, geomean 1.249/1.230, original-8 ≈1.04;
+attribution 404→370/320 cy/obj; bt@2M max pause 12.6 ms vs vanilla 15.0;
+D2/D4/D5 unchanged. Campaign-close proposed — CAMPAIGN-STATUS-v9 in the
+bench repo carries the final table and the explained-gap inventory
+(adversarial floors: matmut 2.35 line-granularity vs interleaved corpses,
+fragmed 3.05 no-in-place-reuse for multi-line objects + freelist-A/B
+evidence that the cure is a pool-class fast allocator, not policy).
