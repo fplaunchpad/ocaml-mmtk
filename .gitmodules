@@ -5,5 +5,5 @@
 	branch = master
 [submodule "gc/mmtk-core"]
 	path = gc/mmtk-core
-	url = https://github.com/fplaunchpad/mmtk-core.git
+	url = https://github.com/r41k0u/mmtk-core.git
 	branch = 0.32-ocaml
