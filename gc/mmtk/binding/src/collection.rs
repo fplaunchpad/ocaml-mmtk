@@ -849,7 +849,7 @@ impl Collection<OCamlVM> for VMCollection {
                 );
             }
             if single && marking_safe {
-                mmtk::util::up_trace::set_up_trace(true);
+                crate::mmtk().set_up_trace(true);
             }
         }
 
@@ -867,7 +867,7 @@ impl Collection<OCamlVM> for VMCollection {
         }
         // End of the single-tracer window (the lock sequences below publish
         // its plain writes before any mutator observes them).
-        mmtk::util::up_trace::set_up_trace(false);
+        crate::mmtk().set_up_trace(false);
 
         // Collection accounting + the GH#5 mature-space-pressure full-GC trigger.
         // This runs on the GC worker AFTER `Scheduler::end_of_gc` (which set
