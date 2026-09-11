@@ -72,10 +72,44 @@ MMTK_OBJS_STAMP = $(MMTK_OBJS_DIR)/.stamp
 # the staging dir; use the absolute archive path since $(MMTK_LIB) is
 # $(ROOTDIR)- relative ("./gc/mmtk/...") and would be wrong after the cd. The
 # stamp tracks freshness against $(MMTK_LIB).
+# Strip the embedded LLVM bitcode from the extracted objects.
+#
+# rustc leaves .llvmbc/.llvmcmd in every object. A binutils ld/nm that
+# auto-loads an LLVM gold plugin will try to read those sections, and if the
+# plugin is OLDER than the LLVM rustc built with, it fails and the member is
+# reported as having NO SYMBOLS AT ALL — so every Rust runtime symbol
+# (core::fmt::write, std::process::abort, __rdl_alloc, ...) silently vanishes
+# and the runtime link dies with undefined references that name Rust internals
+# rather than the plugin. Observed on a host carrying a stale LLVM-14 plugin:
+#
+#   bfd plugin: LLVM gold plugin has failed to create LTO module:
+#   Opaque pointers are only supported in -opaque-pointers mode
+#   (Producer: 'LLVM22.1.2-rust-1.96.0-stable' Reader: 'LLVM 14.0.6')
+#
+# The failure is nasty to diagnose because the object files are BYTE-IDENTICAL
+# to ones that link fine elsewhere (same md5) — only the reader differs — and
+# an archive-wide `nm` under-reports without an obvious error. Stripping costs
+# nothing here: we never LTO across the C/Rust boundary, so the bitcode is dead
+# weight, and native code plus .symtab are untouched (verified: the same object
+# goes from "no symbols" to its full 1778).
+#
+# Applied ONE FILE AT A TIME. objcopy's signature is `objcopy [opts] in [out]`,
+# so handing it a glob of 505 objects does not strip 505 objects — it strips the
+# first ONTO the second, destroying it, and ignores the rest. (Measured: an
+# 844,952-byte object became a 6,684,632-byte copy of its neighbour.)
+#
+# Best-effort: the recipe line carries a `-` so a missing objcopy cannot fail the
+# build. The `-` must be on the LINE, not inside this variable — inside, it would
+# expand to the literal command `-objcopy`, which does not exist, and the strip
+# would silently do nothing.
+OBJCOPY ?= objcopy
+MMTK_STRIP_BITCODE = $(OBJCOPY) --remove-section=.llvmbc --remove-section=.llvmcmd
+
 $(MMTK_OBJS_STAMP): $(MMTK_LIB)
 	rm -rf $(MMTK_OBJS_DIR)
 	mkdir -p $(MMTK_OBJS_DIR)
 	cd $(MMTK_OBJS_DIR) && $(ARCMD) x $(abspath $(MMTK_LIB))
+	-for f in $(MMTK_OBJS_DIR)/*.o; do $(MMTK_STRIP_BITCODE) "$$f" || break; done
 	touch $@
 
 # Canned recipe: bundle the staged MMTk objects into archive $(1). Used in the

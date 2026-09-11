@@ -98,9 +98,22 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // concurrent plans (ConcurrentImmix/Bactrian/LXR) scan while mutators run, so
     // they must keep revalidating every load — leave it off (default) for them.
     // MMTK_NO_TRUSTED_LOADS=1 forces the fast path off (A/B / bisection knob).
-    let stw_trusted = !matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR")
-        && std::env::var_os("MMTK_NO_TRUSTED_LOADS").is_none();
+    let trusted_allowed = std::env::var_os("MMTK_NO_TRUSTED_LOADS").is_none();
+    let concurrent_plan = matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR");
+    let stw_trusted = !concurrent_plan && trusted_allowed;
     mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
+    // Copy counting is telemetry: arm it only when someone will read it.
+    if std::env::var_os("MMTK_VERBOSE").is_some()
+        || std::env::var_os("MMTK_PAUSE_LOG").is_some()
+    {
+        mmtk_ocaml_common::object_model::COUNT_COPIES
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Concurrent plans: trust dynamically — inside STW pauses only (the S1 fast
+    // path toggles on at stop_all_mutators, off at resume_mutators).
+    if concurrent_plan && trusted_allowed {
+        crate::collection::DYNAMIC_TRUSTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
 
     let mut builder = MMTKBuilder::new();
@@ -108,6 +121,16 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         memory_manager::process(&mut builder, "plan", plan_str),
         "unknown MMTk plan: {}", plan_str
     );
+    // Transparent hugepages ON by default (Linux madvise; a no-op elsewhere).
+    // Measured 2026-08-08 (SHAPE.md W-night): a uniform 2-3.5% cycle win on the
+    // panel (binarytrees 13.10G->12.81G, kb 5.43G->5.28G, LU 7.64G->7.38G) by
+    // cutting dTLB churn from the streaming nursery (dTLB-store misses 3.0M vs
+    // vanilla's 0.03M on LU). An explicit MMTK_TRANSPARENT_HUGEPAGES env
+    // (already read by MMTKBuilder::new) is honoured: only default when unset.
+    if std::env::var_os("MMTK_TRANSPARENT_HUGEPAGES").is_none() {
+        assert!(memory_manager::process(
+            &mut builder, "transparent_hugepages", "true"));
+    }
     // Heap sizing. `heap_size == 0` is the runtime's "dynamic" request (the default,
     // when MMTK_HEAP_SIZE_MB is unset): size the heap to a fixed multiple of the live
     // set after each GC (stock OCaml's `space_overhead`), growing from a small floor up
@@ -165,17 +188,19 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     // space-overhead trigger above, so the nursery must NOT be a proportion of it (a
     // proportional nursery grows with the heap → footprint blows up and it stops being
     // generational). Bounded keeps it absolute and commit-on-demand, so small programs do
-    // not pay the full max. The max is 64 MiB: the prior 2–8 MiB default was too small for
-    // high-allocation-rate workloads — it forced hundreds-to-thousands of near-empty minor
-    // collections (e.g. spectralnorm 723 GCs → 89; binarytrees 110 → 20), making GenImmix
-    // 1.3–3× slower single-domain *and* using more RSS than a larger nursery. 64 MiB makes
-    // GenImmix competitive-to-best single-domain at memory parity (see SCALABILITY.md §10).
-    // (It does NOT fix the multi-domain STW-pause anti-scaling — that is structural; use
-    // MMTK_PLAN=Immix/ConcurrentImmix for parallel-heavy workloads.) Overridable via
-    // MMTK_NURSERY (read by MMTKBuilder::new): only install our default when unset.
+    // not pay the full max. History of the max: 2–8 MiB (too small: hundreds-to-thousands
+    // of near-empty minors, GenImmix 1.3–3× slower) → 64 MiB (SCALABILITY.md §10) →
+    // **16 MiB** (2026-08-12, SHAPE rounds 26–28): the nursery-policy sweep on the
+    // JCC-mitigated builds showed 64 MiB buys binarytrees its 0.83× at the cost of a
+    // 1.23× LU outlier (allocation-frontier warmth: a 64 MiB frontier wraps outside the
+    // LLC, so fresh-allocation stores are DRAM-cold; NOTES 2026-08-12). 16 MiB is the
+    // balanced point — bt/sp/kb within ~10 %, LU 1.14× — trading bt's below-vanilla
+    // surplus for panel consistency (the shape-matching goal; per-workload tuning stays
+    // available via MMTK_NURSERY). Overridable via MMTK_NURSERY (read by
+    // MMTKBuilder::new): only install our default when unset.
     if std::env::var_os("MMTK_NURSERY").is_none() {
         assert!(
-            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,67108864"),
+            memory_manager::process(&mut builder, "nursery", "Bounded:2097152,16777216"),
             "failed to set default nursery"
         );
         // Per-domain nursery scaling (stock parity: stock's minor-heap capacity is
@@ -249,6 +274,13 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
                 .extract_side_spec(),
         );
     }
+    // Value-range forwarding discriminator (all plans): a header word >= heap
+    // start is a forwarding pointer, below it a genuine header. Registered
+    // unconditionally — for never-in-place-forwarding plans the check simply
+    // always reads a genuine header (false), matching the unset-spec answer.
+    mmtk_ocaml_common::slot::set_heap_range_start(
+        mmtk::util::heap::vm_layout::vm_layout().heap_start.as_usize(),
+    );
 }
 
 /// Start MMTk GC worker threads.  Call once after `mmtk_ocaml_init`, before
@@ -325,6 +357,17 @@ pub extern "C" fn mmtk_ocaml_alloc(
     let obj_ref = alloc_start + OBJECT_REF_OFFSET;
     let object = unsafe { ObjectReference::from_raw_address_unchecked(obj_ref) };
     memory_manager::post_alloc::<OCamlVM>(mutator, object, total_bytes, semantics);
+
+    // Max_young_wosize pretenuring: NonMoving-semantics objects are born in
+    // the MATURE Immix space (stock allocates this band straight into the
+    // major heap). They must be born UNLOGGED so the generational object
+    // barrier logs their first young-pointer store into the remembered set —
+    // the same treatment PromoteToMature's post_copy gives promoted objects.
+    if matches!(semantics, AllocationSemantics::NonMoving) {
+        use mmtk::vm::ObjectModel;
+        <OCamlVM as mmtk::vm::VMBinding>::VMObjectModel::GLOBAL_LOG_BIT_SPEC
+            .mark_byte_as_unlogged::<OCamlVM>(object, std::sync::atomic::Ordering::Relaxed);
+    }
 
     obj_ref.to_mut_ptr::<libc::c_void>()
 }

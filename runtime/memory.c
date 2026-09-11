@@ -196,8 +196,14 @@ Caml_inline void write_barrier(
      caml_modify, field is 0). The barrier itself no-ops for non-generational
      plans and before init (it checks caml_mmtk_generational, 0 until a
      generational plan binds the mutator), so on the default native Immix fast
-     path the cost is a single predictable branch. */
-  caml_mmtk_region_barrier(Op_val(obj) + field, 1);
+     path the cost is a single predictable branch.
+
+     Gated on Is_block(new_val): an immediate store creates no heap edge, so
+     there is nothing for a young collection to find in this slot — the same
+     filter stock's caml_modify applies before touching the ref table. (The
+     SATB barrier below is NOT gated on it: SATB greys the OLD referent,
+     which exists regardless of what is being stored.) */
+  if (Is_block(new_val)) caml_mmtk_region_barrier(Op_val(obj) + field, 1);
 
   /* SATB deletion barrier for the concurrent plan (ConcurrentImmix).
      write_barrier runs BEFORE the actual store (see caml_modify), so the slot
@@ -339,8 +345,14 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
      generational plans (no-op otherwise). Replaces the stock minor
      remembered-set update, which is dead under always-on MMTk (major_ref is
      never consumed). Both the bytecode and native runtimes record it (see
-     write_barrier). */
-  caml_mmtk_region_barrier(fp, 1);
+     write_barrier).
+
+     Immediates are never heap edges, so skip them — stock's caml_initialize
+     applies the same filter (only young values enter the ref table). Without
+     it, initialising a born-mature array (Max_young_wosize pretenuring)
+     buffers one remset entry PER SLOT: matmul-768's int rows alone retained
+     46 MB of modbuf between GCs (721 64KB segments, measured). */
+  if (Is_block(val)) caml_mmtk_region_barrier(fp, 1);
 }
 
 CAMLprim value caml_atomic_load_field (value obj, value vfield)

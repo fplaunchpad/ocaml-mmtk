@@ -5,6 +5,603 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-08-14 — round 31: the MS-as-nonmoving space was generationally unsound; fixed; freelist band verdict
+
+The freelist-band round (user-approved): make `MMTK_MEDIUM_TO=freelist`
+sound, A/B it, decide the default.
+
+**Three stacked soundness holes, all fixed (core `c9d9a4af5b`):**
+1. The mark-sweep nonmoving space was prepared AND released at every
+   generational NURSERY GC (`prepare_nonmoving_space`/`release_nonmoving_
+   space` ignore `full_heap`; `MarkSweepSpace::prepare/release` ignore it
+   too): prepare zeroed the mark bits, no nursery trace re-marks mature
+   objects, release freed every state-Unmarked block — live cells
+   included. Now full-heap-only, with the generic mutator hooks
+   (`common_prepare_func`/`common_release_func`) paired via
+   `is_nursery_gc` (they were also underflowing the unarmed
+   `pending_release_packets` handshake). GenImmix's band-in-MS (the
+   README's "unmeasured" default) was corrupt this whole time —
+   fragmed-under-GenImmix passes for what is likely the first time.
+2. Mid-cycle lazy sweeps: block-acquisition sweeps (local unswept pop +
+   abandoned-unswept) consumed the in-flight cycle's incomplete marks —
+   clean-blocks-only while the window is armed.
+3. Allocate-black marked the OBJECT but not the BLOCK: release frees
+   whole state-Unmarked blocks without consulting object bits, so a
+   recycled block whose only live contents were born-during-cycle (live
+   by SATB birth, never traced) was freed with them. gdb autopsy: the
+   fragmed keeper failing bounds-check was exactly such a birth.
+
+Bisection methodology that cracked it: cycles fail / BACTRIAN_NO_
+CONCURRENT passes / MMTK_MARK_SLICED=0 passes → the corruption was
+specific to sliced windows (long windows, many mid-window births).
+
+**A/B verdict — the band STAYS ON IMMIX.** Sound ≠ fast: MMTk's
+FreeListAllocator costs ~3–4× vanilla's size-class pools per allocation
+(local A/B: matmul 1.33→4.52 s (!), LU 2.63→3.31 s, fragmed 0.25→0.37 s
+— 16/16 torture passes but slower than the Immix band everywhere).
+fragmed's remaining D1 gap is therefore an ALLOCATOR-SPEED problem
+(mimalloc-style fast paths for FreeListAllocator — #27-class core work),
+not a reclamation-policy one; the policy win it was designed to capture
+is real but capped by per-alloc cost. The sound freelist route stays as
+the opt-in experimental platform for that future round, and the
+soundness fixes stand on their own (they are upstream-relevant: any
+generational plan using `marksweep_as_nonmoving` corrupts without them).
+
+## 2026-08-13 — round 30d: line-blind waste, the compaction law, and the staged free-list band
+
+**The mature_mutation D4 excursion** (user-flagged: RSS 120MB vs ~26 vanilla,
+>>the accepted ~25MB overhead): its dead 24B cells interleave with live ones
+on the same 256B lines, so line-granular reclamation frees NOTHING — 6.6MB
+live pinned 46→120MB of lines while every block reported itself fully
+occupied. Every line/block statistic is equally blind (holes=0), so both
+the round-29 partial/live trigger AND hole-bucket defrag selection can
+never see it. Only the trace knows: `ImmixSpace::major_live_bytes` now
+tallies bytes marked per major epoch (~one relaxed add per marked object).
+
+**The law** (`note_swept_baseline`, stock `Gc.max_overhead` analog,
+MMTK_COMPACT_OVERHEAD_PCT=100, 0=off): at each post-sweep baseline latch,
+if immix reserved > live×2 (and > the pressure floor) → the next major is
+a **COMPACT-ALL Full**: every in-use block a defrag source
+(`Defrag::compact_all_once` + PrepareBlockState.compact_all), bounded by
+copy headroom (leftovers stay; convergent), pages of compaction-freed
+blocks madvised back unconditionally (`release_block_with` — reserved
+collapsed 46→7MB but RSS stayed flat without it; steady-state recycling
+keeps the MMTK_RELEASE_FREED_PAGES fast path). Discrimination measured:
+bt/kb/sp fire ZERO (dense/floored/LOS-immune); matmut fires ~7 (D4 peak
+120→68, steady 60 ✓ doctrine); fragmed fires ~15 (D4 189→~98, at a D1
+cost: GC 195→793ms — the compaction tax; see below). A geometric
+hysteresis variant was tried and dropped: it let matmut's slack re-ratchet
+to 105 (its rebuild is perpetual; spacing must not be geometric for the
+law's actual target).
+
+**The staged free-list band (MMTK_MEDIUM_TO=freelist, DEFAULT OFF).**
+fragmed's root fix is vanilla's regime: the ≥2056B band in the common
+mark-sweep nonmoving space (free-list reuse in place, no cycles). Landed
+but staged off after finding it UNSOUND under concurrent cycles: the MS
+lazy sweep runs at block-acquisition using the in-flight cycle's
+incomplete marks and frees not-yet-marked live cells (reproduced: marking
+quantum scanning a freed cell whose header was a free-list link);
+`eager_sweeping` deadlocks under Bactrian's pause schedule. Landed
+groundwork: allocate-black in FreeListAllocator (mid-cycle births carry
+the mark bit; the free-list analog of Immix allocate-as-live) and
+`get_mature_reserved_pages` now counts the nonmoving space (a band-heavy
+workload was invisible to pacing: 1 GC, 203MB). Sound design for the next
+round: mid-cycle MS block acquisition must serve CLEAN blocks only.
+
+Validation: goldens ×3 variants, fragmed T4@192 12/12 (+10 more),
+matmut T4 6/6, GenImmix, D4 curves. wcomp7 is the reporting battery.
+
+The v4 campaign's D3 streams showed 80–140 ms cycle-completing pauses at
+bt@192M — and `BACTRIAN_TRACE` showed why: **every major ran as an emergency
+monolithic `Pause::Full`; zero InitialMarks**. Three stacked causes, all
+fixed (core `ba82e68273`, binding commit this tree):
+
+1. **The emergency hijack.** A binding-forced pressure cycle is honored at
+   the first poll after the minor that armed it — which is the triggering
+   allocation's own TLAB-refill poll, so *no successful allocation happens
+   between the two GCs*. mmtk-core counts that as a failed-allocation retry
+   (`cur_collection_attempts = 2`), and `decide_pause` read `attempts > 1`
+   as an allocation emergency → STW Full. Every post-minor pressure trigger
+   degraded this way (tick-path triggers survived: the mature alloc that
+   ticks succeeds first). The sweep quantum's emergency test suffered the
+   same hijack — silently draining unbudgeted after every force. All three
+   consumers now use `genuine_allocation_emergency()` (`attempts > 2`); a
+   real OOM loop still degrades, one bounded nursery-class pause later.
+2. **The margin could out-range the heap.** With the round-30 150% margin,
+   `live×2.5` exceeds a fixed 192 MiB heap for a 140 MB live set (and every
+   dynamic heap: 120% growth < 150% margin) — the pressure target was
+   unreachable, so exhaustion always won. The trigger is now
+   `min(baseline×(1+margin), heap_limit×MMTK_CONC_TRIGGER_PCT%)` (default
+   80, concurrent plans only, one-nursery thrash guard).
+3. **The 2 ms quantum couldn't carry a big live set.** Marking 140 MB
+   inside a ~40 MB runway needs ~7 ms/pause at n2 — the static budget
+   absorbed a sliver and FinalMark drained the rest in one 80–130 ms gulp.
+   The binding now hints `debt/(runway/nursery)` per cycle
+   (`ConcurrentPlan::set_mark_quantum_hint_ms`, stock's slice law;
+   `MMTK_MARK_RATE_MBPMS`), and mid-cycle allocation emergencies upgrade
+   the quantum to unbudgeted so the freeing sweep can follow.
+
+**Feasibility gates** (matching doctrine: slicing must *earn* its overhead):
+at n16 the minors are promotion-bound (~45 ms) and the runway fits 1–2
+pauses — no quantum gets under the existing pauses, while sliced cycles cost
++9% GC time over the monolithic Full (3181 vs 2946 ms measured). So sliced
+cycles now run only when `nursery ≤ MMTK_SLICE_MAX_NURSERY_MB` (4) and the
+hinted budget ≤ `MMTK_MAX_QUANTUM_MS` (50); otherwise monolithic Full.
+
+Measured, bt-20@192M fixed, 1 worker: **n2 max pause 130.6 → 19.4 ms** (17
+true cycles, 0 Fulls; GC time 5100 → 6231 ms — the honest slice tax,
++22%, notable as floating-garbage/allocate-as-live copies: 39.9 M → 52.0 M
+objects). def (n16) keeps the Full regime by the nursery gate: 13 Fulls,
+GC ≈ v4. Canaries: def/n2/oldify × 7 benches vs goldens PASS, fragmed
+T4@192 12/12, GenImmix bt/kb/fragmed PASS. (fragmed@64M T4 OOMs — pre-
+existing, church's pre-fix build OOMs identically; needs its own look.)
+
+Consequence for the campaign: v4's def-config numbers stand (same Full
+regime), but every n2 stream (D3/D2) and small-heap pareto cell changes —
+v5 battery rerun required. The "8.0 ms max pause" sliced-marking result
+(round 25) was measured before the hijack landed with the round-30
+recalibration; v5 restores and betters it at n2.
+
+**Addendum (same day): tick-origin cycles bypass the nursery gate.** The
+v5 battery showed fragmed 3.4→5.0×: the nursery gate had degraded its
+cycles to 11 monolithic Fulls (GC 293 vs 195 ms as cycles). The gate's
+premise — big nursery ⇒ promotion-bound minors dwarf any quantum — holds
+only for MINOR-paced cycles; fragmed is mature-direct (zero minors), its
+pauses are tick-driven near-empty nursery collections, small at any cap.
+`set_mark_quantum_hint_ms` now carries the firing site; tick-origin
+cycles skip the nursery gate and size quanta by the ~2 MiB tick batch
+(a 16 MiB-nursery estimate under-counted fragmed's pauses 8×). Core
+`8634966611`. bt-def stays Full-regime (14 Fulls), bt-n2 max 17.4 ms,
+all goldens + fragmed T4@192 12/12 + GenImmix pass. v6 battery is the
+reporting battery.
+
+---
+
+## 2026-08-12 — fragmed lands: two pacing holes fixed, one T>1 race OPEN
+
+The new fragmentation-driver bench found three real defects within an hour
+of existing (suite-gap report vindicated a third time):
+
+FIXED (this commit series):
+1. Mature-direct allocation was invisible to cycle pacing (counters only
+   advanced at minors) — fragmed pretenures ~everything, barely minors, and
+   grew mature to the space-full edge (187/192MB) where the calibrated law
+   wanted a cycle at baseline x 1.14. Fix: the C alloc path ticks
+   mmtk_ocaml_mature_alloc_tick every ~2MB of pretenure/LOS allocation; the
+   binding evaluates the SAME pressure/cadence law and requests the cycle;
+   Bactrian::collection_required honors it at poll time (no minor needed).
+2. In-flight cycles also need allocation-driven progress (stock runs major
+   slices off major-heap allocation): request_progress_pause drives
+   mark/sweep quanta from mature-direct allocation.
+3. INCREMENTAL-SWEEP HOLE: a pretenured object born after FinalMark into a
+   freshly-acquired block has zeroed line marks; the DEFERRED SweepChunk
+   visiting its chunk freed the live block (promotions were safe via
+   scan-time line marking; mutator-side pretenured births were not — my
+   round-29 audit missed exactly this case). Fix: allocate-as-live stays
+   armed from InitialMark until the sweep DRAINS (disarmed in
+   sweep_queue_emptied), not until FinalMark.
+
+FIXED same day (mmtk-core, sweep-quantum scheduling): the T>1 race was a
+TORN-INITIALIZATION window — FinalMark's first sweep quantum was scheduled
+at schedule_collection time while the sweep packets are parked by the
+Release<C> packet in the SAME stage. At T>1 the quantum could run
+mid-parking: empty pop -> "sweep complete" -> allocate-as-live DISARMED
+while parking continued; pretenured objects born after that had unmarked
+lines and the real deferred sweeps later freed their LIVE blocks (gdb
+autopsy: a keeper array's header slot contained wave-fill integers — an
+overlapping newer allocation). T1 was safe purely by bucket FIFO ordering.
+Fix: the FinalMark quantum is scheduled from the release arm strictly
+AFTER parking + pending are published, and sweep_queue_emptied only acts
+on the true->false transition (swap guard). fragmed T4: 0/12 fails (was
+~8/12); full battery + T4 canaries clean. Debug notes: rr on church is
+blocked by glibc-loader madvise(MADV_COLLAPSE=102) raw syscalls (rr 5.9
+table gap; LD_PRELOAD can't intercept ld.so) — the register/memory
+autopsy via the caml_array_bound_error_asm trap was sufficient.
+
+Also noted: fragmed-300 OOMs at 192MB under Bactrian (GenImmix completes):
+pretenure pacing keeps mature+floating above what the nursery-routed
+GenImmix carries; acceptable at the bench's default size (150, which both
+complete) — a pacing-tightness item, not corruption.
+
+## 2026-08-12 — FIXED same day (mmtk-core 2685ff30f7): sliced-marking x LOS corruption
+
+Armed-probe spectralnorm under Bactrian dies with OCaml-level
+Invalid_argument "index out of bounds" — a corrupted value, i.e. a REAL GC
+bug, found the moment probe coverage was extended to the LOS bench.
+
+Repro (deterministic, ~2s, laptop or church):
+  MMTK_PLAN=Bactrian MMTK_HEAP_SIZE_MB=192 MMTK_THREADS=1 \
+    PROBE_OUT=/tmp/x setarch x86_64 -R \
+    ./build/mmtk/spectralnorm.probe.native 3000
+
+Bisect matrix (all deterministic):
+  sliced default (T1, UP)          CRASH
+  sliced + MMTK_THREADS=4 (no UP)  CRASH   -> not UP-trace
+  MMTK_MEDIUM_NONMOVING=0          CRASH   -> not pretenuring
+  MMTK_MARK_SLICED=0 (worker-conc) clean
+  MMTK_MARK_SLICED=0 + forced conc clean
+  BACTRIAN_NO_CONCURRENT=1         clean
+  GenImmix                         clean
+  bt/kb armed probes, sliced       clean   -> LOS-band specific (sp = 24KB
+                                              vectors; probe arrays also LOS)
+
+=> The defect is in SLICED-STW MARKING (rounds 25) interacting with
+LargeObjectSpace state — suspect: LOS nursery/mark-bit handling when
+marking quanta run INSIDE nursery pauses (the in-place "promotion" of
+young LOS objects and the quantum's ConcurrentTraceObjects marking may
+disagree about LOS mark state mid-cycle). Probe adds early-allocated LOS
+arrays + periodic Gc.quick_stat, sharpening the window.
+
+RESOLVED: sanity was CLEAN (freed LOS pages stay mapped — the checker
+cannot see this class); gdb on caml_array_bound_error_asm placed the
+crash inside Probe.tick — the probe's own LOS gap buffers freed live.
+Root cause: los.trace_object skips MATURE objects when in_nursery_gc
+(latched by the enclosing NURSERY pause), so sliced quanta no-op'd their
+mature-LOS marking and FinalMark swept live objects. Fix: quanta scope
+full-heap LOS semantics (AtomicBool + scoped override); plus young-LOS
+now counts as young in is_object_in_nursery/should_skip_concurrent_trace
+(admission side of the same window). Worker-concurrent has the same
+LATENT window upstream (drain racing the next minor's re-latch) — noted
+in the commit for an upstream report. Probe binaries are now a standing
+gate battery.
+
+Was: Next: mmtk sanity feature at a small heap on the repro (deterministic
+Invalid-reference expected), then rr if needed. Sliced marking stays
+default pending the fix ONLY because no non-probe workload has shown it —
+if a fix is not fast, flip MMTK_MARK_SLICED default off and re-gate.
+Also: PROBE binaries are now part of the standing gate battery.
+
+## 2026-08-12 — LU's residual = allocation-frontier warmth (store-side, tiered)
+
+LU 1.22x (post-JCC-mitigation) decomposed: topdown store_bound 0.2 -> 16.2%
++ dram_bound 0.1 -> 6.6% (core flat), l2_rqsts.rfo_miss 418K -> 7.7M (18x)
+— the RMW stores of LU's row updates miss L2 in our build, hit in
+vanilla's. The old "all counters at parity" fork-ambient ledger measured
+only LOAD-side events; store-side was never instrumented.
+
+Refuted for THIS mechanism: dTLB stores (small absolutes), THP off
+(worse), pretenure off (no change), jitter 0-24 and granule 512K-4M (RFO
+invariant — NOT pitch conflicts), frontier warmer (worse).
+
+Confirmed: nursery-size sweep. RFO L2-miss count stays ~7.5M from n4 to
+n64, but cycles swing 6.00 -> 6.65G: the misses' DESTINATION tier moves.
+n8 (frontier fits LLC): store misses are L3 hits — LU 6.00G = 1.10x, the
+best ever measured. n64 default: DRAM-cold frontier — 6.65G = 1.22x.
+Vanilla's 2MB arena is one tier better still (L2-warm, 418K L2 misses).
+Our n2 does NOT replicate vanilla's arena: minor-GC copy traffic doubles
+RFO to 15M and per-minor cost dominates (7.14G) — item-1's ~260cy/object
+floor bounds the small end.
+
+The complete LU story: allocation-frontier warmth is a THREE-tier
+economy (L2-warm arena / LLC-warm nursery / DRAM-cold nursery), and the
+64MB default buys bt's throughput at LU's expense. Options (user
+decision, affects every bench): (a) LLC-sized default nursery
+(min(64MB, LLC) — principled, machine-adaptive); (b) keep 64MB and
+document; (c) close the per-minor gap first, then shrink the default
+toward stock's 2MB. spectralnorm 1.10x (memory-bound, placement-refuted)
+is likely this same frontier economy — its 24KB LOS vectors are
+fresh-page cold every allocation.
+
+## 2026-08-12 — the layout lottery IS the JCC erratum (matmul nailed at instruction level)
+
+The fork-ambient / layout-lottery mystery (matmul/LU/kb/fannkuch mutator
+cycles moving ±5-12% between semantically identical builds, all data-side
+PMU counters flat, NoGC-reproducible) is now mechanically explained for
+matmul, with a causal test:
+
+- Topdown splits the class: matmul is FRONTEND-bound (1.0% -> 18.7%),
+  LU is BACKEND (4.6% -> 20.3%: mem 0.7->8.7, core 3.3->11.5),
+  spectralnorm mildly memory-bound (its LOS placement hypothesis was
+  refuted by a null-result experiment — LOS start-phase rotation changed
+  nothing and was reverted, b89f18bcfe).
+- matmul's DSB (uop cache) coverage: vanilla 99.4% (11.59G dsb_uops vs
+  72M mite_uops) — Bactrian build 1.7% (195M vs 11.02G). Icache misses
+  FLAT (1.2 vs 1.3M): not fetch misses — DSB EXCLUSION.
+- Geometry: ocamlopt aligns functions to 16B; whether a function lands at
+  0 or 16 mod 32 is decided by total upstream .text size (hence: any
+  build-size change re-rolls it — the fat/thin LTO matched pair). At
+  mod32=16, matrix_multiply_411's inner-loop jbe back-edge sits at
+  s32=30 len=2 — TOUCHING a 32-byte boundary. Skylake JCC-erratum
+  microcode excludes that whole 32B window from the DSB -> the inner loop
+  cannot stream from the uop cache -> 99% legacy decode -> +16% cycles.
+  Vanilla's draw put the function at mod32=0; its only boundary hits are
+  prologue/cold-tail.
+- CAUSAL TEST: relinking the same .cmx with
+  -Wl,--section-start=.text=+16 moves the function to mod32=0: DSB uops
+  x13 (195M -> 2.48G), cycles 5.40 -> 5.19G. Recovery is PARTIAL (~22%
+  DSB vs vanilla's 99%): the lone-jcc scan misses MACRO-FUSED cmp+jcc
+  pairs crossing boundaries, which the erratum also excludes.
+
+Fix direction (not yet applied): the assembler mitigation
+-Wa,-mbranches-within-32B-boundaries (pads so no branch or fused pair
+touches a 32B boundary — handles fusion, unlike manual shifts), applied
+to BOTH toolchains (vanilla too: this is a CPU-microcode artifact, not a
+GC property — a single-build W comparison at this granularity is not
+methodologically sound either way). Needs a reconfigure+world rebuild of
+both sides on church, then the full panel. LU's backend signature is a
+DIFFERENT mechanism — next specimen after matmul's mitigation validates.
+
+## 2026-08-10 — Max_young_wosize pretenuring lands (default ON for Bactrian)
+
+Stock's law: a >Max_young_wosize block never transits the minor heap
+(caml_alloc_shr births it in the major heap — pools <=1KB, malloc above).
+Bactrian now has the same law. Plumbing (3 commits, mmtk-core
+ebb8f58e3c/2a390e0fc8 + runtime 3def0a88c/16169a12a/9027ed6b9):
+
+- Runtime routes the >=2056B band (below the 16KB LOS threshold) to
+  CAML_MMTK_SEM_NONMOVING; Bactrian remaps AllocationSemantics::NonMoving to
+  a reserved plan-local ImmixAllocator on the MATURE space. Born-mature
+  objects are unlogged at birth (binding post_alloc, PromoteToMature's
+  treatment); allocate-as-live covers births during marking windows.
+  Default ON under Bactrian only; MMTK_MEDIUM_NONMOVING=0/1 overrides.
+- Debug war stories, for the record: (a) allocator+space mappings must be
+  built from the SAME ReservedAllocators set (reusing the generational
+  space mapping shifts the common spaces' selector indices — worker
+  copy-context construction unwraps None); (b) the common mark-sweep
+  nonmoving FreeList allocator must still be prepared/released BY SELECTOR
+  (FreeList(0)) — common_prepare/release_func's semantic-keyed typed
+  downcast panics on the remapped semantic, and skipping release entirely
+  starves the pending_release_packets handshake (num_mutators+1).
+- Jitter pads now follow the object's semantics (a pad diverted to the
+  nursery leaves the pretenure stream at exact pitch).
+- NEW mmtk-core knob: overflow-block line-phase rotation
+  (MMTK_OVERFLOW_PHASE_LINES, default 16, mutator allocators only). A clean
+  block's overflow cursor always started at the 32KB-aligned block start,
+  so same-sized medium streams re-enter the same cache-set phase every
+  block (~4-5 objects/block): matmul-768 measured 904M LLC-loads unpadded /
+  205M padded vs the 57M contiguous floor. Rotating the fresh-block start
+  phase reaches the floor (58M) — the layout glibc's contiguous arena gives
+  vanilla for free.
+- Remset immediate filter (9027ed6b9): caml_initialize/write_barrier's
+  generational half now skip immediates, stock's own ref-table filter.
+  Without it, born-mature Array.init of int arrays buffered one remset
+  entry PER SLOT — 46MB of retained modbuf on matmul (721 x 64KB segments,
+  caught with an LD_PRELOAD malloc-backtrace shim; RSS 81 -> ~29MB).
+
+Measured (church, wpret2 battery, 3-rep medians, MMTK_THREADS=1, 192MB):
+matmul-768 vanilla-relative cycles 1.25x (knob off, default nursery;
+1.8-1.9x at 2-16MB nurseries, and the knob-off promoted layout is an
+alignment lottery — same build drew 118M and 900M-class LLC regimes across
+batteries) -> **1.05-1.08x pretenured, nursery-INDEPENDENT** — the same
+shape vanilla has (its mediums never see the minor heap either). bt/kb:
+cycle- and worker-share-identical; LU neutral. Outputs byte-identical
+across the 16-cell golden battery + forced-concurrent canaries.
+
+## 2026-08-10 — KNOWN FAILURE: StickyImmix pending_release_packets underflow (pre-existing)
+
+`MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=192 setarch x86_64 -R kb.native 50`
+aborts at gc/mmtk-core/src/util/epilogue.rs:11: "pending_release_packets is
+still 18446744073709551614" (= -2: the mark-sweep release-packet counter was
+DECREMENTED two more times than armed, i.e. release_packet_done ran without a
+matching MarkSweepSpace::release arm — suspect fused/immediately-consecutive
+pauses re-running mutator release). Verified PRE-EXISTING: reproduces
+identically with mmtk-core rolled back to 2ad2feecdd (pre-pretenuring) — NOT
+introduced by the 2026-08-10 pretenuring/barrier work. GenImmix (default
+plan) and Bactrian run the same bench clean. Distinct from the older
+StickyImmix moving-GC crash note. Open item; fix belongs with the
+marksweep_as_nonmoving release-protocol work (cec95292be lineage).
+
+---
+
+## 2026-08-09 — the poll-trap livelock: generated <= vs C-side < (the "8.9x catastrophe")
+
+Root-caused and fixed the biggest hidden mutator tax in the TLAB design.
+Chain: (1) caml_mmtk_uninterrupt discards the TLAB after EVERY GC, leaving
+young_ptr == young_start == young_end and young_limit == young_trigger ==
+young_start — an EQUALITY state; (2) ocamlopt-emitted poll points trap on
+young_ptr <= young_limit (jbe), but every C-side check
+(caml_check_gc_interrupt) tests STRICT < — equality reads as "no interrupt";
+(3) with an allocation-free phase following a GC (matmul's multiply: the
+loop ref is unboxed, so ZERO allocations for ~1.5s), no allocation ever
+refills the region, and EVERY generated poll traps through caml_call_gc ->
+caml_garbage_collection -> process_pending_actions (frame-descriptor lookup,
+signal scan, memprof, finaliser checks) and returns with the trap still
+armed. matmul-768 @ Fixed:16M: ~453M round-trips, 82G mutator instructions,
+8.9x wall. The same mechanism taxed every exhausted-TLAB window since M9 —
+it is the long-suspected component of tiny-nursery mutator-CPU explosions
+(wnight1) previously misattributed to park machinery.
+
+Fix (runtime/domain.c): the TLAB branch of caml_poll_gc_work now refills the
+young region when young_ptr <= young_limit — the EMITTED condition, not the
+C-side strict one. One trap, one refill, storm over: mm@16M local 3.66s ->
+0.95s (default 0.83s); outputs identical; all gates pass. Env-gated
+MMTK_POLL_DEBUG counters retained.
+
+LXR note: runtime-side fix in the shared TLAB path; plan-independent and
+required for any plan using the TLAB nursery protocol.
+
+## 2026-08-08 (night) — survivor aging: implemented, correct, and a measured negative for bt
+
+MMTK_NURSERY_AGE>=1 (default 0 = off, byte-identical) adds a semispace aged
+pair inside the Bactrian plan: plain minors copy nursery survivors YOUNG into
+the aged to-space; the previous to-space's residents (age 1) promote; the pair
+flips per aging minor. Marking-fused pauses and Fulls promote the whole young
+generation — the SATB barrier skips young objects, which is sound only if no
+young object survives a marking snapshot. Every young-check (write barrier,
+SATB drop, concurrent-marking skip) routes through is_object_in_nursery,
+which now includes the aged pair.
+
+Shipped correctness fix (shared code, flag-gated): FinalizableProcessor's
+nursery_index skip assumed survived-one-minor => mature+immobile; an aged
+survivor moves again at the next minor -> stale candidate -> finalizer on
+freed memory (crashed via stdio channel finalizers). New defaulted
+GenerationalPlan::nursery_keeps_movable_survivors() (true only during aging
+Bactrian minors) makes the scan re-examine all candidates but judge only
+young ones. LXR and all stock plans take the old path verbatim.
+
+KNOWN HOLES while experimental (do not default on):
+1. Remset: ProcessModBuf re-unlogs remembered mature objects after a minor —
+   sound only when no mature->young edge survives. A mature object mutated to
+   point at an aged survivor is forgotten by the next minor. Unsound for
+   mutation-heavy workloads (kb!); binarytrees (no post-construction
+   mutation) is unaffected. Fix sketch: a plan-side slot remset populated in
+   process_slot when a traced slot's new target is young and the slot itself
+   is not young-owned; self-cleaning per minor; cleared at Full.
+2. OCaml's finalise-table young/old split (finalise.c) bakes in the same
+   promoted-after-one-minor invariant.
+
+MEASURED (church, bt-20, heap 192, T=1, outputs identical everywhere):
+default nursery 12.10G -> 12.46G cycles (copies 5.2M -> 7.2M);
+Fixed:4MiB 31.09G -> 33.12G (fulls 22 -> 14, but copies 34.5M -> 50.9M).
+NEGATIVE for binarytrees: its survivors live for a whole depth-class
+iteration, far beyond one aging step, so age-1 double-copies everything.
+Conclusion: bt's W-floor is not an aging problem — vanilla wins its tiny warm
+window because its INCREMENTAL mature reclamation makes premature promotion
+cheap. The next structural lever for bt-class workloads is cheaper mature
+reclamation (incremental/concurrent sweep of promoted garbage), not aging.
+Aging remains available (and sound on non-mutating workloads) for
+medium-lifetime programs once hole 1 is closed.
+
+## 2026-08-08 (later) — Bactrian adaptive marking: STW-mark small live sets
+
+A concurrent marker streaming a small live set through the shared LLC while
+the mutator runs costs more in mutator stalls + SATB barrier activity than it
+saves in pause time. Measured (binarytrees-20, ~100 MB live, 1 worker, church):
+mutator 7.84G -> 6.78G cycles AND 14.17G -> 13.40G instructions with STW
+marking; whole-process 11.87G vs stock OCaml's 11.5G. W-cycle ratio ~1.36 ->
+~1.15 estimated; re-certification in the wnight campaign report.
+
+Change: in the Pause decision (plan/concurrent/bactrian/global.rs), a
+requested major cycle runs as Pause::Full when the mature (Immix) reserved
+size is below MMTK_CONC_MARK_MIN_MATURE_MB (default 256; 0 restores
+always-concurrent). Large live sets — where pauses actually hurt — keep the
+concurrent path, so Bactrian's thesis is intact; small ones stop paying LLC
+interference for pause relief they don't need.
+
+Location: mmtk-core FORK, but strictly Bactrian-plan-local (the Pause decision
+in bactrian/global.rs + a file-local helper). LXR does not consult this path.
+BACTRIAN_NO_CONCURRENT retains its unconditional-bisection meaning.
+Verified: outputs identical; BACTRIAN_TRACE shows 7x Full at default vs
+7x InitialMark/FinalMark at threshold 0 on binarytrees-20.
+
+## 2026-08-08 — full-GC backstop re-denominated: allocation, not minors (W-night)
+
+The GH#5 backstop ("force a full every 8 minors per domain") scaled INVERSELY
+with nursery size: at MMTK_NURSERY=Fixed:2MiB it forced a whole-heap collection
+every ~16 MiB allocated — 186 fulls on binarytrees-20 where the default config
+does 6 (a manufactured full-GC storm; 141G cycles vs 46G with it suppressed).
+The backstop is now denominated in nursery-bytes-collected: a full is forced
+after 8 x 64 MiB x ndomains of allocation, whatever the nursery size — the
+same GH#5-validated timing at the default config, nursery-invariant otherwise.
+MMTK_FULL_GC_CADENCE (a minor count) is still honoured as an explicit override.
+
+Location: binding/src/collection.rs (resume path). NOT in mmtk-core.
+LXR-compat: the whole trigger is gated on plan.generational(); LXR returns
+None there, so the path is inert for it — LXR reclamation stays RC-driven.
+Verified: default nursery behaviour byte-identical (13 GCs / 1 full on bt-18);
+Fixed:4MiB drops from ~26 forced fulls to 4 (mature-pressure only).
+
+Same-day context (SHAPE.md W-night): with this law + a small nursery,
+LU/spectralnorm's store-buffer stalls are erased (SB-full 1.13G -> 0.08G) —
+the store-frontier fix works once the pacer stops punishing small nurseries.
+binarytrees/kb still prefer the large nursery (real survivors -> premature
+promotion); per-minor fixed cost is the next target.
+
+## Build: stale LLVM gold plugin makes the whole Rust runtime vanish at link (church, 2026-08-06)
+
+Moving the shape campaign to church, the fork would not link — `runtime/ocamlrun` failed
+with undefined references to Rust internals: `core::fmt::write`, `std::process::abort`,
+`core::panicking::panic_fmt`, `<Mutex>::lock_contended`, and `hidden symbol
+__rdl_alloc isn't defined`. Vanilla built fine on the same host.
+
+**Cause: not ours, and not the archive.** rustc leaves `.llvmbc`/`.llvmcmd` in every
+object. binutils `ld`/`nm` auto-load an LLVM gold plugin when they see them, and church
+carries a stale LLVM-14 one:
+
+```
+bfd plugin: LLVM gold plugin has failed to create LTO module:
+Opaque pointers are only supported in -opaque-pointers mode
+(Producer: 'LLVM22.1.2-rust-1.96.0-stable' Reader: 'LLVM 14.0.6')
+```
+
+When the plugin fails, the member is reported as having **no symbols at all**, so every
+Rust runtime symbol disappears and the link fails naming Rust internals rather than the
+plugin.
+
+**Why it was slow to find.** The failing object is BYTE-IDENTICAL to one that links on the
+dev laptop — same md5, same 11,599,800 bytes. Everything comparable matched: rustc 1.96.0,
+binutils 2.46, gcc 15.2.0, `Makefile.config`, archive structure (563 members, 470 Rust,
+`std` cgu0 present), and `ar r *.o` glob order (checked under C / en_IN / en_US.UTF-8 —
+identical, so locale collation was NOT it). An archive-wide `nm` under-reports silently:
+the plugin error only appears on **stderr**, and only when `nm` is run on a single
+extracted member. Two hypotheses were tested and refuted first — distro rustc 1.93
+(installing rustup 1.96 did not help) and stale mixed objects (`make clean` did not help,
+and produced *more* missing symbols).
+
+**Fix (`Makefile.mmtk`, MMTK_STRIP_BITCODE).** `objcopy --remove-section=.llvmbc
+--remove-section=.llvmcmd` on the extracted objects before they are bundled. We never LTO
+across the C/Rust boundary, so the bitcode is dead weight; native code and `.symtab` are
+untouched. Verified: the same object goes from "no symbols" to its full **1778**, matching
+the laptop exactly, and church then builds `world.opt` clean with all four plans producing
+byte-identical output.
+
+Best-effort (`-` prefix, `OBJCOPY ?= objcopy`) since the strip is only needed on hosts
+carrying the stale plugin, and objcopy may be absent.
+
+**Worth re-examining:** `SCALABILITY.md` §11's church numbers are retracted as a
+"contaminated build". This is exactly the class of toolchain trap that could produce one —
+a tree that links only because some objects were silently symbol-less is a plausible route
+to a subtly wrong binary. Not investigated.
+
+## Near-OOM SEGV: root scanning crashes instead of raising Out_of_memory (single-domain, 2026-08-06)
+
+Found while establishing the left edge of the D5 heap sweep. Below a certain heap the
+program must fail — that is expected — but it should fail as `Out_of_memory`, not as a
+segfault. In a band just above the true OOM point it segfaults, **nondeterministically**.
+
+Repro (single domain, native, no probe, `binarytrees` at depth 20):
+
+```
+taskset -c 0-5 setarch $(uname -m) -R env MMTK_PLAN=GenImmix MMTK_THREADS=4 \
+  MMTK_HEAP_SIZE_MB=52 quick/build_mmtk/binarytrees.native 20
+```
+
+Two reps per cell:
+
+| heap | GenImmix | Bactrian |
+|---|---|---|
+| 32M | OOM (clean) | OOM |
+| 36M | **SEGV SEGV** | OOM OOM |
+| 40M | **SEGV** OOM | OOM OOM |
+| 44M | OOM OOM | OOM **SEGV** |
+| 48M | **SEGV** OOM | OOM OOM |
+| 52M | **SEGV SEGV** | OOM OOM |
+| 56M+ | ok | ok |
+
+So it is not a clean threshold: the same configuration gives SEGV or a clean
+`Out_of_memory` run to run, which points at a race or at partially-completed collection
+state rather than a deterministic bad size. GenImmix is much more exposed than Bactrian
+here, though Bactrian took one at 44M, so this is not GenImmix-only.
+
+Backtrace (gdb, GenImmix, 52 MiB, caught on the 3rd attempt — note it crashes on a **GC
+worker**, in `ScanMutatorRoots` for a **mature** GenImmix collection):
+
+```
+Thread 4 received SIGSEGV
+#0  scan_stack_frames (fflags=(SCANNING_ONLY_YOUNG_VALUES | unknown: 0x5554),
+                       stack=0x555555c4c390, gc_regs=0x0)      runtime/fiber.c:305
+#1  caml_scan_stack (f=mmtk_ocaml::scanning::collect_root_slot) runtime/fiber.c:325
+#2  caml_do_local_roots (fflags=(... | 0x5554), fflags@entry=0) runtime/roots.c:64
+#3  caml_do_roots (fflags=0)                                    runtime/roots.c:40
+#4  scan_roots_in_mutator_thread<...GenImmix...>                binding/src/scanning.rs:260
+#5  ScanMutatorRoots<GenImmixMatureGCWorkContext>::do_work      gc_work.rs:436
+```
+
+The suspicious part is `fflags`. `caml_do_roots` is called with `fflags=0` (frame 3) and
+`caml_do_local_roots` records `fflags@entry=0` (frame 2), yet by the call into
+`caml_scan_stack` it reads `SCANNING_ONLY_YOUNG_VALUES | unknown: 0x5554` — a value with
+garbage high bits, for a parameter that should be a small enum bitmask. Several
+neighbouring parameters print `<optimized out>`, so gdb's rendering may be unreliable and
+this could be an artifact rather than real corruption; it needs confirming at `-O0` or
+under `rr` before being treated as the cause. `gc_regs=0x0` says the stack being scanned
+is not the currently-running one.
+
+Not yet investigated further — recorded so the heap sweep can avoid the band rather than
+silently mix a crash into the curve. **The D5 sweep therefore floors at 64 MiB for
+binarytrees-20.** Worth an `rr` session (`rr record -c <N>`, varying N, per CLAUDE.md)
+since the nondeterminism is exactly what `rr` is for; a replayable trace would settle
+whether the `fflags` reading is real.
+
 ## Lever 1 (per-object nursery cost) — SAFE slice LANDED: trusted field loads (STW plans), +decomposition showing the structural remainder needs a bespoke nursery trace (2026-07-03)
 
 Acting on the corrected chameneos mechanism (per-promoted-object framework tax). First the

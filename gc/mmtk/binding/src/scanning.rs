@@ -23,6 +23,14 @@ use mmtk::vm::{ObjectTracer, ObjectTracerContext, RootsWorkFactory, Scanning};
 use mmtk::Mutator;
 
 use mmtk_ocaml_common::scanning::{continuation_stack, scan_ocaml_object};
+
+/// Collect visited slots into a Vec (up_oldify's continuation delegation).
+struct CollectSlots<'a>(&'a mut Vec<FieldSlot>);
+impl SlotVisitor<FieldSlot> for CollectSlots<'_> {
+    fn visit_slot(&mut self, slot: FieldSlot) {
+        self.0.push(slot);
+    }
+}
 use mmtk_ocaml_common::slot::FieldSlot;
 
 use crate::active_plan::domain_addrs;
@@ -302,6 +310,140 @@ impl Scanning<OCamlVM> for VMScanning {
         if !buf.is_empty() {
             factory.create_process_roots_work(buf);
         }
+    }
+
+    /// MMTK_UP_OLDIFY: the stock-oldify fast path (see mmtk's
+    /// Scanning::up_oldify_packet contract). One explicit work list, header-
+    /// sentinel forwarding, inline copy + field walk — minor_gc.c's
+    /// structure. Plain blocks and closures are walked inline; continuation
+    /// blocks delegate to scan_object (fiber-stack scan + cont lock).
+    fn up_oldify_packet<O: mmtk::vm::UpOldifyOps<OCamlVM>>(
+        tls: VMWorkerThread,
+        slots: &[FieldSlot],
+        ops: &mut O,
+    ) -> bool {
+        use mmtk_ocaml_common::header::{
+            wosize_of, tag_of, WORD_SIZE, TAG_CLOSURE, TAG_CONTINUATION, TAG_FORWARD,
+            TAG_INFIX, TAG_NO_SCAN,
+        };
+        let heap_start = mmtk::util::heap::vm_layout::vm_layout().heap_start.as_usize();
+        let (young_lo, young_hi) = ops.young_range();
+        let (young_lo, young_hi) = (young_lo.as_usize(), young_hi.as_usize());
+        let mut stack: Vec<ObjectReference> = Vec::with_capacity(1024);
+
+        // Oldify one slot: young target -> forward-or-copy, patch the slot.
+        // Returns without touching non-young / immediate slots.
+        let mut oldify_slot = |slot: FieldSlot,
+                               ops: &mut O,
+                               stack: &mut Vec<ObjectReference>| {
+            let Some(obj) = slot.load() else { return };
+            let addr = obj.to_raw_address();
+            let a = addr.as_usize();
+            if a < young_lo || a >= young_hi {
+                // Young LARGE objects promote in place (never copied); newly
+                // promoted ones get their fields walked by our loop.
+                if ops.is_young_los(obj) && ops.promote_young_los(obj) {
+                    stack.push(obj);
+                }
+                return;
+            }
+            let hd_addr = addr - WORD_SIZE;
+            let hd: usize = unsafe { hd_addr.load() };
+            if hd >= heap_start {
+                // Forwarded: the header holds the new object address.
+                let new = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(hd))
+                };
+                slot.store(new);
+                return;
+            }
+            let wosize = wosize_of(hd);
+            let bytes = (wosize + 1) * WORD_SIZE;
+            let dst = ops.alloc_mature(bytes);
+            assert!(!dst.is_zero(), "up_oldify: mature allocation failed mid-pause");
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    hd_addr.to_ptr::<u8>(),
+                    dst.to_mut_ptr::<u8>(),
+                    bytes,
+                );
+            }
+            let new = unsafe {
+                ObjectReference::from_raw_address_unchecked(dst + WORD_SIZE)
+            };
+            // Sentinel-forward the old copy (header overwritten with the new
+            // address — discriminated by value range, stock's protocol).
+            unsafe { hd_addr.store::<usize>(new.to_raw_address().as_usize()) };
+            slot.store(new);
+            ops.post_copy(new, bytes);
+            mmtk_ocaml_common::object_model::OBJECTS_COPIED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            stack.push(new);
+        };
+
+        for s in slots {
+            oldify_slot(*s, ops, &mut stack);
+        }
+        // Layer-batched drain (round-24 lesson: per-object stack pop/push
+        // churn measured +44% at scale; the layer double-buffer is the shape
+        // that wins): scan the current generation while children accumulate
+        // into the next.
+        let mut delegate_buf: Vec<FieldSlot> = Vec::new();
+        let mut current: Vec<ObjectReference> = Vec::new();
+        while !stack.is_empty() {
+            std::mem::swap(&mut current, &mut stack);
+            for idx in 0..current.len() {
+                let obj = current[idx];
+            let base = obj.to_raw_address();
+            let hd: usize = unsafe { (base - WORD_SIZE).load() };
+            let tag = tag_of(hd);
+            if tag >= TAG_NO_SCAN {
+                continue;
+            }
+            let wosize = wosize_of(hd);
+            match tag {
+                TAG_INFIX => {}
+                TAG_CONTINUATION => {
+                    // Fiber stacks + the cont lock live in scan_object.
+                    delegate_buf.clear();
+                    {
+                        let mut coll = CollectSlots(&mut delegate_buf);
+                        <Self as Scanning<OCamlVM>>::scan_object(tls, obj, &mut coll);
+                    }
+                    for i in 0..delegate_buf.len() {
+                        oldify_slot(delegate_buf[i], ops, &mut stack);
+                    }
+                }
+                TAG_CLOSURE => {
+                    let closinfo = unsafe { (base + WORD_SIZE).load::<usize>() };
+                    let start_env = (closinfo << 8) >> 9;
+                    for i in start_env..wosize {
+                        oldify_slot(
+                            FieldSlot::from_address(base + i * WORD_SIZE),
+                            ops,
+                            &mut stack,
+                        );
+                    }
+                }
+                TAG_FORWARD => {
+                    if wosize > 0 {
+                        oldify_slot(FieldSlot::from_address(base), ops, &mut stack);
+                    }
+                }
+                _ => {
+                    for i in 0..wosize {
+                        oldify_slot(
+                            FieldSlot::from_address(base + i * WORD_SIZE),
+                            ops,
+                            &mut stack,
+                        );
+                    }
+                }
+            }
+            }
+            current.clear();
+        }
+        true
     }
 
     /// Trace all pointer fields of a live OCaml heap block.

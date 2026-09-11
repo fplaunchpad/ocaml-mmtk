@@ -181,6 +181,8 @@ extern uintnat caml_mmtk_heap_size_bytes(void);
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */
 extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
+/* Rust-side mature-direct pacing tick (pretenure/LOS bytes; SHAPE round 30). */
+extern void mmtk_ocaml_mature_alloc_tick(size_t bytes);
 
 /* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
  * plan (ConcurrentImmix). Greys the OLD referents in `count` value-sized slots

@@ -31,6 +31,18 @@ impl ObjectModel<OCamlVM> for VMObjectModel {
     const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec =
         VMLocalForwardingBitsSpec::side_first();
 
+    // Stock OCaml's own minor-GC protocol, made available to mmtk-core's
+    // single-tracer (UP) pauses: an OCaml header `(wosize << 10) | colour |
+    // tag` is numerically below 2^41 for every real object (forwardable
+    // spaces cap object size at 16 KiB anyway), while the heap — and thus any
+    // forwarding pointer — starts at vm_layout().heap_start = 0x200_0000_0000
+    // = 2^41. So the header word at LOCAL_FORWARDING_POINTER_SPEC (the header
+    // itself, in_header(0)) discriminates forwarding state by value range,
+    // and UP traces touch NO side forwarding metadata at all — exactly
+    // vanilla oldify's header-overwrite discipline. Multi-tracer pauses still
+    // use LOCAL_FORWARDING_BITS_SPEC above.
+    const HEADER_FORWARDING_SENTINEL: bool = true;
+
     const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec =
         VMLocalMarkBitSpec::side_after(Self::LOCAL_FORWARDING_BITS_SPEC.as_spec());
 

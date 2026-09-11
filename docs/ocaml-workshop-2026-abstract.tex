@@ -1,0 +1,105 @@
+% OCaml Workshop 2026 — extended abstract (~2 pages).
+% Fill the bracketed prompts IN YOUR OWN WORDS. The CFP desk-rejects proposals
+% "largely written by LLMs"; the comments are notes on WHAT to say, not text to submit.
+% Deadline July 1 AoE; submit at https://types-hotcrp.paris.inria.fr/ocaml26/
+% Section headings are optional (the accepted one-pagers often omit them) — delete the
+% \section*{} lines for a flowing WasML-style version if you prefer.
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\title{\vspace{-2.5em}\texttt{ocaml-mmtk}: OCaml on the Memory Management Toolkit
+       as a testbed for functional-language GC}
+\author{[Presenting author] \and [co-authors] \\[2pt]
+        \small [affiliation(s)]}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ===== 1. Intro =====================================================
+% Your validated ~120-word abstract, lightly expanded if you like:
+% MMTk -> we present ocaml-mmtk (MMTk = OCaml 5.5's only GC, plans swap at startup;
+% self-hosts) -> first functional, statically-typed language as an MMTk substrate
+% (vs OpenJDK/Julia/Ruby) -> the two questions (immutability -> read-barrier-free? ;
+% mutation-rate-dominated cost -> generalises to Haskell/Erlang?).
+\textit{[Intro paragraph — your prose.]}
+
+% ===== 2. Background: OCaml's GC and the read-barrier question =======
+\section*{Background}
+% Why OCaml is the natural test case. OCaml 5's own collector (ICFP'20\footnote{...}):
+%  - per-domain copying MINOR heap -> promotes into a SHARED, non-moving,
+%    mostly-concurrent MARK-AND-SWEEP major;
+%  - an SATB (snapshot-at-the-beginning) write barrier, and -- deliberately -- NO READ
+%    BARRIER: they chose the STW ParMinor over a concurrent minor specifically to keep
+%    the C API's raw-read assumption (C stubs read OCaml values directly);
+%  - the authors lean on immutability explicitly: the initialising writes (the only
+%    ones for immutable data) need no barrier, and reads need no barrier.
+% So the read-barrier-free question is not arbitrary -- it is the design axis OCaml's
+% own authors reasoned about. Read: RESEARCH_QUESTIONS.md baseline section.
+\textit{[Background paragraph — your prose.]}
+
+% ===== 3. ocaml-mmtk (the artifact) ================================
+\section*{\texttt{ocaml-mmtk}}
+% High-level, NO build minutiae:
+%  - we implemented MMTk's VMBinding for OCaml: object model, PRECISE root scanning
+%    (reusing caml_do_roots / caml_scan_stack), stop-the-world, write barriers;
+%  - MMTk is the ONLY collector, for bytecode AND native code; native works via TLAB
+%    nursery-aliasing (OCaml's inlined bump allocator points at an MMTk block) with NO
+%    code-generator change; plans swap at startup; the compiler self-hosts.
+% RQ4 contrast (one or two sentences -- the "GC-friendly language" story):
+%  - OCaml's precise rooting + no naked pointers meant NONE of the conservative-pinning
+%    machinery the Julia and CRuby MMTk reports\footnote{...}\footnote{...} needed;
+%  - but the COORDINATION impedance persisted -- e.g. a stop-the-world handshake counter
+%    underflow once let the GC scan domains that had not actually stopped (root-caused
+%    under rr) -- a generalisable GC-runtime-interface finding.
+\textit{[Artifact paragraph — your prose.]}
+
+% ===== 4. Early results ============================================
+\section*{Early results}
+% Preliminary, SEQUENTIAL (state the caveat -- do NOT claim parallel wins):
+%  - throughput vs stock OCaml 5.5.0 (native, memory parity): the default generational
+%    plan is at parity-or-better on most benchmarks; a read-barrier-free concurrent-
+%    marking plan runs allocation-heavy code up to ~1.9x faster;
+%  - that plan's SATB write barrier is essentially free (<0.1% on the most write-heavy
+%    bench), and moving marking off the pause cuts the max stop-the-world pause ~3-4x;
+%  - removing MMTk's redundant allocation-time zeroing (safe by OCaml's own init-before-
+%    GC discipline) recovered ~15-22% on allocation-heavy code, no pause cost.
+% CAVEAT sentence: single-heap-size numbers are misleading; the rigorous heap-size-
+% normalised comparison vs stock is in progress. Read: README quick panel (reproducible),
+% RESEARCH_QUESTIONS.md RQ1 native result + RQ8.
+\textit{[Early-results paragraph / short list — your prose.]}
+
+% ===== 5. + 6. Research questions and outlook ======================
+\section*{Research questions and outlook}
+% RQ1 (flagship): does the RESIDUAL throughput cost of read-barrier-free collection scale
+% with a program's MUTATION RATE / lifetime dispersion (Dolan'25\footnote{...}) rather
+% than its allocation rate? -- regress the gap across the mutability spectrum
+% (pure-functional <-> ref/Bytes-heavy). If so, it generalises to the functional family
+% (Haskell, Erlang). Next: an LXR-style reference-counting plan.
+\textit{[RQ1 paragraph — your prose.]}
+%
+% RQ7 / the synthesis (the testbed payoff, and the close): the data already splits the
+% win -- the generational plan wins throughput (cheap nursery), the concurrent-marking
+% plan wins latency (off-pause marking). OCaml's OWN collector is generational +
+% concurrent-marking + non-moving-major + SATB + read-barrier-free -- so the natural next
+% plan, "Bactrian", re-expresses OCaml's own GC inside MMTk: simultaneously the cleanest
+% MMTk-vs-vanilla comparison (isolating framework overhead from collector design) and the
+% low-latency vehicle RQ1 needs. The talk presents the platform, this early evidence, and
+% this direction.
+\textit{[RQ7 + closing paragraph — your prose.]}
+
+% ===== Footnotes / references ======================================
+% Fill the \footnote{...} markers above, or use a short bibliography:
+%  ICFP'20  Sivaramakrishnan et al., Retrofitting Parallelism onto OCaml, ICFP 2020.
+%  LXR      Zhao, Blackburn & McKinley, Low-Latency High-Throughput GC, PLDI 2022.
+%  Julia    de Souza Amorim et al., Reconsidering GC in Julia, ISMM 2025.
+%  CRuby    Wang et al., Reworking Memory Management in CRuby, ISMM 2025.
+%  Dolan25  Dolan, Lifetime Dispersion and Generational GC, ISMM 2025.
+%  MMTk     Lin, Blackburn, Hosking & Norrish, Rust as a Language for ... GC, ISMM 2016.
+
+\end{document}
