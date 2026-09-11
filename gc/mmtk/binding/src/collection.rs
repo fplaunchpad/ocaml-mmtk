@@ -478,8 +478,12 @@ fn hint_mark_quantum(baseline_pages: usize, mature_pages: usize, tick_origin: bo
     };
     let pauses = (runway_bytes / cadence).max(1) as f64;
     let debt_ms = (baseline_pages * pg) as f64 / mark_rate_bytes_per_ms();
-    let q = (debt_ms / pauses).clamp(2.0, 200.0);
-    c.set_mark_quantum_hint_ms(q, tick_origin);
+    // No upper clamp: the slicing gate compares debt_ms and the sliced-pause
+    // estimate against latency targets directly (the 200ms ceiling was redundant
+    // with the old 50ms feasibility gate, which this replaces). Keep the 2ms floor
+    // so a tiny debt does not produce sub-millisecond slices.
+    let q = (debt_ms / pauses).max(2.0);
+    c.set_mark_quantum_hint_ms(q, debt_ms, tick_origin);
     if std::env::var_os("MMTK_PACE_DEBUG").is_some() {
         eprintln!(
             "[pace] quantum hint {:.1}ms (debt {}MB, runway {}MB, {} pauses, tick={})",
