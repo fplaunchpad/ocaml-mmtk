@@ -48,6 +48,7 @@
 #include "caml/custom.h"
 #include "caml/domain_state.h"
 #include "caml/domain.h"
+#include "caml/startup_aux.h"   /* caml_params->max_domains */
 #include "caml/fiber.h"
 #include "caml/fail.h"
 #include "caml/finalise.h"
@@ -247,8 +248,10 @@ static inline uint64_t caml_mmtk_cntvct(void)
 #  define MUT_GC_TSC() caml_time_counter()
 #  define MUT_GC_TSC_KIND "monotonic clock"
 #endif
-/* Slots; domain id masked (a collision sums two domains, benign). */
-#define MUT_GC_DOMS 256
+/* One slot per domain, indexed by the domain id and sized from the
+   configured maximum domain count (OCAMLRUNPARAM d) when the instrument is
+   armed, so no two domains ever share a slot: each domain writes only its
+   own plain u64 and the exit-time dump reads them all after the fact. */
 
 /* Write-intent prefetch of one cache line (locality 3 = keep in L1, 2 = L2).
    GCC/Clang have the builtin on every architecture; MSVC gets the SSE or
@@ -296,9 +299,10 @@ static void caml_mmtk_name_thread(const char *name)
 #endif
 }
 static int caml_mut_gc_timing = 0;
-static uint64_t caml_mut_gc_barrier_tsc[MUT_GC_DOMS];
-static uint64_t caml_mut_gc_alloc_tsc[MUT_GC_DOMS];
-static uint64_t caml_mut_gc_park_tsc[MUT_GC_DOMS];
+static uint64_t *caml_mut_gc_barrier_tsc;
+static uint64_t *caml_mut_gc_alloc_tsc;
+static uint64_t *caml_mut_gc_park_tsc;
+static int caml_mut_gc_ndoms;
 static uint64_t caml_mut_gc_tsc0;
 static double caml_mut_gc_mono0;
 
@@ -317,7 +321,7 @@ static void caml_mut_gc_dump(void)
                 &caml_mmtk_jitter_fills, memory_order_relaxed));
   double hz;
   int i;
-  for (i = 0; i < MUT_GC_DOMS; i++) {
+  for (i = 0; i < caml_mut_gc_ndoms; i++) {
     barrier += caml_mut_gc_barrier_tsc[i];
     alloc   += caml_mut_gc_alloc_tsc[i];
     park    += caml_mut_gc_park_tsc[i];
@@ -482,6 +486,19 @@ void caml_mmtk_init(void)
 
   /* D1 mutator-side GC time accounting (see the block comment up top). */
   if (getenv("MMTK_MUTATOR_GC_TIME") != NULL) {
+    caml_mut_gc_ndoms = caml_params->max_domains;
+    caml_mut_gc_barrier_tsc =
+      caml_stat_calloc_noexc(caml_mut_gc_ndoms, sizeof(uint64_t));
+    caml_mut_gc_alloc_tsc =
+      caml_stat_calloc_noexc(caml_mut_gc_ndoms, sizeof(uint64_t));
+    caml_mut_gc_park_tsc =
+      caml_stat_calloc_noexc(caml_mut_gc_ndoms, sizeof(uint64_t));
+    if (caml_mut_gc_barrier_tsc == NULL || caml_mut_gc_alloc_tsc == NULL
+        || caml_mut_gc_park_tsc == NULL) {
+      fprintf(stderr, "[mmtk] mutator GC time: cannot allocate %d slots, "
+              "instrument disabled\n", caml_mut_gc_ndoms);
+      caml_mut_gc_ndoms = 0;
+    } else
     caml_mut_gc_timing = 1;
     caml_mut_gc_tsc0 = MUT_GC_TSC();
     caml_mut_gc_mono0 = caml_mut_gc_now();
@@ -734,7 +751,7 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   void *p;
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
-  int slot = Caml_state->id & (MUT_GC_DOMS - 1);
+  int slot = Caml_state->id;
   int sem = caml_mmtk_semantics(wosize);
   (void)reserved;
   if (caml_mmtk_test_malloc_medium
@@ -865,7 +882,7 @@ value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
   void *p;
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
-  int slot = Caml_state->id & (MUT_GC_DOMS - 1);
+  int slot = Caml_state->id;
   int sem = caml_mmtk_semantics(wosize);
   if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
   caml_mmtk_jitter_pad((size_t)Whsize_wosize(wosize) * sizeof(value), sem);
@@ -893,7 +910,7 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
   uintptr_t start = 0, end = 0;
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
-  int slot = dom->id & (MUT_GC_DOMS - 1);
+  int slot = dom->id;
   size_t min_bytes = (size_t)whsize * sizeof(value);
   if (min_bytes == 0) min_bytes = sizeof(value);
 
@@ -1318,7 +1335,7 @@ void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
     mmtk_ocaml_region_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                               (size_t) count);
   if (timed)
-    caml_mut_gc_barrier_tsc[Caml_state->id & (MUT_GC_DOMS - 1)] +=
+    caml_mut_gc_barrier_tsc[Caml_state->id] +=
       MUT_GC_TSC() - t0;
 }
 
@@ -1348,7 +1365,7 @@ void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
     mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                             (size_t) count);
   if (timed)
-    caml_mut_gc_barrier_tsc[Caml_state->id & (MUT_GC_DOMS - 1)] +=
+    caml_mut_gc_barrier_tsc[Caml_state->id] +=
       MUT_GC_TSC() - t0;
 }
 
@@ -1474,7 +1491,7 @@ void caml_mmtk_park(uintnat domain_state_addr)
 {
   uint64_t t0 = 0;
   int timed = caml_mut_gc_timing;
-  int slot = ((caml_domain_state *)domain_state_addr)->id & (MUT_GC_DOMS - 1);
+  int slot = ((caml_domain_state *)domain_state_addr)->id;
   if (timed) t0 = MUT_GC_TSC();
   caml_mmtk_cooperative_park(domain_state_addr);
   caml_mmtk_become_running(domain_state_addr);
