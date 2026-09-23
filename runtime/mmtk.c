@@ -631,6 +631,16 @@ Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
     return CAML_MMTK_SEM_NONMOVING;
   return CAML_MMTK_SEM_DEFAULT;
 }
+/* Whether a block of [wosize] words from caml_mmtk_alloc_shr is placed outside
+   the nursery under a generational plan (the pretenuring band above, or the
+   LOS). Pointer fields written into such a block without caml_modify or
+   caml_initialize must be handed to caml_mmtk_region_barrier before the next
+   collection, or a nursery GC leaves them dangling (see intern.c). */
+int caml_mmtk_alloc_shr_is_mature(mlsize_t wosize)
+{
+  return caml_mmtk_generational
+         && caml_mmtk_semantics(wosize) != CAML_MMTK_SEM_DEFAULT;
+}
 
 /* xorshift64*; deterministic per process, no clock involved. */
 Caml_inline uint64_t caml_mmtk_jitter_next(void)

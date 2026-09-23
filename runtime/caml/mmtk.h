@@ -84,6 +84,10 @@ extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
  * Out_of_memory, so the unmarshaller can clean up first. See runtime/intern.c.
  */
 extern value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag);
+/* 1 if a caml_mmtk_alloc_shr block of this size is born outside the nursery
+   under a generational plan (its unbarriered pointer fields need
+   caml_mmtk_region_barrier). */
+extern int caml_mmtk_alloc_shr_is_mature(mlsize_t wosize);
 
 /* Stop-the-world support. caml_mmtk_stw_poll is called from
  * caml_handle_gc_interrupt: if a collection is in progress it parks this domain

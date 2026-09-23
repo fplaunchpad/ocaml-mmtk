@@ -835,6 +835,25 @@ static void intern_rec(struct caml_intern_state* s,
   break;
   }
   }
+  /* MMTk: the direct [*dest = v] stores above rely on the stock invariant
+     that a major-heap [dest] only ever receives major-heap [v]s. Under MMTk
+     every object is allocated on its own by caml_mmtk_try_alloc_shr, and a
+     generational plan's pretenuring band (caml_mmtk_semantics) places blocks
+     of 2056 bytes and up straight in the mature space while their smaller
+     children are born in the nursery, so the structure just built can hold
+     mature-to-nursery edges that no write barrier recorded. Hand the fields
+     of every such block to the region barrier now, while collection is still
+     disabled and every field is final. Seen as the bytecode globals table
+     (461 words): the first nursery GC under Bactrian left 441 of its young
+     closures dangling and the interpreter crashed on the next GETGLOBAL. */
+  if (s->intern_obj_table != NULL) {
+    for (asize_t i = 0; i < s->obj_counter; i++) {
+      value b = s->intern_obj_table[i];
+      if (Is_block(b) && Tag_val(b) < No_scan_tag
+          && caml_mmtk_alloc_shr_is_mature(Wosize_val(b)))
+        caml_mmtk_region_barrier(&Field(b, 0), Wosize_val(b));
+    }
+  }
   /* We are done. Cleanup the stack and leave the function */
   intern_free_stack(s);
 }
