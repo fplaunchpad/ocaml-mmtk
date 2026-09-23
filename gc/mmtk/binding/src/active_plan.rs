@@ -5,7 +5,7 @@
 //! A domain is registered on creation and deregistered on termination.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use lazy_static::lazy_static;
 
@@ -28,6 +28,42 @@ lazy_static! {
     /// Global domain registry: domain_state_addr → raw pointer to Mutator<OCamlVM>.
     static ref DOMAIN_REGISTRY: RwLock<HashMap<usize, MutatorPtr>> =
         RwLock::new(HashMap::new());
+    /// The mutator set frozen for the pause in progress (`None` outside a pause).
+    /// A domain spawning or terminating during a pause is not awaited by
+    /// stop_all_mutators, so the registry can change while GC packets run. The
+    /// core reads the set twice per Release stage — `number_of_mutators()` when
+    /// MarkSweepSpace::release arms its `pending_release_packets` handshake, then
+    /// `mutators()` to create the ReleaseMutator packets that decrement it — and a
+    /// registry change in between leaves the counter short or wraps it to
+    /// usize::MAX (the domain_parallel_spawn_burn abort). Both reads use this
+    /// snapshot while it is set, so every pause sees one consistent set. Mutator
+    /// allocations are leaked at termination, so the pointers stay valid.
+    static ref PAUSE_MUTATORS: Mutex<Option<Vec<MutatorPtr>>> = Mutex::new(None);
+}
+
+/// Freeze the mutator set for the pause that is starting. Called by
+/// stop_all_mutators once every running domain has stopped.
+pub fn freeze_mutators_for_pause() {
+    let ptrs: Vec<MutatorPtr> = DOMAIN_REGISTRY
+        .read()
+        .unwrap()
+        .values()
+        .map(|p| MutatorPtr(p.0))
+        .collect();
+    *PAUSE_MUTATORS.lock().unwrap() = Some(ptrs);
+}
+
+/// Drop the pause snapshot. Called by resume_mutators before domains wake.
+pub fn thaw_mutators_after_pause() {
+    *PAUSE_MUTATORS.lock().unwrap() = None;
+}
+
+/// Raw mutator pointers: the pause snapshot while one is set, else the registry.
+fn mutator_ptrs() -> Vec<*mut Mutator<OCamlVM>> {
+    if let Some(snapshot) = PAUSE_MUTATORS.lock().unwrap().as_ref() {
+        return snapshot.iter().map(|p| p.0).collect();
+    }
+    DOMAIN_REGISTRY.read().unwrap().values().map(|p| p.0).collect()
 }
 
 /// Register a mutator for the given domain address.
@@ -144,17 +180,18 @@ impl ActivePlan<OCamlVM> for VMActivePlan {
 
     /// Iterator over all live domain mutators.
     fn mutators<'a>() -> Box<dyn Iterator<Item = &'a mut Mutator<OCamlVM>> + 'a> {
-        let map = DOMAIN_REGISTRY.read().unwrap();
-        // Collect pointers under the lock, then drop the lock before iterating.
-        let ptrs: Vec<*mut Mutator<OCamlVM>> = map.values().map(|p| p.0).collect();
-        drop(map);
-        // SAFETY: Each pointer is live and MMTk calls this during STW only.
+        // Pointers are collected under the lock (pause snapshot or registry),
+        // and the lock is dropped before iterating.
+        let ptrs = mutator_ptrs();
+        // SAFETY: Each pointer is live (mutators are never freed) and MMTk calls
+        // this during STW only.
         let iter = ptrs.into_iter().map(|p| unsafe { &mut *p });
         Box::new(iter)
     }
 
-    /// Count of currently registered domains.
+    /// Count of mutators: the pause snapshot while one is set, else the
+    /// currently registered domains. Must agree with `mutators()`.
     fn number_of_mutators() -> usize {
-        DOMAIN_REGISTRY.read().unwrap().len()
+        mutator_ptrs().len()
     }
 }

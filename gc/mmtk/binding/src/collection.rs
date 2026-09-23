@@ -855,6 +855,10 @@ impl Collection<OCamlVM> for VMCollection {
             }
         }
 
+        // Every running domain has stopped: freeze the mutator set for this
+        // pause so `mutators()` and `number_of_mutators()` agree for its whole
+        // duration (see active_plan::PAUSE_MUTATORS).
+        crate::active_plan::freeze_mutators_for_pause();
         for mutator in crate::active_plan::VMActivePlan::mutators() {
             mutator_visitor(mutator);
         }
@@ -862,6 +866,7 @@ impl Collection<OCamlVM> for VMCollection {
 
     /// GC worker: collection finished — un-poison every domain and wake them.
     fn resume_mutators(_tls: VMWorkerThread) {
+        crate::active_plan::thaw_mutators_after_pause();
         // Mutators are about to run again: back to full revalidation before any
         // wake (concurrent plans only; see DYNAMIC_TRUSTED).
         if DYNAMIC_TRUSTED.load(Ordering::Relaxed) {
@@ -1059,14 +1064,18 @@ impl Collection<OCamlVM> for VMCollection {
                 // the mutator never uses.
                 //
                 // Linux truncates comm to 15 bytes; this name is 14.
-                let _ = std::thread::Builder::new()
+                // Fail fast if the OS refuses the thread: MMTk would otherwise
+                // count a worker that never started and a later collection
+                // could wait for it forever.
+                std::thread::Builder::new()
                     .name("mmtk-gc-worker".into())
                     .spawn(move || {
                         let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(
                             unsafe { mmtk::util::Address::from_usize(1) },
                         )));
                         memory_manager::start_worker::<OCamlVM>(crate::mmtk(), tls, worker);
-                    });
+                    })
+                    .expect("failed to spawn an MMTk GC worker thread");
             }
         }
     }
