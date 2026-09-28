@@ -476,10 +476,22 @@ void caml_mmtk_init(void)
       const char *jv = getenv("MMTK_ALLOC_JITTER");
       if (jv != NULL && jv[0] != '\0') {
         int bits = atoi(jv);
-        /* 0 disables; 1 = the historical on-switch (5 bits); 2..8 explicit. */
+        /* Modes (see caml_mmtk_jitter_pad):
+             0        disabled
+             1        the historical on-switch, same as 5
+             2..8     random pad of that many bits of entropy
+             16..23   fixed pad of (mode - 16) cache lines
+             24, 25   rotating pad over 64 (24) or 16 (25) line positions
+           Anything else falls back to 5, with a warning. */
         if (bits == 0) caml_mmtk_alloc_jitter = 0;
-        else if (bits >= 16 && bits <= 23) caml_mmtk_alloc_jitter = bits;
-        else caml_mmtk_alloc_jitter = (bits >= 2 && bits <= 8) ? bits : 5;
+        else if (bits == 1) caml_mmtk_alloc_jitter = 5;
+        else if ((bits >= 2 && bits <= 8) || (bits >= 16 && bits <= 25))
+          caml_mmtk_alloc_jitter = bits;
+        else {
+          fprintf(stderr, "[mmtk] MMTK_ALLOC_JITTER=%s is not a known mode; "
+                  "using 5\n", jv);
+          caml_mmtk_alloc_jitter = 5;
+        }
       }
     }
   }
@@ -696,7 +708,7 @@ static void caml_mmtk_jitter_pad(size_t bytes, int sem)
       if (k == 0) return;
       pad = 8 * (mlsize_t)k - 1;
     } else if (caml_mmtk_alloc_jitter >= 16) {
-      /* Deterministic mode (MMTK_ALLOC_JITTER=17..23): a FIXED pad of L =
+      /* Deterministic mode (MMTK_ALLOC_JITTER=16..23): a FIXED pad of L =
          (value-16) cache lines before every >=2KB allocation. A constant
          odd-line total pitch steps the cache set index by an odd amount per
          object - coprime with every power-of-two set count (L1/L2/L3) - so
