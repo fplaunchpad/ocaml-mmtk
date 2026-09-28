@@ -5,6 +5,36 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-28 - per-domain nursery scaling overran a fixed heap
+
+**Symptom.** Bytecode `domain_parallel_spawn_burn` under Bactrian with
+`MMTK_HEAP_SIZE_MB=64` raised `Out_of_memory` in about a third of runs
+(9 of 30 and 11 of 30 in two samples). Native passed. The default dynamic
+heap never showed it, so CI did not either.
+
+**Cause.** The binding scales the Bounded nursery by the live domain count
+(`set_nursery_scale`, 2 to 16 MiB per domain). mmtk-core capped the scaled
+maximum at a quarter of the heap, but the scaled minimum overrode that cap:
+the test runs about 27 domains, so the nursery asked for 54 MiB of a 64 MiB
+heap and the mature space was left almost nothing. Confirmed by switching
+scaling off (`MMTK_NURSERY_PER_DOMAIN=0`): 0 of 30 runs failed, against 4 of
+30 with scaling on, same runtime.
+
+**Fix (mmtk-core `d69c205659`).** When the heap cannot grow (a fixed heap,
+or a growable one at its maximum), the scaled minimum is capped at a
+quarter of the heap, never below the unscaled minimum, in both nursery
+getters. With it, 30 of 30 runs pass with scaling on. A first version
+capped growable heaps too; that shrank the nursery of multi-domain programs
+early in the run (CLBG binarytrees at 16 domains: GenImmix 0.87 s to
+1.24 s), so growable heaps keep the old behaviour, and those timings are
+back to within noise (GenImmix 0.90 s before, 0.87 s after).
+
+Immix's `churn` and `test_issue_11094` bytecode failures at 64 MB are a
+separate matter: Immix has no nursery, so this cap cannot affect them. They
+reproduce with and without every change in this session and stay open.
+
+---
+
 ## 2026-09-28 - domain creation raced MMTk pauses: release-count wrap, then stale TLABs
 
 **Symptom.** `domain_parallel_spawn_burn` aborted with
@@ -52,7 +82,9 @@ streams) with 0 failures and 0 hangs, against about 2 % before.
 The remaining failures are bytecode `Out_of_memory` at that small heap and
 predate this fix. Immix fails churn and test_issue_11094 with and without
 it. Bactrian's `domain_parallel_spawn_burn` bytecode ran out of memory in 9
-of 30 runs without the fix and 11 of 30 with it, the same rate.
+of 30 runs without the fix and 11 of 30 with it, the same rate. That one
+was the nursery overrunning the fixed heap, fixed separately (see the entry
+above).
 
 The 2026-08-10 StickyImmix `kb.native 50` underflow is a different bug: it is
 single-domain. It still reproduces on every run (now ending at -1) and stays
