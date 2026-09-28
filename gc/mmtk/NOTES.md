@@ -29,9 +29,15 @@ early in the run (CLBG binarytrees at 16 domains: GenImmix 0.87 s to
 1.24 s), so growable heaps keep the old behaviour, and those timings are
 back to within noise (GenImmix 0.90 s before, 0.87 s after).
 
-Immix's `churn` and `test_issue_11094` bytecode failures at 64 MB are a
-separate matter: Immix has no nursery, so this cap cannot affect them. They
-reproduce with and without every change in this session and stay open.
+Immix's `churn` and `test_issue_11094` bytecode failures at 64 MB are not a
+bug: 64 MB is below what these tests need. Stock OCaml 5.5 peaks at an
+87 MB major heap on churn and 54 MB on test_issue_11094 (`top_heap_words`;
+188 MB RSS there, mostly fiber stacks). The smallest fixed heap that passes
+twice: churn GenImmix 48 MB, Immix 96 MB; test_issue_11094 GenImmix 64 MB,
+Immix 128 MB (2 GCs in the whole run, so little garbage, mostly 200,000
+queued continuations). Immix has no nursery and places objects by line
+without compacting by default, so it needs up to about twice stock's major
+heap here.
 
 ---
 
@@ -86,9 +92,8 @@ of 30 runs without the fix and 11 of 30 with it, the same rate. That one
 was the nursery overrunning the fixed heap, fixed separately (see the entry
 above).
 
-The 2026-08-10 StickyImmix `kb.native 50` underflow is a different bug: it is
-single-domain. It still reproduces on every run (now ending at -1) and stays
-open.
+The 2026-08-10 StickyImmix `kb.native 50` underflow was a different bug
+(single-domain), fixed the same day; see that entry.
 
 ---
 
@@ -505,6 +510,17 @@ cycle- and worker-share-identical; LU neutral. Outputs byte-identical
 across the 16-cell golden battery + forced-concurrent canaries.
 
 ## 2026-08-10 — KNOWN FAILURE: StickyImmix pending_release_packets underflow (pre-existing)
+
+**FIXED 2026-09-28 (mmtk-core `4bd0674237`).** `stickyimmix_mutator_release`
+called `immix_mutator_release`, which already ends with
+`common_release_func`, and then called `common_release_func` again. Under
+`marksweep_as_nonmoving` that released each mutator's free-list allocator
+twice, one `release_packet_done` more per mutator than
+`MarkSweepSpace::release` arms, so the counter wrapped at the first
+full-heap collection. Traced with gdb breakpoints on the arm and every
+decrement. Upstream mmtk-core has the same double call; it only bites with
+the mark-sweep nonmoving space. kb now runs clean at 192, 64 and 32 MB.
+The analysis below is kept for history.
 
 `MMTK_PLAN=StickyImmix MMTK_HEAP_SIZE_MB=192 setarch x86_64 -R kb.native 50`
 aborts at gc/mmtk-core/src/util/epilogue.rs:11: "pending_release_packets is
