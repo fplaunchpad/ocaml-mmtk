@@ -2788,6 +2788,9 @@ endif
 	$(MAKE) -C testsuite distclean
 	rm -f tools/eventlog_metadata tools/*.bak
 	rm -f utils/config.common.ml utils/config.generated.ml
+# MMTk: cargo's build directory for the binding staticlib. Kept by `clean` so
+# rebuilds stay incremental; distclean must leave no ignored files behind.
+	rm -rf $(MMTK_DIR)/target
 	rm -f compilerlibs/META
 	rm -f boot/ocamlrun boot/ocamlrun.exe boot/$(HEADER_NAME) \
 	      boot/flexdll_*.o boot/flexdll_*.obj \
