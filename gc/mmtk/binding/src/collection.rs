@@ -906,6 +906,24 @@ impl Collection<OCamlVM> for VMCollection {
         if was_full {
             FULL_GC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
+        // Off-heap credit reset for NON-generational plans (Immix, MarkSweep,
+        // SemiSpace, MarkCompact, ConcurrentImmix, ...). The generational
+        // branch below resets it when a full cycle's sweep completes; without
+        // this, every other collecting plan only ever added to it, so
+        // vm_live_bytes (and with it every heap-full and heap-sizing decision)
+        // grew without bound on a custom-block-heavy program. Every GC of a
+        // STW non-generational plan is a whole-heap GC; a concurrent one
+        // completes its cycle only at the pause that finishes marking, never
+        // at InitialMark, whose trace has not yet found any dead block. As in
+        // the generational case, the dead blocks' finalizers run at the
+        // mutators' next safepoint, just after this reset.
+        if plan.generational().is_none()
+            && plan
+                .concurrent()
+                .is_none_or(|c| c.previous_pause_finished_mark() && c.sweep_drained())
+        {
+            OFFHEAP_BYTES_SINCE_FULL.store(0, Ordering::Relaxed);
+        }
         if let Some(g) = plan.generational() {
             let mature = g.get_mature_reserved_pages();
             // Cycle-START reset for the allocation-denominated cadence: stock's
