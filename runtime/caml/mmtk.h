@@ -118,6 +118,8 @@ extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
  * clean_pass then clears dead keys/data and forwards survivors. See
  * gc/mmtk/NOTES.md (M6 design). */
 extern int caml_mmtk_weak_refs;
+/* MMTK_POLL_DEBUG, read once at MMTk init. */
+extern int caml_mmtk_poll_debug;
 typedef int   (*caml_mmtk_ephe_reachable_fn)(value v);
 typedef value (*caml_mmtk_ephe_forward_fn)(value v);
 typedef value (*caml_mmtk_ephe_retain_fn)(void *ctx, value v);

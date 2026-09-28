@@ -137,6 +137,10 @@ static int caml_mmtk_collection_started = 0;
    alive -- never clears). The opt-out is transitional, to be removed with the
    conservative scheme in M9 stage 3. See gc/mmtk/NOTES.md. */
 int caml_mmtk_weak_refs = 1;
+/* MMTK_POLL_DEBUG: trace TLAB refills from the allocation slow path and
+   the poll path. Read once at init; both sites fire on hot paths, where a
+   getenv per call scanned the whole environment every time. */
+int caml_mmtk_poll_debug = 0;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
  * space. Conservative: smaller than the smallest line/block in collecting
@@ -426,6 +430,7 @@ void caml_mmtk_init(void)
     const char *wr = getenv("MMTK_WEAK_REFS");
     caml_mmtk_weak_refs = (wr == NULL || wr[0] != '0');
   }
+  caml_mmtk_poll_debug = (getenv("MMTK_POLL_DEBUG") != NULL);
 
   if (getenv("MMTK_VERBOSE") != NULL) {
     if (heap_bytes == 0)

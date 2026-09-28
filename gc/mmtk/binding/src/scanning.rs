@@ -330,6 +330,11 @@ impl Scanning<OCamlVM> for VMScanning {
         let (young_lo, young_hi) = ops.young_range();
         let (young_lo, young_hi) = (young_lo.as_usize(), young_hi.as_usize());
         let mut stack: Vec<ObjectReference> = Vec::with_capacity(1024);
+        // Objects copied by this packet. Published once at the end, and only
+        // when copy counting is armed (the same COUNT_COPIES gate copy_object
+        // honours): a shared fetch_add per copy is exactly the kind of locked
+        // operation this fast path exists to avoid.
+        let mut copied: usize = 0;
 
         // Oldify one slot: young target -> forward-or-copy, patch the slot.
         // Returns without touching non-young / immediate slots.
@@ -376,8 +381,7 @@ impl Scanning<OCamlVM> for VMScanning {
             unsafe { hd_addr.store::<usize>(new.to_raw_address().as_usize()) };
             slot.store(new);
             ops.post_copy(new, bytes);
-            mmtk_ocaml_common::object_model::OBJECTS_COPIED
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            copied += 1;
             stack.push(new);
         };
 
@@ -442,6 +446,13 @@ impl Scanning<OCamlVM> for VMScanning {
             }
             }
             current.clear();
+        }
+        if copied > 0
+            && mmtk_ocaml_common::object_model::COUNT_COPIES
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            mmtk_ocaml_common::object_model::OBJECTS_COPIED
+                .fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
         }
         true
     }

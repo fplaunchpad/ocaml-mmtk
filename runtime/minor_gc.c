@@ -261,7 +261,7 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
        minor GC; otherwise we empty the minor heap. */
     CAML_EV_COUNTER(EV_C_FORCE_MINOR_ALLOC_SMALL, 1);
     if (caml_mmtk_tlab) {
-      if (getenv("MMTK_POLL_DEBUG") != NULL) {
+      if (caml_mmtk_poll_debug) {
         static _Atomic long n = 0;
         long k = ++n;
         if (k <= 5 || k % 1000000 == 0)

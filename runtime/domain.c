@@ -1338,7 +1338,7 @@ void caml_poll_gc_work(void)
       static _Atomic long caml_mmtk_poll_refill_fail = 0;
       int ok = caml_mmtk_refill_tlab(d, Whsize_wosize(0));
       if (!ok) caml_mmtk_poll_refill_fail++;
-      if (getenv("MMTK_POLL_DEBUG") != NULL) {
+      if (caml_mmtk_poll_debug) {
         long n = ++caml_mmtk_poll_traps;
         if (n <= 5 || n % 10000000 == 0)
           fprintf(stderr,

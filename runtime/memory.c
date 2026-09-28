@@ -284,7 +284,6 @@ CAMLexport void caml_free_dependent_memory (mlsize_t nbytes)
 */
 CAMLexport void caml_adjust_gc_speed (mlsize_t res, mlsize_t max)
 {
-  double ratio;
   if (max == 0) max = caml_custom_get_max_major ();
   if (res > max) res = max;
   Caml_state->extra_heap_resources += (double) res / (double) max;
@@ -298,7 +297,6 @@ CAMLexport void caml_adjust_gc_speed (mlsize_t res, mlsize_t max)
        pressure credit happens with raw bytes in alloc_custom_gen
        (caml_mmtk_custom_mem_pressure); here we only consume the stock
        accumulator to kill the ratchet. */
-    (void) ratio;
     Caml_state->extra_heap_resources = 0.0;
     caml_request_major_slice (1);
   }
