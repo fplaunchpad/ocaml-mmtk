@@ -106,6 +106,8 @@ int caml_mmtk_collection_enabled(void)
    (Immix/StickyImmix/GenImmix). Read on the allocation slow path, so a plain
    int. */
 int caml_mmtk_tlab = 0;
+static int caml_mmtk_refill_tlab_impl(caml_domain_state *dom, mlsize_t whsize,
+                                      int at_bind);
 
 static int caml_mmtk_initialised = 0;
 static void *caml_mmtk_frontier_warmer(void *arg);
@@ -595,7 +597,7 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
        path produces) are NOT supported native -- they abort below. (Bytecode
        allocates through C entry points and is all-MMTk directly, so this is
        native-only.) */
-  if (caml_mmtk_refill_tlab(dom, Whsize_wosize(0))) {
+  if (caml_mmtk_refill_tlab_impl(dom, Whsize_wosize(0), 1)) {
     caml_mmtk_tlab = 1;
     if (getenv("MMTK_VERBOSE") != NULL)
       fprintf(stderr, "[mmtk] native nursery: TLAB (MMTk-owned %s block)\n",
@@ -924,7 +926,17 @@ value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag)
    roots are published at this safepoint. */
 int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
 {
+  return caml_mmtk_refill_tlab_impl(dom, whsize, 0);
+}
+
+/* [at_bind]: the first refill of a domain being created, which holds an MMTk
+   binding slot and so must not block for a collection (see
+   mmtk_ocaml_refill_tlab_at_bind). */
+static int caml_mmtk_refill_tlab_impl(caml_domain_state *dom, mlsize_t whsize,
+                                      int at_bind)
+{
   uintptr_t start = 0, end = 0;
+  int ok;
   uint64_t t0 = 0, p0 = 0;
   int timed = caml_mut_gc_timing;
   int slot = dom->id;
@@ -932,7 +944,10 @@ int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize)
   if (min_bytes == 0) min_bytes = sizeof(value);
 
   if (timed) { p0 = caml_mut_gc_park_tsc[slot]; t0 = MUT_GC_TSC(); }
-  if (!mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end)) {
+  ok = at_bind
+    ? mmtk_ocaml_refill_tlab_at_bind(dom->mmtk_mutator, min_bytes, &start, &end)
+    : mmtk_ocaml_refill_tlab(dom->mmtk_mutator, min_bytes, &start, &end);
+  if (!ok) {
     if (timed)
       caml_mut_gc_alloc_tsc[slot] +=
         (MUT_GC_TSC() - t0) - (caml_mut_gc_park_tsc[slot] - p0);
@@ -1714,6 +1729,17 @@ void caml_mmtk_leave_blocking(uintnat dom)
 {
   if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
     caml_mmtk_become_running(dom);
+}
+
+/* Binding slots for domain creation (see caml/mmtk.h and domain_create). */
+int caml_mmtk_try_begin_bind(void)
+{
+  return mmtk_ocaml_try_begin_bind();
+}
+
+void caml_mmtk_end_bind(void)
+{
+  mmtk_ocaml_end_bind();
 }
 
 /* Called when a domain terminates: deregister it so collections no longer wait

@@ -7,7 +7,9 @@ use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mmtk::memory_manager;
-use mmtk::util::alloc::{Allocator, AllocatorSelector, BumpAllocator, ImmixAllocator};
+use mmtk::util::alloc::{
+    AllocationOptions, Allocator, AllocatorSelector, BumpAllocator, ImmixAllocator,
+};
 use mmtk::util::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread};
 use mmtk::util::{Address, ObjectReference};
 use mmtk::AllocationSemantics;
@@ -445,6 +447,37 @@ pub extern "C" fn mmtk_ocaml_refill_tlab(
     out_start: *mut usize,
     out_end: *mut usize,
 ) -> bool {
+    refill_tlab(mutator, min_bytes, out_start, out_end, None)
+}
+
+/// The first TLAB refill of a domain being created (`caml_mmtk_domain_init`).
+/// That thread holds a binding slot, which a collection waits for, so this
+/// refill must never block for a collection: it does not wait at a GC poll
+/// (`at_safepoint: false`) and may go past the heap limit
+/// (`allow_overcommit: true`) by at most one block. A collection it requests
+/// starts once the slot is released, moments later.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_refill_tlab_at_bind(
+    mutator: *mut libc::c_void,
+    min_bytes: usize,
+    out_start: *mut usize,
+    out_end: *mut usize,
+) -> bool {
+    let options = AllocationOptions {
+        allow_overcommit: true,
+        at_safepoint: false,
+        allow_oom_call: false,
+    };
+    refill_tlab(mutator, min_bytes, out_start, out_end, Some(options))
+}
+
+fn refill_tlab(
+    mutator: *mut libc::c_void,
+    min_bytes: usize,
+    out_start: *mut usize,
+    out_end: *mut usize,
+    options: Option<AllocationOptions>,
+) -> bool {
     let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
 
     let selector =
@@ -469,7 +502,10 @@ pub extern "C" fn mmtk_ocaml_refill_tlab(
                 unsafe { mutator.allocator_impl_mut::<$ty>(selector) };
             const PROBE: usize = WORD_SIZE;
             loop {
-                let result = Allocator::alloc(allocator, PROBE, WORD_SIZE, 0);
+                let result = match options {
+                    None => Allocator::alloc(allocator, PROBE, WORD_SIZE, 0),
+                    Some(o) => Allocator::alloc_with_options(allocator, PROBE, WORD_SIZE, 0, o),
+                };
                 if result.is_zero() {
                     return false; // heap exhausted after a GC
                 }

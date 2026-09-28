@@ -13,7 +13,13 @@
 //! same lifecycle the runtime already drives:
 //!
 //!   - bind (register_mutator): a domain is born STOPPED (absent from the set).
-//!     A child bound mid-spawn but not yet executing OCaml is therefore not awaited.
+//!     A child bound mid-spawn but not yet executing OCaml is therefore not
+//!     awaited as RUNNING, but its creation holds a BINDING slot
+//!     (`mmtk_ocaml_try_begin_bind`, taken in `domain_create` before a domain
+//!     slot is claimed and released at its single exit). A slot is refused
+//!     while a collection is active, and `stop_all_mutators` waits for held
+//!     slots to drain, so registration and the first TLAB refill never
+//!     overlap a pause.
 //!   - STOPPED edges (enter blocking section, park, deregister) remove the domain
 //!     from the set immediately.
 //!   - RUNNING edges (leave blocking section, resume from park, child boot) go
@@ -81,6 +87,18 @@ struct StwState {
     /// OCaml and removed when it parks, blocks, or deregisters. The set (rather
     /// than a count) makes every transition idempotent and self-cleaning.
     running: HashSet<usize>,
+    /// Domains currently being created (`domain_create` between claiming a
+    /// binding slot and finishing `caml_mmtk_domain_init`). A booting domain
+    /// is not RUNNING OCaml, but it registers its mutator and takes its first
+    /// TLAB block, and neither may overlap a pause: registering mid-pause
+    /// changed the mutator set between MarkSweepSpace::release arming
+    /// `pending_release_packets` and the ReleaseMutator packets being created
+    /// (the counter wrapped), and a TLAB taken mid-pause was never released,
+    /// so the domain later bumped into lines the sweep had freed (stale-buffer
+    /// SIGSEGVs and wrong output in native CLBG mandelbrot). A slot is only
+    /// granted while no collection is active, and `stop_all_mutators` waits for
+    /// the count to drain along with the RUNNING set.
+    binding: usize,
 }
 lazy_static! {
     // `HashSet::new` is not const, so the STW state is lazily initialised (the
@@ -88,6 +106,7 @@ lazy_static! {
     static ref STW: Mutex<StwState> = Mutex::new(StwState {
         gc_active: false,
         running: HashSet::new(),
+        binding: 0,
     });
 }
 static STW_COND: Condvar = Condvar::new();
@@ -738,6 +757,31 @@ pub extern "C" fn mmtk_ocaml_try_mark_running(addr: usize) -> i32 {
     1
 }
 
+/// Claim a binding slot for a domain being created (see `StwState::binding`).
+/// Returns 1 and counts the slot when no collection is active; returns 0 when
+/// one is, and the caller must drop its runtime locks, wait with
+/// `mmtk_ocaml_wait_collection_done`, and retry. The check and the increment
+/// are one critical section with `stop_all_mutators` setting `gc_active`, so a
+/// slot is never granted to a domain that a started pause would not wait for.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_try_begin_bind() -> i32 {
+    let mut s = STW.lock().unwrap();
+    if s.gc_active {
+        return 0;
+    }
+    s.binding += 1;
+    1
+}
+
+/// Release a binding slot claimed with `mmtk_ocaml_try_begin_bind`.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_end_bind() {
+    let mut s = STW.lock().unwrap();
+    debug_assert!(s.binding > 0, "end_bind without a matching begin");
+    s.binding = s.binding.saturating_sub(1);
+    STW_COND.notify_all();
+}
+
 /// A domain is entering a C blocking section: it is now safe-stopped.
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_enter_blocking(addr: usize) {
@@ -795,13 +839,13 @@ impl Collection<OCamlVM> for VMCollection {
         // stragglers each iteration in case a poison was cleared concurrently.
         {
             let mut s = STW.lock().unwrap();
-            while !s.running.is_empty() {
+            while !s.running.is_empty() || s.binding > 0 {
                 drop(s);
                 for domain in crate::active_plan::domain_addrs() {
                     unsafe { caml_mmtk_interrupt(domain) };
                 }
                 s = STW.lock().unwrap();
-                if s.running.is_empty() {
+                if s.running.is_empty() && s.binding == 0 {
                     break;
                 }
                 let (g, _) = STW_COND

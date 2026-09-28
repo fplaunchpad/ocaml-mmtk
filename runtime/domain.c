@@ -426,6 +426,7 @@ static void domain_create(uintnat initial_minor_heap_wsize,
   caml_domain_state* domain_state;
   struct interruptor* s;
   uintnat stack_wsize = caml_get_init_stack_wsize();
+  int bind_slot = 0;   /* MMTk binding slot held (see below) */
 
   CAMLassert (domain_self == 0);
 
@@ -471,7 +472,26 @@ static void domain_create(uintnat initial_minor_heap_wsize,
 
   caml_plat_lock_blocking(&d->domain_lock);
 
-  /* This is the first thing we do after acquiring the domain lock,
+  /* MMTk: hold a binding slot from here to the end of creation, so the
+     mutator registration and first TLAB refill in caml_mmtk_domain_init never
+     overlap an MMTk collection (see caml/mmtk.h). While a collection is
+     active the slot is refused; wait it out holding NEITHER lock. A RUNNING
+     domain may be blocked on all_domains_lock (caml_stop_all_domains) while
+     that collection waits for it, and a terminating domain that last used
+     this slot holds d->domain_lock while it waits for the collection, so the
+     slot is claimed only after d->domain_lock is ours. Released at
+     domain_init_complete, the single exit of every path below. */
+  while (!caml_mmtk_try_begin_bind()) {
+    caml_plat_unlock(&d->domain_lock);
+    caml_plat_unlock(&all_domains_lock);
+    caml_mmtk_wait_collection_done();
+    caml_plat_lock_blocking(&all_domains_lock);
+    caml_plat_lock_blocking(&d->domain_lock);
+  }
+  bind_slot = 1;
+
+  /* This is the first thing we do after acquiring the domain lock (and the
+     MMTk binding slot),
      so that [caml_domain_alone()] returns accurate result even
      during domain initialization. */
   atomic_fetch_add(&caml_num_domains_running, 1);
@@ -641,6 +661,7 @@ domain_parking_failure:
 
 domain_init_complete:
   caml_gc_log("domain init complete");
+  if (bind_slot) caml_mmtk_end_bind();
   caml_plat_unlock(&all_domains_lock);
 }
 

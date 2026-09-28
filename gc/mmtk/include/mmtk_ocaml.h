@@ -104,6 +104,14 @@ void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
     Used by the terminate path after deregistration so the domain's roots stay
     valid until any collection that snapshotted the registry has finished. */
 void mmtk_ocaml_wait_collection_done(void);
+/* Binding slots for domain creation: refused (0) while a collection is
+   active; a started collection waits for held slots to drain. */
+int mmtk_ocaml_try_begin_bind(void);
+/* First TLAB refill of a domain being created: never blocks for a GC and may
+   exceed the heap limit by one block (see mmtk_ocaml_refill_tlab). */
+bool mmtk_ocaml_refill_tlab_at_bind(MMTk_Mutator mutator, size_t min_bytes,
+                                    uintptr_t *out_start, uintptr_t *out_end);
+void mmtk_ocaml_end_bind(void);
 
 /** Ragged safepoint (excise Phase 2, step 1). Snapshot the addresses of domains
     currently RUNNING OCaml into buf[0..len); returns the count written

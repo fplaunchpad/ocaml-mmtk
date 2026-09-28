@@ -5,6 +5,61 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-28 - domain creation raced MMTk pauses: release-count wrap, then stale TLABs
+
+**Symptom.** `domain_parallel_spawn_burn` aborted with
+`pending_release_packets is still 18446744073709551615` (review report).
+Native CLBG mandelbrot, which spawns `recommended_domain_count` domains,
+showed the same abort at about 1.3 % of runs under four-way load on Immix.
+
+**Cause.** `domain_create` registers the new domain's mutator and takes its
+first TLAB block (`caml_mmtk_domain_init`) on the child's own thread. A
+booting domain is not RUNNING OCaml, so `stop_all_mutators` never waited for
+it, and both steps could land in the middle of a pause. An instrumented run
+counted about 6 such mid-pause registrations per mandelbrot run. Two
+failures followed:
+1. The core reads the mutator set twice in the Release stage:
+   `number_of_mutators()` when MarkSweepSpace::release arms
+   `pending_release_packets`, then `mutators()` for the ReleaseMutator
+   packets. A registration in between gave one decrement too many.
+2. After commit 7fe40f7d8 froze the mutator set per pause (which fixed 1),
+   the new domain was left out of that pause's release, so its Immix
+   allocator was never reset. It kept bumping into lines the sweep had just
+   freed: SIGSEGV in `Buffer.add_char` on a spawned domain, and wrong output.
+   A/B over 300 runs each: snapshot on 4 SIGSEGV + 2 wrong outputs, snapshot
+   off 4 aborts.
+
+**Fix.** `domain_create` now holds an MMTk binding slot from just after it
+takes the new domain's `domain_lock` to its single exit
+(`domain_init_complete`). `mmtk_ocaml_try_begin_bind` refuses a slot while a
+collection is active; the creator then drops both locks, waits for the
+collection, and retries. `stop_all_mutators` waits for held slots to drain
+alongside the RUNNING set. Nothing may block for a collection while a slot
+is held, so the domain's first refill uses a non-blocking allocation
+(`mmtk_ocaml_refill_tlab_at_bind`: `at_safepoint: false`,
+`allow_overcommit: true`), which can pass the heap limit by one block. A
+first version disabled collection for the whole slot instead; that kept
+other domains from collecting while slots were held and was dropped. Lock
+order was chosen against two known cycles: a RUNNING domain
+can block on `all_domains_lock` (`caml_stop_all_domains`), and a
+terminating domain holds its `domain_lock` while it waits for a collection,
+so the slot is never waited for while holding either lock. The per-pause
+snapshot stays, for domains that deregister mid-pause.
+
+**Validation.** Native mandelbrot 1,200 runs (600 Immix, 600 GenImmix, four
+streams) with 0 failures and 0 hangs, against about 2 % before.
+`tests/parallel` at a fixed 64 MB heap, 3 rounds per plan: GenImmix clean.
+The remaining failures are bytecode `Out_of_memory` at that small heap and
+predate this fix. Immix fails churn and test_issue_11094 with and without
+it. Bactrian's `domain_parallel_spawn_burn` bytecode ran out of memory in 9
+of 30 runs without the fix and 11 of 30 with it, the same rate.
+
+The 2026-08-10 StickyImmix `kb.native 50` underflow is a different bug: it is
+single-domain. It still reproduces on every run (now ending at -1) and stays
+open.
+
+---
+
 ## 2026-09-28 - review follow-ups: jitter modes 24/25, off-heap credit on non-generational plans, allocate-black under stress
 
 Three correctness findings from a static multi-agent review of this branch

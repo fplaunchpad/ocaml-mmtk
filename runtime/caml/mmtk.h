@@ -249,6 +249,16 @@ extern void caml_mmtk_quiesce_running_domains(void);
 extern void caml_mmtk_enter_blocking(uintnat dom);
 extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
+/* Domain creation vs MMTk collections (see domain_create). A domain being
+ * created registers its mutator and takes its first TLAB block, which must
+ * not overlap a collection. caml_mmtk_try_begin_bind claims a binding slot
+ * and returns 1, or returns 0 while a collection is active (the caller then
+ * drops its locks, calls caml_mmtk_wait_collection_done and retries).
+ * While the slot is held nothing may block for a collection: the domain's
+ * first TLAB refill uses a non-blocking allocation (see
+ * mmtk_ocaml_refill_tlab_at_bind). caml_mmtk_end_bind releases the slot. */
+extern int caml_mmtk_try_begin_bind(void);
+extern void caml_mmtk_end_bind(void);
 /* Deregister a force-cancelled peer (excise Phase 3b, caml_stop_all_domains)
  * from MMTk's registry + RUNNING set, WITHOUT waiting for an in-flight
  * collection (the peer's roots are not torn down, so there is nothing to
