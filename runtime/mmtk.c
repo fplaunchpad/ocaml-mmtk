@@ -23,21 +23,13 @@
 #include <string.h>
 
 #include "caml/config.h"
-/* Platform headers, after config.h so configure's HAS_* macros are visible.
-   Threads and the quiesce poll sleep are POSIX; thread naming is Linux
-   (prctl) or a *BSD/macOS pthread extension; Windows gets Sleep(). */
+/* Platform headers: the quiesce poll sleep is POSIX nanosleep, or Sleep()
+   on Windows. */
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
-#include <pthread.h>
 #include <unistd.h>
-#endif
-#ifdef HAS_PRCTL
-#include <sys/prctl.h>
-#endif
-#ifdef HAS_PTHREAD_NP_H
-#include <pthread_np.h>
 #endif
 
 /* The MMTk glue is compiled into both the bytecode and native runtimes. The few
@@ -110,8 +102,6 @@ static int caml_mmtk_refill_tlab_impl(caml_domain_state *dom, mlsize_t whsize,
                                       int at_bind);
 
 static int caml_mmtk_initialised = 0;
-static void *caml_mmtk_frontier_warmer(void *arg);
-static caml_domain_state *caml_mmtk_warm_dom0;
 
 /* Whether the active plan collects (anything but NoGC). NoGC must NOT start
    collection: forcing a GC it cannot perform would spin/fail. */
@@ -143,6 +133,13 @@ int caml_mmtk_weak_refs = 1;
    the poll path. Read once at init; both sites fire on hot paths, where a
    getenv per call scanned the whole environment every time. */
 int caml_mmtk_poll_debug = 0;
+/* MMTK_CUSTOM_GC_BYTES: off-heap custom-block bytes per starter collection
+   (see caml_mmtk_custom_mem_pressure). Read once at init. Default 64 MiB:
+   strictly dominates the nursery-sized 16 MiB batch on the frame-pool macro
+   bench (wall 235 s -> 96 s and peak RSS 604 -> 574 MB single-worker; the
+   extra starts freed nothing because mature customs only release at
+   fulls). */
+static size_t caml_mmtk_custom_gc_bytes = (size_t)64 << 20;
 
 /* Objects this size (bytes) or larger are routed to MMTk's large object
  * space. Conservative: smaller than the smallest line/block in collecting
@@ -189,7 +186,7 @@ static int caml_mmtk_test_malloc_medium = 0;
    (fillers only precede >=2KB allocations). Output-parity gates passed on the
    full panel + par_binarytrees d=4. MMTK_ALLOC_JITTER=0 disables. */
 static int caml_mmtk_alloc_jitter = 6;
-static uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
+static _Atomic uint64_t caml_mmtk_jitter_state = 0x9E3779B97F4A7C15ull;
 static _Atomic uint64_t caml_mmtk_jitter_fills = 0;
 /* MMTK_TLAB_PREFETCH=1: on each TLAB refill, software-prefetch the fresh
    block with write intent - top 1 KiB into L1, the rest into L2. Rationale
@@ -276,7 +273,7 @@ static inline uint64_t caml_mmtk_cntvct(void)
 #  define CAML_MMTK_PREFETCH_W(addr, locality) ((void)(addr))
 #endif
 
-/* Sleep for a short interval (quiesce poll, frontier warmer cadence). */
+/* Sleep for a short interval (quiesce poll). */
 static void caml_mmtk_sleep_us(unsigned us)
 {
 #ifdef _WIN32
@@ -286,22 +283,6 @@ static void caml_mmtk_sleep_us(unsigned us)
   ts.tv_sec = (time_t)(us / 1000000u);
   ts.tv_nsec = (long)(us % 1000000u) * 1000L;
   nanosleep(&ts, NULL);
-#endif
-}
-
-/* Name the calling thread where the platform allows it (diagnostics only). */
-static void caml_mmtk_name_thread(const char *name)
-{
-#if defined(HAS_PRCTL)
-  prctl(PR_SET_NAME, name, 0, 0, 0);
-#elif defined(__APPLE__) && defined(HAVE_PTHREAD_SETNAME_NP)
-  pthread_setname_np(name);
-#elif defined(HAVE_PTHREAD_SETNAME_NP)
-  pthread_setname_np(pthread_self(), name);
-#elif defined(HAVE_PTHREAD_SET_NAME_NP)
-  pthread_set_name_np(pthread_self(), name);
-#else
-  (void)name;
 #endif
 }
 static int caml_mut_gc_timing = 0;
@@ -433,6 +414,11 @@ void caml_mmtk_init(void)
     caml_mmtk_weak_refs = (wr == NULL || wr[0] != '0');
   }
   caml_mmtk_poll_debug = (getenv("MMTK_POLL_DEBUG") != NULL);
+  {
+    const char *cg = getenv("MMTK_CUSTOM_GC_BYTES");
+    long v = cg != NULL ? atol(cg) : 0;
+    if (v > 0) caml_mmtk_custom_gc_bytes = (size_t)v;
+  }
 
   if (getenv("MMTK_VERBOSE") != NULL) {
     if (heap_bytes == 0)
@@ -458,18 +444,6 @@ void caml_mmtk_init(void)
       /* Value = entropy BITS for the line-granular pad (0..2^bits-1 lines).
          "1" (the historical on-switch) means the default 5 bits = 32 lines;
          2..8 select the range explicitly (6 -> 64 lines, up to 4 KiB pads). */
-      if (getenv("MMTK_FRONTIER_WARMER") != NULL
-          && atoi(getenv("MMTK_FRONTIER_WARMER")) > 0) {
-#ifdef _WIN32
-        fprintf(stderr,
-                "[mmtk] MMTK_FRONTIER_WARMER: not available on this OS\n");
-#else
-        pthread_t t;
-        caml_mmtk_warm_dom0 = Caml_state;
-        if (pthread_create(&t, NULL, caml_mmtk_frontier_warmer, NULL) == 0)
-          pthread_detach(t);
-#endif
-      }
       if (getenv("MMTK_TEST_MALLOC_MEDIUM") != NULL)
         caml_mmtk_test_malloc_medium = atoi(getenv("MMTK_TEST_MALLOC_MEDIUM"));
       /* Default ON under Bactrian (see caml_mmtk_medium_nonmoving); the env
@@ -614,37 +588,6 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 #endif
 }
 
-/* MMTK_FRONTIER_WARMER=1: a helper thread that prefetches (write-intent) the
-   cache lines JUST BELOW domain 0's bump pointer - the lines the mutator is
-   about to allocate into. OCaml bumps DOWNWARD, so the warm window is
-   [young_ptr - WINDOW, young_ptr). The mutator's allocation stores then hit
-   lines already in (or in flight to) the cache hierarchy instead of paying a
-   cold RFO each - the store-frontier mechanism measured in SHAPE.md rounds
-   3b/6. Reads are racy-by-design (young_ptr moves; prefetch of any mapped
-   line is safe) and the thread only issues prefetches - never stores.
-   Single-domain experiment: warms domain 0 only. */
-#ifndef _WIN32
-static void *caml_mmtk_frontier_warmer(void *arg)
-{
-  (void)arg;
-  caml_mmtk_name_thread("mmtk-warmer");
-  const size_t WINDOW = 24 * 1024;           /* lines ahead of the frontier */
-  for (;;) {
-    caml_domain_state *d = caml_mmtk_warm_dom0;
-    if (d != NULL) {
-      char *hi = (char *)d->young_ptr;
-      char *lo = (char *)d->young_start;
-      if (hi != NULL && lo != NULL && hi > lo) {
-        char *from = hi - WINDOW > lo ? hi - WINDOW : lo;
-        for (char *a = (char *)((uintptr_t)from & ~63ull); a < hi; a += 64)
-          CAML_MMTK_PREFETCH_W(a, 2);        /* write intent, into L2 */
-      }
-    }
-    caml_mmtk_sleep_us(8);                   /* ~8us cadence */
-  }
-  return NULL;
-}
-#endif /* !_WIN32 */
 
 /* Shape experiments (see SHAPE.md, W-tax mechanisms).
    MMTK_LOS_THRESHOLD (bytes) re-routes "large-ish" objects to the LOS instead
@@ -659,11 +602,17 @@ static void *caml_mmtk_frontier_warmer(void *arg)
    filler block so consecutive big objects stop sharing a stride. The filler is
    unreachable immediately and dies at the next collection; cost is <2% of the
    affected allocation. */
+/* Smallest block, in bytes, of the pretenured medium band: the full-block
+   size of Max_young_wosize, which is 2056 bytes on 64-bit and 1028 on
+   32-bit. */
+#define CAML_MMTK_MEDIUM_BYTES \
+  ((size_t)Whsize_wosize(Max_young_wosize) * sizeof(value))
+
 Caml_inline int caml_mmtk_semantics(mlsize_t wosize)
 {
   size_t bytes = (size_t)(Whsize_wosize(wosize)) * sizeof(value);
   if (bytes >= caml_mmtk_los_threshold) return CAML_MMTK_SEM_LOS;
-  if (caml_mmtk_medium_nonmoving && bytes >= 2056)
+  if (caml_mmtk_medium_nonmoving && bytes >= CAML_MMTK_MEDIUM_BYTES)
     return CAML_MMTK_SEM_NONMOVING;
   return CAML_MMTK_SEM_DEFAULT;
 }
@@ -678,12 +627,20 @@ int caml_mmtk_alloc_shr_is_mature(mlsize_t wosize)
          && caml_mmtk_semantics(wosize) != CAML_MMTK_SEM_DEFAULT;
 }
 
-/* xorshift64*; deterministic per process, no clock involved. */
+/* xorshift64*; deterministic per process, no clock involved. Every domain
+   draws from the one state, so it is advanced with a compare-and-swap. This
+   runs only before a >= 2 KiB allocation. */
 Caml_inline uint64_t caml_mmtk_jitter_next(void)
 {
-  uint64_t x = caml_mmtk_jitter_state;
-  x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
-  caml_mmtk_jitter_state = x;
+  uint64_t old = atomic_load_explicit(&caml_mmtk_jitter_state,
+                                      memory_order_relaxed);
+  uint64_t x;
+  do {
+    x = old;
+    x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+  } while (!atomic_compare_exchange_weak_explicit(
+               &caml_mmtk_jitter_state, &old, x,
+               memory_order_relaxed, memory_order_relaxed));
   return x * 0x2545F4914F6CDD1Dull;
 }
 
@@ -774,7 +731,8 @@ value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag, reserved_t reserved)
   int sem = caml_mmtk_semantics(wosize);
   (void)reserved;
   if (caml_mmtk_test_malloc_medium
-      && (size_t)(Whsize_wosize(wosize)) * sizeof(value) >= 2056) {
+      && (size_t)(Whsize_wosize(wosize)) * sizeof(value)
+         >= CAML_MMTK_MEDIUM_BYTES) {
     header_t *hp = malloc(Bhsize_wosize(wosize));
     if (hp != NULL) {
       *hp = Caml_out_of_heap_header(wosize, tag);
@@ -866,20 +824,11 @@ void caml_mmtk_custom_mem_pressure(size_t bytes)
          collects. */
       {
         static _Atomic size_t starter_acc = 0;
-        static size_t starter_bytes = 0;
         size_t sacc;
-        if (starter_bytes == 0) {
-          const char *s = getenv("MMTK_CUSTOM_GC_BYTES");
-          long v = s != NULL ? atol(s) : 0;
-          /* Default 64MiB: strictly dominates the nursery-sized 16MiB batch
-             on the frame-pool macro bench (wall 235s -> 96s AND peak RSS
-             604 -> 574MB single-worker; the extra starts freed nothing
-             because mature customs only release at fulls). */
-          starter_bytes = (v > 0) ? (size_t) v : (64u << 20);
-        }
         sacc = atomic_fetch_add_explicit(&starter_acc, acc,
                                          memory_order_relaxed) + acc;
-        if (sacc >= starter_bytes && caml_mmtk_collection_enabled()) {
+        if (sacc >= caml_mmtk_custom_gc_bytes
+            && caml_mmtk_collection_enabled()) {
           size_t sexp = sacc;
           if (atomic_compare_exchange_strong_explicit(
                   &starter_acc, &sexp, 0,
