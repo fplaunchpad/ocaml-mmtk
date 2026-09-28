@@ -5,6 +5,56 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-28 - review follow-ups: jitter modes 24/25, off-heap credit on non-generational plans, allocate-black under stress
+
+Three correctness findings from a static multi-agent review of this branch
+together with the mmtk-core `0.32-ocaml` branch.
+
+**`MMTK_ALLOC_JITTER=24` and `=25` were silently mode 5.** The init parser
+accepted 2..8 and 16..23 and mapped everything else to 5, so the rotating
+deterministic pads in `caml_mmtk_jitter_pad` never ran. Any result recorded
+under mode 24 or 25 was really the 5-bit random pad. That includes the
+SHAPE.md round 11 line "rotating deterministic pads (modes 24/25) measured
+worse than random (253M)": it compared random against random, so the
+rotating pads are still unmeasured. The parser now accepts 16..25 and warns
+on an unknown value before falling back to 5.
+
+**The off-heap custom-block credit never reset on non-generational plans.**
+`OFFHEAP_BYTES_SINCE_FULL` is credited for every collecting plan and feeds
+`vm_live_bytes`, hence every heap-full and heap-sizing decision, but it was
+only reset inside the generational branch of `resume_mutators`. On Immix,
+MarkSweep, SemiSpace, MarkCompact and ConcurrentImmix it only grew. Repro, a
+bytecode loop allocating and dropping 1 MiB Bigarrays with ordinary list
+churn, 20,000 iterations, `MMTK_PLAN=Immix`:
+
+| heap | before | after |
+|---|---|---|
+| fixed 64 MB | `Out_of_memory` after 5 GCs | completes, 78 GCs per 2,500 iterations throughout |
+| dynamic | completes, 39 GCs per window | same |
+
+The dynamic heap hides the bug because its limit grows with the inflated
+count. The binding now resets the credit after every GC of a STW
+non-generational plan, and for a concurrent one only after the pause that
+finishes marking (never at InitialMark, whose trace has found no dead block
+yet). mmtk-core `ConcurrentImmix` gained `previous_pause_finished_mark` for
+this. As in the generational case, the dead blocks' finalizers run at the
+mutators' next safepoint, just after the reset.
+
+**The free-list allocator's precise-stress path skipped allocate-black.**
+mmtk-core added `allocate_black_if_needed` to `alloc` and
+`alloc_slow_once` for the round 30 fragmed bug, but not to
+`alloc_slow_once_precise_stress`. Under `MMTK_STRESS_FACTOR` with the
+free-list band (`MMTK_MEDIUM_TO=freelist`) and a Bactrian cycle in flight,
+cells from that path were born unmarked and could be freed live. Fixed in
+mmtk-core by mirroring `alloc_slow_once`. No runtime repro: the
+canonical `parsing/parser.ml` compile under `MMTK_PLAN=Bactrian
+MMTK_MEDIUM_TO=freelist MMTK_STRESS_FACTOR=4194304 MMTK_HEAP_SIZE_MB=64`
+exited 2 (clean) in 5 of 5 runs both with and without the fix. The fix
+rests on the code path alone; a workload that allocates in the free-list
+band during a marking window under stress would be the next thing to try.
+
+---
+
 ## 2026-08-14 — round 31: the MS-as-nonmoving space was generationally unsound; fixed; freelist band verdict
 
 The freelist-band round (user-approved): make `MMTK_MEDIUM_TO=freelist`
