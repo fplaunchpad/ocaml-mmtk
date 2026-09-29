@@ -338,6 +338,7 @@ static void caml_mmtk_report_copied(void);
 static void caml_mmtk_check_running_init(void);  /* GH issue 24 detector */
 static void caml_mmtk_check_note_bound(caml_domain_state *dom);
 static void caml_mmtk_check_note_running(uintnat dom, void *pc);
+static void caml_mmtk_check_count_stw(void);
 static void caml_mmtk_check_note_stopped(uintnat dom, void *pc);
 /* Return address of the current function, for detector diagnostics. */
 #if defined(__GNUC__) || defined(__clang__)
@@ -1464,6 +1465,7 @@ void caml_mmtk_quiesce_ack(caml_domain_state *d)
    suffices.) */
 static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 {
+  if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
   caml_release_domain_lock();
   mmtk_ocaml_stw_park(domain_state_addr);   /* mark STOPPED, wait for resume */
   caml_acquire_domain_lock();
@@ -1479,8 +1481,11 @@ static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
    child starting OCaml. */
 void caml_mmtk_become_running(uintnat domain_state_addr)
 {
-  while (!mmtk_ocaml_try_mark_running(domain_state_addr))
+  if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
+  while (!mmtk_ocaml_try_mark_running(domain_state_addr)) {
     caml_mmtk_cooperative_park(domain_state_addr);
+    if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
+  }
   if (caml_mmtk_check_running_on)
     caml_mmtk_check_note_running(domain_state_addr, CAML_MMTK_CALLER_PC);
 }
@@ -1540,8 +1545,23 @@ void caml_mmtk_check_restore(void)
     atomic_fetch_add(&caml_mmtk_check_restore_in_pause, 1);
 }
 
+/* STW-mutex acquisitions made by RUNNING-set transitions (enter_blocking,
+   try_mark_running, park); the detector's own queries are not counted.
+   Printed in the warn/lost summary, to measure the cost per blocking
+   section of the master-lock hand-off. */
+static atomic_uintnat caml_mmtk_check_stw_count;
+
+static void caml_mmtk_check_count_stw(void)
+{
+  atomic_fetch_add(&caml_mmtk_check_stw_count, 1);
+}
+
 static void caml_mmtk_check_running_summary(void)
 {
+  if (caml_mmtk_check_running_on == 2 && getenv("MMTK_CHECK_RUNNING_STW"))
+    fprintf(stderr, "[mmtk] RUNNING-set transitions: STW-mutex "
+            "acquisitions=%lu\n",
+            (unsigned long) atomic_load(&caml_mmtk_check_stw_count));
   uintnat r = atomic_load(&caml_mmtk_check_restore_in_pause);
   if (r != 0)
     fprintf(stderr,
@@ -1927,8 +1947,10 @@ void caml_mmtk_enter_blocking(uintnat dom)
     if (caml_mmtk_check_running_on && caml_mmtk_check_widen_us > 0)
       caml_mmtk_sleep_us((unsigned) caml_mmtk_check_widen_us);
     mmtk_ocaml_enter_blocking(dom);
-    if (caml_mmtk_check_running_on)
+    if (caml_mmtk_check_running_on) {
+      caml_mmtk_check_count_stw();
       caml_mmtk_check_note_stopped(dom, CAML_MMTK_CALLER_PC);
+    }
   }
 }
 
