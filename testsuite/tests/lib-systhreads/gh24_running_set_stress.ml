@@ -1,4 +1,3 @@
-(* MMTk DISABLED: aborts until GH issue 24 (GAP-1/4/6) is fixed [gh24] *)
 (* TEST
  set MMTK_HEAP_SIZE_MB = "32";
  set MMTK_CHECK_RUNNING = "lost";
@@ -19,22 +18,22 @@
    Each worker domain runs a compute systhread, which builds and re-checks
    boxed structures, computes [fib] and calls [Thread.yield], next to a
    blocker systhread that keeps entering a blocking section
-   ([Thread.delay]). The master lock therefore keeps passing from a thread
-   that enters a blocking section (which marks the domain STOPPED) to a
-   thread waiting in [Thread.yield] (which runs on without marking it RUNNING
-   again): GAP-4. The two threads also hand the lock to each other through
-   blocking sections, where the late STOPPED mark of the releasing thread can
-   erase the RUNNING mark of the acquiring one: GAP-1. A churning domain
-   keeps collections coming.
+   ([Thread.delay]), and a churning domain keeps collections coming. The
+   master lock keeps passing from a thread entering a blocking section to a
+   thread waiting in [Thread.yield] (GAP-4: the domain used to be marked
+   STOPPED by the releasing thread and nothing marked it RUNNING again) and
+   between the two threads through blocking sections (GAP-1: the releasing
+   thread's STOPPED mark, made after the unlock, could erase the RUNNING
+   mark of the thread that had just taken the lock). Before the fix this
+   program crashed or reported CORRUPTION in most runs.
 
    MMTK_CHECK_RUNNING=lost turns on the runtime's RUNNING-set check (see
    runtime/caml/mmtk.h), which aborts at the first thread found running
    OCaml while its domain has lost its RUNNING mark, naming the check site
    and who last marked the domain STOPPED. Violations by a domain that has
    had no RUNNING edge since it was bound (GAP-6: the native main domain
-   until its first blocking section or collection) are counted and printed
-   at exit, which also fails the test. Without the check the same program
-   crashes or reports CORRUPTION in most runs, but not deterministically. *)
+   used to run until its first blocking section or collection without one)
+   are counted and printed at exit, which also fails the test. *)
 
 let ndom = 4
 let rounds = 2000

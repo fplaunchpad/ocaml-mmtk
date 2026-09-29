@@ -1,4 +1,3 @@
-(* MMTk DISABLED: hangs until GH issue 24 (GAP-3) is fixed [gh24] *)
 (* TEST
  set MMTK_HEAP_SIZE_MB = "32";
  include systhreads;
@@ -10,21 +9,20 @@
  }
 *)
 
-(* GH issue 24, GAP-3: a systhread that exits leaves its domain in MMTk's
-   RUNNING set with nobody holding the master lock.
+(* GH issue 24, GAP-3: a systhread that exited used to leave its domain in
+   MMTk's RUNNING set with nobody holding the master lock.
 
-   Domain 1 runs two threads. [t] blocks in [Thread.delay] (domain marked
-   STOPPED), then the main thread of domain 1 blocks in [Unix.read] (still
-   STOPPED). [t] wakes up, leaves its blocking section (domain marked
-   RUNNING) and exits: thread_detach_from_runtime releases the master lock
-   without marking the domain STOPPED again. The only remaining thread of
-   domain 1 is blocked in [read], so nothing on domain 1 ever reaches a
-   safepoint.
-
-   Domain 0 then allocates enough to force collections. stop_all_mutators
-   waits for domain 1 to leave the RUNNING set, which never happens, and
-   domain 0 is parked in that collection, so it never writes the byte that
-   would unblock domain 1: the program hangs (ocamltest's timeout kills it).
+   Domain 1 runs two threads. [t] blocks in [Thread.delay], then the main
+   thread of domain 1 blocks in [Unix.read]. [t] wakes up, leaves its
+   blocking section (domain RUNNING) and exits. Before the fix,
+   thread_detach_from_runtime released the master lock without marking the
+   domain STOPPED; the only remaining thread of domain 1 is blocked in
+   [read], so nothing on domain 1 reached a safepoint again. Domain 0 then
+   allocates enough to force collections: stop_all_mutators waited for
+   domain 1 forever, and domain 0, parked in that collection, never wrote
+   the byte that would unblock domain 1, so the program hung. Now a
+   master-lock release with no waiting thread marks the domain STOPPED, so
+   the collections complete and the program prints "ok".
 
    The collections are forced by allocation under the small pinned heap set
    above (256 MiB allocated through a 32 MiB heap), not by [Gc.full_major],
