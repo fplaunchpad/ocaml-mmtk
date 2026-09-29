@@ -276,6 +276,15 @@ remain — the separate ConcurrentImmix `chameneos_redux` continuation-scan hang
 and the `Domain.join` result-UAF (#31/GH#3) that the Phase-3 excision unmasked under high core load. Detail:
 NOTES 2026-06-24, `~/concurrent-immix-native-perf.md`.
 
+**LXR status (2026-09-29).** LXR's silent wrong-results bug (GH issue 26: the pre-store field barrier
+classified a slot by its cached old value and lost the new value's RC increment) is fixed and merged
+(PR 30, `c59f7851c3`). LXR's results remain **provisional**: with increments now applied, LXR runs out of
+memory on workloads it previously appeared to complete (the capacity problem, ROADMAP open item 21), and
+it still fails a set of tests locally and on Linux CI (same item). The fix also changed the barrier's
+slot handling, so the barrier-cost finding (near-free on OCaml's init-write-dominated code) should be
+re-checked with the rest: every LXR time and RSS number, including the binarytrees and
+`chameneos_redux` figures, must be re-measured before it is used.
+
 ### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest research risk; precursor to RQ1)*
 
 **The platform.** M9 is done, and ROADMAP #15 wired the rest of MMTk's plans cheaply — *one language,
@@ -358,14 +367,29 @@ Concrete findings already in hand:
   are generalisable GC-runtime-interface findings, root-caused under `rr`.
 
 **Later instances of the same lessons (2026-09-29; observations, not yet results).** Each is
-tracked in ROADMAP (open items 17-19):
-- *Every store path must reach the barrier.* Native `Array.fill` and `No_sharing` unmarshalling skip the
-  generational barrier, which silently corrupts the default plan (item 18, GH issue 28). The testsuite had
-  no old-to-young test for bulk primitives, so a native/bytecode split in a barrier went unseen.
+tracked in ROADMAP (items 17-20; all four fixed and merged on 2026-09-29):
+- *Every store path must reach the barrier.* Native `Array.fill` and `No_sharing` unmarshalling skipped
+  the generational barrier, which silently corrupted the default plan from 2026-06-24 until the fix
+  (item 18, GH issue 28). The testsuite had no old-to-young test for bulk primitives, so a
+  native/bytecode split in a barrier went unseen.
 - *A barrier that runs before the store must not trust cached state.* The LXR field barrier classified
-  a slot by its old value and lost the new value's RC increment (item 17).
+  a slot by its old value and lost the new value's RC increment (item 17, GH issue 26).
 - *Coordination impedance.* Retiring the backup thread left a per-domain RUNNING flag that is
-  safety-critical but not tied to master-lock ownership, and systhreads handoffs break it (item 19).
+  safety-critical but not tied to master-lock ownership, and systhreads handoffs broke it (item 19,
+  GH issue 24). The fix ties the flag to master-lock ownership, following upstream's own rule for when a
+  releasing thread may stop the domain.
+
+Two further observations these fixes support (observations, not results):
+- *Retiring a host runtime mechanism can silently turn a liveness hint into a safety property.* In stock
+  OCaml the backup thread only kept a domain responsive to STW requests; once it was retired, the
+  per-domain RUNNING state it implied decided whether a collector may scan the domain, and nothing
+  enforced it (item 19). A related instance: MMTk's GC workers do not survive `fork()`, so the child's
+  collector state is copied without the threads that serve it (GH issue 33, open item 25).
+- *A framework's page-reservation accounting is not a proxy for live data when it feeds a host-modelled
+  pacing law.* The dynamic heap sized itself from the reservation seen at a heap-full poll, so Immix and
+  SemiSpace grew their heaps on an all-garbage program (item 20(a), fixed by sizing from actual pending
+  requests); GenCopy's mature-pressure law reads reserved pages that GC-worker block tails inflate
+  (items 15, 20(b), open).
 
 **Honest framing.** The headline is not "OCaml was easy." It is **"a GC-friendly design eliminates the
 *root/motion* impedance the Julia/CRuby reports spent most of their effort on, but the *coordination*
@@ -519,7 +543,9 @@ inflate, so harmless writes change the number of major collections. Stock OCaml 
 allocated words, so it has no analogue of either failure. Both come from MMTk's page-reservation
 accounting meeting a pacing law modelled on OCaml's `space_overhead`. For RQ7 this is a candidate
 expressiveness point: matching stock's pacing may need a live-bytes or allocated-words signal that
-the framework does not currently provide to the plan.
+the framework does not currently provide to the plan. (Update, 2026-09-29: the first failure is fixed
+in mmtk-core by sizing the demand from the actual pending requests, and SemiSpace turned out to be
+affected too; the GenCopy one is open. See RQ4's observations.)
 
 ---
 
@@ -805,8 +831,9 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
   **ConcurrentImmix + SATB (RQ1's enabler) landed bytecode + native**; plan-swapping is clean. What remains
   is per-RQ research, not bring-up.
 - **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier, and (2026-07-02) the **LXR** RC plan
-  (`MMTK_PLAN=LXR`, experimental; results provisional — a silent wrong-results bug is root-caused with a fix on a
-  branch, not yet merged, and the fix exposes a capacity problem; ROADMAP open items 17 and 21). *Remaining:* a richer latency harness and a mutation-rate /
+  (`MMTK_PLAN=LXR`, experimental; results provisional — the silent wrong-results bug is fixed and merged
+  (2026-09-29, ROADMAP item 17), but the fix exposed a capacity problem and LXR still fails a set of tests
+  (open item 21); all LXR time/RSS numbers need re-measuring). *Remaining:* a richer latency harness and a mutation-rate /
   lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add

@@ -5,12 +5,205 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-29 - landings: GH issues 24, 26 and 28 and the pending-demand fix merged; fork (GH issue 33), explicit-Gc fix blocked, CI findings (KNOWN FAILURES)
+
+Evidence labels as in the entry below. "Re-run independently" means the
+result was reproduced by someone other than the fix's author; figures only
+the author measured say so. Each fix was verified on its own branch; a
+combined run on `724ca4068a` (all of them together) is pending, so no
+combined result is claimed here. Local runs are macOS arm64.
+
+### What merged (checked with `git log 358ea7958c..mmtk/5.5+mmtk` and `gh`)
+
+| PR | merge | what | ROADMAP |
+|---|---|---|---|
+| ocaml-mmtk 27 | `69b81065c7` | `weaklifetime.ml` pins `MMTK_HEAP_SIZE_MB=128` | item 16 |
+| ocaml-mmtk 29 | `cd162e8496` | README rewrite and the 2026-09-29 findings docs | - |
+| ocaml-mmtk 30 | `c59f7851c3` | GH issue 26: pre-write-barrier slots classified at load (binding only; fix `c10cf38244`) | item 17 |
+| ocaml-mmtk 31 | `240b6c8f62` | GH issue 28: native `Array.fill` guard removed; `No_sharing` unmarshal mature blocks handed to the region barrier (fix `2a59d9f89e`) | item 18 |
+| ocaml-mmtk 32 | `e351966d59` | GH issue 24: only the master-lock holder changes the RUNNING state (fix `ed61273ae9`) | item 19 |
+| mmtk-core 3 | `44d02b65a9` | pending-allocation demand sized from actual requests (fix `f0afe6ed00`) | item 20(a) |
+| ocaml-mmtk 34 | `724ca4068a` | pin bump `045f121143` -> `44d02b65a9` | item 20(a) |
+
+GH issues 24, 26 and 28 are closed. The branch commit hashes quoted in the
+entry below (`69b429828a`, `3c4b074899`, `475ae50838`, `ffd5fc5011`) were
+rebased before merging; the merged hashes are the ones above.
+
+### Verification of each fix
+
+**GH issue 26 (LXR wrong results).** Re-run independently (512 MiB): the
+probe prints 1501500000 under LXR at 64 and 512 MiB, native and bytecode;
+`misc/mutation_old_value.ml` fails under LXR before the fix and passes after;
+full LXR testsuite 1433 passed / 10 failed / 0 GC panics, the same 10 test
+files as before the fix (`churn`, `domain_parallel_spawn_burn`,
+`domain_parallel_spawn_burn_gc_set`, `forbidden`, `gc_mark_stack_overflow`,
+`publish`, `test`, `weak_array_par`, `weaklifetime`, `weaktest`); full
+GenImmix 1443 / 0. LXR results remain provisional (capacity, ROADMAP item 21).
+
+**GH issue 28 (bulk stores).** Re-run independently: probes 0/1000 for
+`fill` and `blit` under GenImmix, StickyImmix, GenCopy, Bactrian and Immix
+(native); `gc-roots/old_to_young_bulk_stores.ml` passes under GenImmix,
+Bactrian, StickyImmix and LXR; full GenImmix 1443 / 0; full Bactrian
+1443 / 0. The PR's CI Bactrian job passed. The default plan's silent
+corruption, present since 2026-06-24, is fixed on mainline as of
+`240b6c8f62`.
+
+**GH issue 24 (RUNNING set).** The fix: release marks STOPPED only when no
+thread waits, under the master lock's mutex, before unlocking (upstream's
+`st_bt_lock_release(waiters == 0)` rule); acquire from STOPPED marks RUNNING
+before `restore_runtime_state`; hand-offs inherit RUNNING; the default
+blocking-section hooks do the marking; the main domain is marked RUNNING at
+startup. The RUNNING-set check ships (`MMTK_CHECK_RUNNING=1|warn|lost`, on and
+aborting by default in the debug runtime; `MMTK_CHECK_RUNNING_STW=1` counts
+STW-mutex acquisitions) with `lib-systhreads/gh24_thread_exit.ml` and
+`gh24_running_set_stress.ml` enabled.
+- Re-run independently: both tests pass (they hung / aborted before);
+  `testfork` and `testpreempt` pass; full testsuite GenImmix 1444 / 0,
+  Immix 1444 / 0, debug runtime (`USE_RUNTIME=d`, `s=4096`, check aborting)
+  1444 / 0. On CI, `extra (debug)` and `extra (debug-s4096)` pass with the
+  check on.
+- As reported by the fix's author: the 8-domain stress with the check off
+  went from crashing 6/6 (release) and 5/8 (debug) to 20/20 clean each; zero
+  check violations across 43 threaded/parallel/signal tests in both
+  runtimes; 7/7 per plan under Immix, StickyImmix, Bactrian and
+  ConcurrentImmix; STW-mutex acquisitions per contended blocking section
+  2 -> about 0.1 (single thread 2 -> 2).
+- Not covered: Windows (shared `st_bt_lock_*` code is not compiled there),
+  Linux local runs, `fork` (GH issue 33 below).
+- Risks: code that replaces the blocking-section hooks must now do the
+  RUNNING marking itself; the debug CI jobs now fail on any future
+  violation (intended).
+
+**Pending-allocation demand (ROADMAP item 20(a)).** Re-run independently on
+`240b6c8f62`, one GC worker, max RSS from `/usr/bin/time -l`; all 40 probe
+runs exit 0 with correct checksums. All-garbage probe, 128 MiB cap
+(collections, max RSS):
+
+| plan, floor | before | after |
+|---|---|---|
+| Immix, 8 MiB | 7, 175.2 MiB | 67, 63.0 MiB |
+| Immix, 32 MiB | 5, 175.1 MiB | 16, 86.9 MiB |
+| SemiSpace, 8 MiB | 10, 150.7 MiB | 165, 30.8 MiB |
+| SemiSpace, 32 MiB | 9, 150.8 MiB | 33, 54.8 MiB |
+| GenImmix, 8 MiB | 330, 59.0 MiB | 330, 59.3 MiB |
+| GenImmix, 32 MiB | 66, 63.1 MiB | 66, 63.2 MiB |
+| Bactrian, 8 MiB | 340, 59.1 MiB | 340, 59.2 MiB |
+| Bactrian, 32 MiB | 68, 63.1 MiB | 68, 63.2 MiB |
+
+A 64 MiB allocation from an 8 MiB floor, a ~64 MiB growing-live builder and
+a four-domain 16 MiB-each probe pass on all four plans after the fix, with
+collection counts within one of before. Full testsuite with the dynamic heap
+(no `MMTK_HEAP_SIZE_MB`): GenImmix 1444 / 0, Immix 1444 / 0.
+- SemiSpace was affected too; this was not previously recorded.
+- Consequence: RSS figures for Immix and SemiSpace measured under the dynamic
+  heap with `032100ea2a` present (on mainline, between the PR 23 merge and
+  this pin) are inflated. July 2026 figures predate `032100ea2a` and are not
+  affected by it.
+- Limits: the macro-benchmarks that motivated `032100ea2a` (decompress,
+  ydump, sedlex) were not run; Linux not tested; mmtk-core's fork has no CI
+  on pull requests, and the all-plans workflow did not run on the pin bump
+  (below).
+
+### KNOWN FAILURE: a forked child cannot run a collection (GH issue 33, open; ROADMAP item 25)
+
+MMTk's GC worker threads do not survive `fork()`.
+- *Verified:* on a tree where `Gc.minor` requests an MMTk collection and
+  waits (the unmerged explicit-Gc fix, below), `lib-systhreads/testfork.ml`
+  hangs in the child at `Gc.minor ()` and leaves an orphaned process.
+- *Source reading:* the child has no workers, a copy of the binding's STW
+  state (RUNNING set, `gc_active`) and of its mutex, and nothing
+  re-initialises MMTk in `caml_thread_reinitialize` or at atfork.
+- Latent on mainline: explicit `Gc` requests do not wait and `Gc.minor`
+  requests nothing, so the suite's fork tests pass today.
+
+### The explicit-Gc fix is not mergeable yet (ROADMAP item 22)
+
+Local topic commits: superproject `6fc57da0f8` (based on `358ea7958c`) and
+mmtk-core `885ed5a880`. Re-run independently: the new test
+`gc-roots/explicit_gc.ml` passes under GenImmix, Immix, Bactrian and
+ConcurrentImmix, but the full GenImmix testsuite gives 1441 passed /
+2 failed where the same base gives 0 failed:
+- `lib-systhreads/testfork.ml`: the fork hang above (fails 1/1; passes on
+  the base).
+- `lib-dynlink-domains/main.ml`: the native run is killed by the timeout
+  (fails 3/3 under `make one`; passes 3/3 on the base). The built binary run
+  by hand exited normally. Cause unknown.
+
+Blocked on those two and on GH issue 33. Both commits need rebasing onto
+mmtk-core `44d02b65a9` and mainline `724ca4068a`.
+
+### KNOWN FAILURE: intermittent Bactrian out-of-memory in the native compiler on Linux CI (ROADMAP item 26; cause unknown)
+
+Read from the all-plans run logs of 2026-09-29 (4 GiB pinned heap). Every
+Bactrian failure has the same form: `ocamlopt.opt`, running under
+`MMTK_PLAN=Bactrian`, prints `Fatal error: exception Out of memory` and exits
+2 while compiling a test.
+
+| run | tree | Bactrian result |
+|---|---|---|
+| 36534216189 | `ddc53f4007` (mainline) | pass |
+| 36537448938 | `9631db07fd` (mainline) | pass |
+| 36542738150 | `89d0602e12` (mainline) | `lib-string/test_string.ml` |
+| 36558162128 | `358ea7958c` (mainline) | `misc/sorts.ml` |
+| 36563475743 | PR 29 branch (code = `69b81065c7`) | `lib-format/tformat.ml`, `lib-scanf/tscanf.ml` |
+| 36563792450 | PR 30 branch | `tformat.ml` |
+| 36563812717 | PR 31 branch (issue 28 fix) | pass |
+| 36565968550 | `cd162e8496` (mainline) | pass |
+| 36569800854 | PR 32 branch (based on `cd162e8496`) | `test_string.ml` |
+| 36569985297 | `c59f7851c3` (mainline) | pass |
+| 36570516849 | `240b6c8f62` (mainline, issue 28 fix) | pass |
+
+So 5 of 9 runs without the issue 28 fix failed, 0 of 2 with it. Hypothesis,
+unverified: the issue 28 bugs (native `Array.fill` and `No_sharing` unmarshal
+both corrupt Bactrian; the compiler is native code). Two green runs do not
+establish it. Not reproduced locally (full Bactrian on macOS: 1443 / 0).
+Settled by several consecutive green Bactrian runs on mainline after
+`240b6c8f62`, or by reproducing the out-of-memory on a pre-fix tree.
+
+### LXR on Linux CI (ROADMAP item 21)
+
+From the same logs. On all 7 runs after the LXR abort fix, LXR fails
+`memory-model/forbidden.ml`, `memory-model/publish.ml`,
+`misc/gc_mark_stack_overflow.ml`, `weak-ephe-final/weaklifetime.ml` (at its
+128 MiB pin: native `Assertion failed` at line 66, bytecode `out of memory in
+uncaught exception handler`) and `weak-ephe-final/weaktest.ml`
+(`Invalid_argument("index out of bounds")`), all five already failing in the
+July baseline run 28657254889. New since the PR 23 merge:
+`lib-marshal/intext_par.ml` (`Invalid_argument("Marshal.from_bytes")`) fails
+on 10 of the 11 runs of the day, on Linux CI only; local macOS runs pass it.
+Intermittent: `weak_array_par.ml` (`Assertion failed` at line 20),
+`domain_parallel_spawn_burn.ml` / `_gc_set.ml`, `lf_skiplist/test_parallel.ml`,
+and compile-time segfaults (exit -11) of the bytecode `ocamlopt` running
+under LXR (`gc-roots/old_to_young_bulk_stores.ml` at `240b6c8f62`,
+`lib-systhreads/gh24_running_set_stress.ml` on the PR 32 branch). The LXR job
+gates and is red on every PR; it is treated as explained only when all its
+failing tests are within this set.
+
+### Other CI observations
+
+- `weaklifetime.ml` under Immix and ConcurrentImmix passed on all 7 runs
+  whose tree contains PR 27 (`69b81065c7`), so ROADMAP item 16 is confirmed
+  on CI.
+- GenCopy `darkening_work.ml` is intermittent: it failed 8 of the day's 11
+  runs and passed on the mainline runs at `cd162e8496`, `c59f7851c3` and
+  `240b6c8f62` (ROADMAP item 15).
+- **CI coverage gap (ROADMAP item 27).** `testsuite-plans.yml` runs on
+  `push` with `paths:` `gc/mmtk/**`, `runtime/**` and the workflow file. The
+  submodule gitlink `gc/mmtk-core` does not match `gc/mmtk/**`, so PR 34 (a
+  pure pin bump) got no all-plans run. Fix: add `gc/mmtk-core` to `paths:`.
+
+---
+
 ## 2026-09-29 - later findings: bulk-store barrier gaps (GH issue 28), LXR root cause and capacity, GH issue 24 confirmed, pacing on reserved pages, explicit Gc requests (KNOWN FAILURES)
 
 Evidence labels: *verified* = reproduced by running; *source reading*;
 *inferred*; *unknown*. Code references are to the tree at `358ea7958c`
 (mmtk-core `045f121143`); line numbers are approximate. Tracked as ROADMAP
 open items 15-24, in priority order 18, 19, 20, 21, 22, 23, 24.
+
+**UPDATE (2026-09-29, later): items 17, 18, 19 and 20(a) are fixed and
+merged; the explicit-Gc fix (item 22) is not mergeable yet.** See the entry
+above, "landings", and ROADMAP for the re-ranked open work.
 
 ### Bulk stores skip the generational barrier (ROADMAP item 18, GH issue 28)
 
@@ -88,6 +281,10 @@ as an out-of-line `caml_modify`/`caml_initialize` (`asmcomp/cmm_helpers.ml`
 
 A full testsuite run is pending.
 
+**UPDATE: FIXED and merged** as PR 31 (merge `240b6c8f62`, fix
+`2a59d9f89e`); GH issue 28 closed. Full GenImmix and Bactrian runs 1443 / 0.
+See the entry above, "landings".
+
 **Lesson:** the testsuite had no old-to-young test for bulk primitives, which
 is why GenImmix stayed green. A barrier split between the native and bytecode
 runtimes needs a test in each runtime.
@@ -133,6 +330,11 @@ Regression test: `testsuite/tests/misc/mutation_old_value.ml`.
 MiB, native and bytecode. GenImmix, Immix and Bactrian are unchanged. The
 regression test passes under LXR and GenImmix. Full LXR and GenImmix
 testsuite runs were in progress when this was written. Not merged.
+
+**UPDATE: FIXED and merged** as PR 30 (merge `c59f7851c3`, fix
+`c10cf38244`); GH issue 26 closed. Full LXR 1433 / 10 (the same 10 files as
+before the fix, 0 panics), GenImmix 1443 / 0. See the entry above,
+"landings".
 
 The generational remembered set is not affected (source reading and probes):
 its barrier pushes the slice and classifies the slots at GC time, after the
@@ -205,6 +407,10 @@ completion of a whole ConcurrentImmix cycle, an LXR backup cycle, or
 finaliser callbacks. LXR weak retention and an `alloc_async` timeout remain
 open.
 
+**UPDATE: NOT mergeable yet.** It breaks `lib-systhreads/testfork.ml`
+(GH issue 33) and `lib-dynlink-domains/main.ml` (native timeout, cause
+unknown) under GenImmix. See the entry above, "landings".
+
 ### GH issue 24 confirmed by running (ROADMAP item 19)
 
 Branch `test/systhreads-running-set`:
@@ -252,6 +458,10 @@ Results are posted on GH issue 24. A fix is in progress on the same branch
 
 Linux was not run and `fork` was not analysed.
 
+**UPDATE: FIXED and merged** as PR 32 (merge `e351966d59`, fix
+`ed61273ae9`); GH issue 24 closed. `fork` remains out of scope (GH issue 33).
+See the entry above, "landings".
+
 ### Pacing laws fed by reserved pages (ROADMAP items 20 and 15)
 
 **(a) Dynamic heap growth under Immix, verified** from re-parsed telemetry.
@@ -290,6 +500,10 @@ Its author's results, not re-run independently:
 The 64 MiB large-allocation case and a ~64 MiB growing-live builder still
 pass under both plans. Bactrian and ConcurrentImmix garbage probes stay near
 the floor.
+
+**UPDATE: (a) FIXED and merged** as mmtk-core PR 3 (merge `44d02b65a9`, fix
+`f0afe6ed00`), pinned by PR 34 (`724ca4068a`); re-run independently, and
+SemiSpace was affected too. See the entry above, "landings".
 
 **(b) GenCopy `darkening_work.ml`.** Figures are from the diagnostic's
 report; not re-run.
@@ -344,7 +558,9 @@ infix pointer in that window would give a wrong object start. Unverified.
 - `weaklifetime.ml` timeout (ROADMAP item 16): fixed by ocaml-mmtk PR 27
   (`ad6632c3c4`, merged as `69b81065c7`). It pins `MMTK_HEAP_SIZE_MB=128` for
   the test via an ocamltest `set`, leaving the test body unchanged. Not yet
-  confirmed by a post-merge all-plans CI run.
+  confirmed by a post-merge all-plans CI run. **UPDATE:** confirmed; Immix
+  and ConcurrentImmix passed it on all 7 later runs (entry above,
+  "landings").
 - **Measurement hygiene (checked against the code):**
   - `MMTK_RELEASE_LOS_PAGES` is compiled only on Linux, so large-object pages
     are not returned to the OS on macOS.
@@ -428,6 +644,10 @@ Consequence: the LXR (RQ1) results so far were validated with the
 binarytrees/kb checksums, which do not exercise this pattern (a
 long-lived table of arrays alongside heavy short-lived churn). Treat LXR
 results as provisional until this is understood.
+
+**UPDATE:** root-caused and FIXED (GH issue 26, PR 30, `c59f7851c3`); LXR
+results stay provisional because of the capacity problem the fix exposed
+(ROADMAP item 21). See the entries above.
 
 ---
 
@@ -561,6 +781,10 @@ are red on it independent of anything else.
 
 Repro: `env MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=4096 make -C testsuite one
 TEST=tests/weak-ephe-final/weaklifetime.ml TIMEOUT=600`, timed.
+
+**UPDATE (2026-09-29, later):** fixed by PR 27 (`69b81065c7`) and confirmed
+on CI. Item 2 turned out intermittent: GenCopy passed `darkening_work.ml` on
+3 of the day's 11 runs. See the "landings" entry at the top.
 
 ---
 
