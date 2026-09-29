@@ -319,44 +319,6 @@ jobs:
           name: crash-reports-${{ matrix.name }}
           path: ~/Library/Logs/DiagnosticReports/
           if-no-files-found: ignore
-      # memory-model/forbidden crashes intermittently on ARM (macOS and Linux,
-      # bytecode and native) with no core file. Rerun the programs the failed
-      # run left under _ocamltest in a debugger until one crashes, then print
-      # every thread's backtrace.
-      - name: Backtrace of the crashing memory-model test (ARM)
-        if: ${{ failure() && endsWith(matrix.name, '-arm64') }}
-        run: |
-          base=testsuite/tests/memory-model/_ocamltest/tests/memory-model/forbidden
-          if [ "$(uname)" = Linux ] && ! command -v gdb > /dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq gdb
-          fi
-          found=0
-          for v in ocamlopt.byte/forbidden.opt ocamlc.byte/forbidden.byte; do
-            exe="$PWD/$base/$v"
-            [ -e "$exe" ] || { echo "not built: $v"; continue; }
-            cmd=("$exe")
-            case "$exe" in *.byte) cmd=("$PWD/runtime/ocamlrun" "$exe");; esac
-            echo "== $v: up to 25 runs under the debugger"
-            for i in $(seq 1 25); do
-              if [ "$(uname)" = Darwin ]; then
-                lldb --batch -o run -k 'thread backtrace all' -k quit \
-                  -- "${cmd[@]}" > dbg.log 2>&1 || true
-                grep -qE 'stop reason = (EXC_BAD_ACCESS|signal)' dbg.log || continue
-              else
-                gdb -batch -q -ex 'set pagination off' -ex run \
-                  -ex 'thread apply all bt 40' --args "${cmd[@]}" > dbg.log 2>&1 \
-                  || true
-                grep -q 'received signal' dbg.log || continue
-              fi
-              echo "::group::$v crashed on run $i: all-thread backtrace"
-              cat dbg.log
-              echo '::endgroup::'
-              found=1
-              break
-            done
-          done
-          rm -f dbg.log
-          [ $found = 1 ] || echo "no crash reproduced under the debugger"
       - name: Install
         if: ${{ matrix.test-in-prefix }}
         run: |
