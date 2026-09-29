@@ -1004,6 +1004,15 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
   /* This domain currently holds a lock for [mut], which is kept alive
      by a global root inside ml_values. */
   caml_plat_mutex *mut = Term_mutex(ml_values->term_sync);
+  /* Release the local roots BEFORE the domain is terminated (stock has no
+     CAMLparam here). CAMLparam0 captured &Caml_state->local_roots; after
+     caml_domain_terminate that domain state can be reused by a newly spawned
+     domain, so a late CAMLreturn0 would overwrite the new domain's
+     local_roots with our saved frame (NULL here), unrooting its live C
+     locals. A collection then moves their objects without updating them,
+     and a later GC traces the stale old copies (memory-model/publish,
+     lib-str/parallel SIGSEGV). [v] is published and no longer needed. */
+  CAMLdrop;
   /* Join all systhreads on this domain and release the runtime state. */
   caml_domain_terminate(false);
   /* This domain has signaled all the waiting domains to be woken up.
@@ -1013,7 +1022,6 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      this point but we can use [caml_plat_unlock]. */
   caml_plat_unlock(mut);
   caml_plat_assert_all_locks_unlocked();
-  CAMLreturn0;
 }
 
 static CAML_THREAD_FUNCTION

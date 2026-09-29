@@ -5,6 +5,56 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-29 - sync_and_terminate dropped its local roots after the domain was gone
+
+**Symptom.** Rare SIGSEGV (exit -11) in multi-domain tests: CI
+memory-model/publish and lib-str/parallel (bytecode), memory-model/forbidden
+(native, macOS arm64). Locally about 0.5 % of `publish.byte` runs under
+GenImmix and about 0.1 % of `lib-str/parallel`.
+
+**What the crash is.** Two captures under gdb: a GC worker in
+`GenNurseryProcessEdges` -> `CopySpace::trace_object` -> `copy_object`
+reads a size of ~16 GB and recurses through `ImmixAllocator::alloc` ->
+`overflow_alloc` -> `acquire_clean_block` until it hits its stack guard page
+(a plain SIGSEGV: Rust's overflow handler is not installed in a staticlib).
+The "header" it read is a heap address: the forwarding pointer of an old
+nursery copy moved by an earlier GC, whose side forwarding bits had since been
+reset. So some slot was never updated when its object moved.
+
+**Finding the slot.** A debug check (not committed; the patch tags every
+reported root by category and domain and every scanned field by its parent,
+and aborts on "side state not-forwarded but the header is a heap pointer")
+hit within ~200 runs: a `domain-roots` slot on a native thread stack, i.e. a
+C local root.
+
+**Cause.** `sync_and_terminate` (domain.c) got `CAMLparam0()` /
+`CAMLlocal1(v)` in the fix for #31 (1d2504ab4); stock 5.5.0 has no CAMLparam
+there. `CAMLparam0` captures `&Caml_state->local_roots`, and the function
+ended with `caml_domain_terminate(false); ... CAMLreturn0;`. After
+`caml_domain_terminate`, the domain state can be reused by a newly spawned
+domain (`domain_create` resets its `local_roots`). The late `CAMLreturn0`
+then stored our saved frame (NULL: nothing encloses this call) into the new
+domain's `local_roots`, unrooting its live C locals. A collection moved their
+objects without updating them; the next GC traced the stale old copy. Stock's
+own comment one function up says it: "we must release the local roots before
+this happens".
+
+**Fix.** `CAMLdrop` right after the result is published, before
+`caml_domain_terminate`, and a plain return. `v` is not needed after
+`sync_result`.
+
+**Validation** (x86-64 laptop, GenImmix, world.opt rebuilt):
+- With the debug check: 0 reports in 2400 `publish.byte` runs (12 streams x
+  200), against a report within ~200 runs before the fix.
+- Plain runtime: `publish.byte` 0 crashes in 1200 runs (was ~0.5 %);
+  `lib-str/parallel` bytecode 0 in 4000 (was ~0.1 %); `forbidden` native
+  0 in 480.
+- Testsuite (parallel, TIMEOUT=120): 1441 passed, 1 failed
+  (`lib-unix/common/cloexec.ml`, `sh: : Permission denied` in the
+  create_process variant; passes 6 of 6 rerun alone, single-domain, unrelated).
+
+---
+
 ## 2026-09-28 - per-domain nursery scaling overran a fixed heap
 
 **Symptom.** Bytecode `domain_parallel_spawn_burn` under Bactrian with
