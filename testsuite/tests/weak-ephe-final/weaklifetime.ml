@@ -1,4 +1,17 @@
-(* TEST *)
+(* TEST
+ set MMTK_HEAP_SIZE_MB = "128";
+*)
+
+(* MMTk HEAP PINNED: the loop below runs until 20 major collections have
+   happened. Stock OCaml paces major cycles by allocated words, so that is
+   quick at any heap size. Under MMTk a non-generational plan (Immix,
+   ConcurrentImmix, SemiSpace) collects only when its heap is full, so 20
+   cycles cost 20 heap-worths of allocation: at the all-plans CI heap of
+   4096 MB that took about 75 s on an M4 Pro and exceeded the 120 s per-test
+   timeout on CI. A small fixed heap keeps the 20 natural collections cheap
+   on every plan (Immix ~1 s, GenImmix ~10 s at 128 MB) and leaves what the
+   test checks unchanged. The default dynamic heap is not used because under
+   Immix it grew to 12-14 GB on this test. *)
 
 let () = Random.init 12345
 
