@@ -212,7 +212,7 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
         );
         // Per-domain nursery scaling (stock parity: stock's minor-heap capacity is
         // per-domain, N x 2 MiB total). With the default Bounded budget installed,
-        // scale it by the live domain count — Bounded:N*2MiB,N*64MiB — latched from
+        // scale it by the live domain count — Bounded:N*2MiB,N*16MiB — latched from
         // the domain registry at spawn/termination and consumed lazily at the next
         // trigger check (see active_plan::update_nursery_scale). An explicit
         // MMTK_NURSERY pin is authoritative and never scaled; opt out of scaling

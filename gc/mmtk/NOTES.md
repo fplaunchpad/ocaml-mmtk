@@ -5,6 +5,62 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-29 - catch-up: Bactrian work from 2026-08-12 to 2026-09-22 that had no entry here
+
+Written at merge time (PR 23, `ddc53f4007`; mmtk-core PR 1, pinned at
+`892056da7a`), from the commit messages and `gc/mmtk/SHAPE.md`. The round
+narratives (27-32) live in SHAPE.md; this entry records what changed, where,
+and which older entries it supersedes.
+
+**UP-oldify (round 30, 2026-08-12; opt-in, `MMTK_UP_OLDIFY=1`).** Binding
+`33bb7e4cbc`; mmtk-core `32d8057efa` adds the opt-in hook
+`Scanning::up_oldify_packet` + `UpOldifyOps`. Under the UP window (single
+tracer, world stopped) the binding walks the nursery closure itself, shaped
+like stock `minor_gc.c`: header-sentinel forwarding, inline copy,
+layer-batched field walk; continuations delegate to `scan_object`; young LOS
+objects promote in place through the ops. SHAPE round 30 reports bt@n8 GC
+time 2981 -> 2574 ms. Default stays off.
+
+**Fused-metadata promotion (round 32, 2026-08-14).** mmtk-core `9cda6a4816`:
+under the UP window the per-object metadata atomics (`post_copy`'s mark
+store, `attempt_mark`'s load+CAS, the live-tally add) become plain ops;
+multi-worker pauses keep the atomics.
+
+**LOS and off-heap memory in pacing (2026-08-30).** mmtk-core `a7b10f3d85`:
+the LOS counts toward `get_mature_reserved_pages` (Bactrian, GenImmix), and
+LOS frees of 2 MiB or more are returned to the OS (`MMTK_RELEASE_LOS_PAGES=0`
+opts out). Binding/runtime `d9816ef9db`: custom-block off-heap bytes are
+credited raw to the binding, reported through `vm_live_bytes`, and a starter
+requests a collection once per `MMTK_CUSTOM_GC_BYTES` of them; `e16d20e0ae`
+raised that default to 64 MiB and made the full-GC cadence backstop
+`max(512 MiB x domains, 2 x the post-full mature baseline)`. (The
+2026-09-28 review entry fixes the credit reset on non-generational plans.)
+
+**Plan-owned slice sizing (2026-09-11 .. 09-22).** Supersedes the
+binding-side quantum hint and feasibility gates in the 2026-08-13 entry
+below: `MMTK_MARK_RATE_MBPMS`, `MMTK_SLICE_MAX_NURSERY_MB` and
+`MMTK_MAX_QUANTUM_MS` no longer exist.
+- mmtk-core `50f56f5987`: slice a cycle iff a monolithic Full would be too
+  long (`MMTK_SLICE_WORTH_MS`, default 200); `MMTK_SLICE_MAX_PAUSE_MS`
+  (default 100) is the sliced-pause target.
+- mmtk-core `4660d08769`: under sliced cycles, live = bytes marked by the
+  sliced trace; the dynamic heap limit is sized only at cycle-completion
+  points; the pacing runway is frozen at InitialMark and each slice takes
+  its inflow plus a share of the backlog, capped at the pause target;
+  sweep slices get the same share with a soft cap (`MMTK_SWEEP_SLICE_CAP_MS`).
+- Binding `22ade70f20` + mmtk-core `22351d1644`: the binding only requests
+  cycles and says which pacing site fired them (`set_cycle_tick_origin`);
+  the Full-cost prediction behind the worth test comes from measurements,
+  scaled by heap growth since it was sampled (`9372c33c01`) and floored by
+  mature bytes at 1 MB/ms (`abd1879f6f`).
+
+**Survivor aging disabled (2026-09-08).** mmtk-core `a9b553a486`: the
+2026-08-08 (night) entry's hole 1 made `MMTK_NURSERY_AGE>=1` unsound, and
+default-off did not make the option sound, so the knob is now parsed but
+always yields 0, with a one-line stderr notice.
+
+---
+
 ## 2026-09-29 - sync_and_terminate dropped its local roots after the domain was gone
 
 **Symptom.** Rare SIGSEGV (exit -11) in multi-domain tests: CI
@@ -241,6 +297,11 @@ generational plan using `marksweep_as_nonmoving` corrupts without them).
 
 ## 2026-08-13 — round 30d: line-blind waste, the compaction law, and the staged free-list band
 
+*(2026-09-29: the binding-side quantum hint and the `MMTK_MARK_RATE_MBPMS` /
+`MMTK_SLICE_MAX_NURSERY_MB` / `MMTK_MAX_QUANTUM_MS` gates described below were
+removed in September; the plan now sizes its own slices. See the 2026-09-29
+catch-up entry.)*
+
 **The mature_mutation D4 excursion** (user-flagged: RSS 120MB vs ~26 vanilla,
 >>the accepted ~25MB overhead): its dead 24B cells interleave with live ones
 on the same 256B lines, so line-granular reclamation frees NOTHING — 6.6MB
@@ -349,7 +410,7 @@ reporting battery.
 
 ---
 
-## 2026-08-12 — fragmed lands: two pacing holes fixed, one T>1 race OPEN
+## 2026-08-12 — fragmed lands: two pacing holes fixed, and a T>1 race (fixed the same day)
 
 The new fragmentation-driver bench found three real defects within an hour
 of existing (suite-gap report vindicated a third time):
@@ -654,6 +715,11 @@ cheap. The next structural lever for bt-class workloads is cheaper mature
 reclamation (incremental/concurrent sweep of promoted garbage), not aging.
 Aging remains available (and sound on non-mutating workloads) for
 medium-lifetime programs once hole 1 is closed.
+
+**UPDATE 2026-09-08: aging DISABLED** (mmtk-core `a9b553a486`). Hole 1 is not
+closed, and default-off did not make the option sound, so
+`MMTK_NURSERY_AGE` is now parsed but ignored (always 0, with a stderr
+notice). See the 2026-09-29 catch-up entry.
 
 ## 2026-08-08 (later) — Bactrian adaptive marking: STW-mark small live sets
 

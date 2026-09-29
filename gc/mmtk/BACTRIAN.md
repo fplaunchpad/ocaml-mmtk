@@ -15,17 +15,25 @@ left in the RQ7 comparison. (Design rationale and bring-up history: NOTES
 | generational, copying minor | per-domain minor heaps, emptied wholesale at STW rendezvous | shared CopySpace nursery, per-domain TLABs, emptied wholesale at STW pause | **yes** (shape) |
 | minor-GC execution | inline Cheney copy on the mutator domains | MMTk STW handshake + work packets + GC workers | no — the measured ~4x per-minor-GC floor (NOTES 2026-06-24) |
 | write barrier | deletion barrier (darken old value, marking-gated) + minor remset; no read barrier | slot-granular SATB (marking-gated, no dedup bit, young-filtered) + region remset; no read barrier | **yes** (semantics; remset granularity differs, below) |
-| major mark | incremental **slices on the mutator domains**, paced by allocated words | **concurrent on GC worker threads**, racing the mutators | no — mostly-concurrent both, different executor + pacing |
-| major cycle STW | tiny phase-flip sections riding the domain barrier (+ STW minors) | InitialMark rides a minor pause; **FinalMark = minor GC + remark + weak/finaliser processing + full mature sweep** | no — cycle-end pause categorically bigger |
-| sweep | incremental/concurrent (each domain sweeps its pools in slices) | **STW at FinalMark** (Immix sweep packets inside the pause) | **no — the biggest divergence** |
-| moving | non-moving major; STW compaction only on rare explicit `Gc.compact` | non-moving during cycles; STW Immix defrag only at `Full` (user GC / emergency) | ~yes (analogous) |
-| pacing | major work budgeted by allocated words (`space_overhead`) | cycle starts on mature pressure (+120% growth over post-cycle baseline) or every 8 minors (GH#5) | no — pressure-driven, not allocation-driven |
+| major mark | incremental **slices on the mutator domains**, paced by allocated words | **default since 2026-08-11: sliced-STW quanta inside nursery pauses**, run by a GC worker with the world stopped (`MMTK_MARK_SLICED=0`: concurrent on GC worker threads, racing the mutators) | ~ — sliced like stock, but a GC-worker executor inside a pause, not mutator slices |
+| major cycle STW | tiny phase-flip sections riding the domain barrier (+ STW minors) | InitialMark rides a minor pause; **FinalMark = minor GC + remark + weak/finaliser processing** (+ the full mature sweep only when `MMTK_MARK_SLICED=0`) | ~ — FinalMark still drains the remaining mark work in one pause |
+| sweep | incremental/concurrent (each domain sweeps its pools in slices) | **incremental in sliced mode (default)**: FinalMark parks the mature chunk-sweep packets and budgeted quanta drain them in later nursery pauses (mmtk-core `c01edca806`, `MMTK_SWEEP_SLICE_MS`); STW at FinalMark with `MMTK_MARK_SLICED=0` | ~yes (sliced, in-pause) |
+| moving | non-moving major; STW compaction only on rare explicit `Gc.compact` | non-moving during cycles; STW Immix defrag only at `Full` (user GC / emergency), plus a **compact-all Full** when post-sweep reserved exceeds marked live by `MMTK_COMPACT_OVERHEAD_PCT` (default 100; round 30d) — the `Gc.max_overhead` analogue | ~yes (analogous) |
+| pacing | major work budgeted by allocated words (`space_overhead`) | cycle starts on mature pressure — `min(baseline × (1+150%), heap_limit × 80%)` over the post-sweep baseline, floor 8 MiB (`MMTK_MATURE_OVERHEAD_PCT`, `MMTK_CONC_TRIGGER_PCT`, `MMTK_MATURE_FLOOR_MB`) — or an allocation-denominated backstop; mature-direct (pretenure/LOS) allocation also ticks the law, and off-heap custom-block bytes count toward the heap and start collections; the plan sizes slices from the runway frozen at InitialMark | ~ — pressure-driven cycle start, allocation-paced slices |
 | weak/ephemeron/finaliser | processed as the cycle reaches them, per phase | young: every minor pause; mature: judged only at FinalMark/Full over complete marks | ~yes (timing detail in NOTES) |
 
 **Consequence for RQ7 reads:** the measured parity (within ~6% of vanilla on
 7/8 sequential benches) was achieved **while still paying an STW sweep that
 vanilla does not pay** — so closing the two "no" rows can only improve it, and
 whatever gap remains after that is the true framework floor.
+
+**Update (2026-09-29).** The table above is current as of the PR 23 merge
+(`ddc53f4007`). Since the parity readout above, the shape campaign
+([`SHAPE.md`](SHAPE.md) rounds 1–32) made marking sliced and the sweep
+incremental (both default), added the compaction law and stock's
+`Max_young_wosize` pretenuring, and moved slice sizing into the plan; see
+ROADMAP's RQ7 bullet and NOTES 2026-09-29. The quick-panel numbers quoted here
+and in README predate most of that work.
 
 ## The details
 
@@ -61,6 +69,11 @@ stock:    [STW flip] ->  mark slices on mutators (allocation-paced)
 Bactrian: [InitialMark = minor GC + snapshot seeding]
           -> GC workers mark concurrently (minors interleave; SATB catches deletions)
           -> [FinalMark = minor GC + remark + weak/finalisers + STW MATURE SWEEP]
+Bactrian, sliced mode (DEFAULT since 2026-08-11/12):
+          [InitialMark = minor GC + snapshot seeding]
+          -> mark quanta inside each nursery pause (world stopped)
+          -> [FinalMark = minor GC + remark + weak/finalisers]
+          -> sweep quanta inside later nursery pauses
 ```
 
 Bactrian anchors every cycle transition on a minor collection (stock's phase
@@ -116,15 +129,20 @@ Ranked by the 2026-07-02 turing quantification (SCALABILITY.md UPDATE 4):
    Bactrian is no longer permanently mid-cycle and its 8-domain RSS fell
    1689 -> 504 MiB. (`test_gc_alarm` remains disabled: at large dynamic heaps
    cycles are still legitimately rare.)
-2. **Mutator-paced mark slices** — let mutators drain bounded amounts of the
+2. **Mutator-paced mark slices** — *partly done (2026-08-11): marking now runs
+   as allocation-paced slices inside nursery pauses on a GC worker (sliced-STW,
+   SHAPE round 25), not on the mutators.* Originally: let mutators drain bounded amounts of the
    Concurrent bucket at poll points (the inert `caml_major_collection_slice`
    hook), matching stock's executor and pacing model, freeing GC-worker cores
    and cutting the worker/mutator context-switch churn.
-3. **Concurrent/lazy sweep** — move the FinalMark mature sweep off the pause
+3. ~~**Concurrent/lazy sweep**~~ — **DONE as incremental sweep (2026-08-12,
+   mmtk-core `c01edca806`; SHAPE round 29).** Originally: move the FinalMark mature sweep off the pause
    (lazy line sweeping / sweep-on-allocation), matching stock's incremental
    sweep and shrinking the one categorically-bigger pause.
 4. **Value-filtered remset** — only record mature slots that receive young
-   values, matching stock's remset traffic.
+   values, matching stock's remset traffic. *Partly done: the region barrier
+   now skips immediate stores (`9027ed6b96`, 2026-08-10); that commit filters
+   only immediates, so pointer stores of mature values are still recorded.*
 
 ## Running it
 

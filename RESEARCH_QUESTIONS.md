@@ -180,7 +180,7 @@ find the cost is dominated by something mutation-independent (allocation rate, t
 scanning), the immutability story is *wrong* and RQ1 fails honestly.
 
 **How to test.** ConcurrentImmix + an SATB write barrier is **LANDED** (bytecode + native; ROADMAP #15);
-the remaining lever is porting an LXR/RC plan + its RC barrier into the binding — OCaml's `caml_modify`/`caml_initialize` already
+the LXR/RC plan + its RC barrier has since been ported too (`MMTK_PLAN=LXR`, 2026-07-02) — OCaml's `caml_modify`/`caml_initialize` already
 carry MMTk barrier hooks (ROADMAP Phase 2 #3; the native barrier is live). Measure pause-time +
 throughput vs OCaml's own STW GC (a vanilla 5.5 opam switch) on Sandmark + the compiler, and **regress
 the residual throughput gap against measured mutation rate and lifetime dispersion** across modules /
@@ -255,8 +255,8 @@ class cheaper — because there was no immutable-by-default language in a multi-
 it on. Dolan'25 gives the covariate to make the test quantitative. That is the new contribution: a
 *language-property → GC-design-outcome* law, not another collector.
 
-**Venue:** PLDI / ISMM. **Risk:** medium now (the concurrent plan + SATB barrier are landed; residual = an
-LXR/RC plan + a cross-mutation-spectrum latency harness), high
+**Venue:** PLDI / ISMM. **Risk:** medium now (the concurrent plan + SATB barrier are landed; the LXR/RC plan
+landed 2026-07-02; residual = a cross-mutation-spectrum latency harness), high
 upside. **Novelty: strong** — the *prediction-tested-across-the-mutation-spectrum* framing is new;
 "RC works on OCaml" alone would not be. Serves the charter's reliability/trustworthiness via predictable
 latency.
@@ -482,6 +482,24 @@ nursery, 2026-06-24) is the first quantification of exactly that gap. The questi
 *how close can an MMTk implementation of OCaml's own collector get to the bespoke one — and what framework
 costs (per-collection STW/worker/work-packet overhead) must fall to close it?* That makes `Bactrian` not
 just RQ1's low-latency vehicle but the yardstick for "how good can MMTk-for-OCaml be."
+
+**Status (2026-09-29).** `Bactrian` **v1 landed 2026-07-02** (`MMTK_PLAN=Bactrian`, bytecode + native;
+design and the matched/unmatched axes in `gc/mmtk/BACTRIAN.md`). The **shape campaign**
+(`gc/mmtk/SHAPE.md` rounds 1–32, merged 2026-09-29 as PR 23 + mmtk-core PR 1) then moved it further
+toward stock's architecture: stock's `Max_young_wosize` pretenuring, **sliced-STW marking** and an
+**incremental sweep** (both default), a `Gc.max_overhead`-style compaction law, and plan-owned slice
+pacing — so the "incremental (bounded slices) or only mostly-concurrent?" sub-question above is answered
+*incremental, executed as in-pause quanta on a GC worker*. Round 27's campaign readout was a panel geomean
+of 1.009× vanilla; round 28's front-to-front memory/time pareto found vanilla's front still dominates on
+bt/kb/LU/sp. Details and open items: ROADMAP (RQ7 bullet), NOTES 2026-09-29.
+
+**An expressiveness observation (not yet a result).** Matching stock's *minor* collector closely enough
+to close the per-promotion cost gap needed a new, opt-in VM-side hook in mmtk-core —
+`Scanning::up_oldify_packet` + `UpOldifyOps` (mmtk-core `32d8057efa`, used by `MMTK_UP_OLDIFY=1`) — which
+lets the binding run the whole nursery closure itself, stock-`oldify`-style, inside an MMTk pause. It is
+default-off and its measured effect is only in SHAPE.md round 30. Whether this is a point where the
+framework *resists* expressing the host collector (payoff 1 above), or simply a missing extension point,
+is an open question for the RQ4/RQ7 write-up.
 
 ---
 
@@ -762,18 +780,20 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
 
 ## What each question needs from the platform
 
-- **Common prerequisite (DONE):** M9 is complete; **#15 wired 10 plans (bytecode)**; **native runs 7**;
+- **Common prerequisite (DONE):** M9 is complete; **#15 wired 10 plans (bytecode)**, now **12** with our
+  `Bactrian` and `LXR`; **native runs 9**;
   **ConcurrentImmix + SATB (RQ1's enabler) landed bytecode + native**; plan-swapping is clean. What remains
   is per-RQ research, not bring-up.
-- **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier. *Remaining:* an LXR/RC plan, a richer latency
-  harness, and a mutation-rate / lifetime-dispersion instrument. *(This is the real research engineering.)*
+- **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier, and (2026-07-02) the **LXR** RC plan
+  (`MMTK_PLAN=LXR`, experimental). *Remaining:* a richer latency harness and a mutation-rate /
+  lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add
   the *extreme-allocation copy pathology* probe — covary alloc-rate ÷ heap-size against survival (GenImmix
   copies dead-on-arrival cells under a fixed heap at very high allocation volume; GitHub #6).
-- **RQ7 (Bactrian hybrid):** compose GenImmix's copying minor + ConcurrentImmix's SATB marking into
-  a copying-nursery + concurrently-marked + STW-evacuated Immix-mature plan with a SATB barrier — mmtk-core
-  fork work (a (near-)non-moving, incremental mature). Both halves are landed natively.
+- **RQ7 (Bactrian hybrid):** *(landed 2026-07-02; shape campaign merged 2026-09-29)* GenImmix's copying
+  minor + ConcurrentImmix's SATB marking composed into one mmtk-core plan, now with sliced marking and an
+  incremental sweep. *Remaining:* see the RQ7 status paragraph and ROADMAP's RQ7 bullet.
 - **RQ10 (minor-collection architecture):** pole (A) — making MMTk's STW minor domain-scalable — needs the
   #53/#G1 narrow-root-scan lever + the #18 minor-STW-rendezvous retirement (same rework as bug #3c), framed
   against other runtimes' minor designs. Pole (B) — stock minor + MMTk major-only — needs a *partial reversal
@@ -804,8 +824,8 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
    comparison. Produces the data that motivates RQ1 and is a paper in its own right.
 3. **RQ1 (flagship) — already in flight.** ConcurrentImmix + SATB is landed and has produced **first strong
    native evidence** (the SATB barrier measured ~free; concurrent marking cuts max STW 3–4×). The immutability
-   ⇒ read-barrier-free-low-latency hypothesis is now testable across the mutation spectrum; the residual is an
-   LXR/RC plan + the latency harness. **RQ7 (Bactrian) and RQ8 (no-zero) are active workstreams**
+   ⇒ read-barrier-free-low-latency hypothesis is now testable across the mutation spectrum; the LXR/RC plan
+   has since landed (2026-07-02), so the residual is the latency harness. **RQ7 (Bactrian) and RQ8 (no-zero) are active workstreams**
    feeding it.
 4. **RQ3 / RQ5** — opportunistic, as the platform and interest allow; RQ5(b) is the standout long-game
    (real, confirmed gap; on-charter).
