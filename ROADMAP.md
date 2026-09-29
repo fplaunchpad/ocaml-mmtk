@@ -25,8 +25,8 @@ plan whose Default allocator is a bump/Immix region (the nine:
 **`LXR`** is our reference-counting **research plan** (PLDI'22 RC-on-Immix): single-domain validated
 (correct, sanity-clean, at memory parity with Immix; the field barrier is near-free on OCaml's
 init-write-dominated code; a backup trace reclaims cycles) — **experimental; single- AND multi-domain
-validated** (par_binarytrees D=1..32) as of 2026-07; **since the 2026-09-29 merge it aborts on a
-release-counter underflow in 65-69 testsuite programs — open item 14**; requires a
+validated** (par_binarytrees D=1..32) as of 2026-07; **but it has an open silent-wrong-results bug
+(open item 17), so its results are provisional** (the post-merge abort, item 14, is fixed); requires a
 pinned `MMTK_HEAP_SIZE_MB`; it runs in the all-plans testsuite workflow (`testsuite-plans.yml`) but is
 **not** in the byte-identical CLBG cross-plan gate. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
@@ -493,27 +493,21 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       exercised before 2026-09-28 (a parser bug made them mode 5), so SHAPE.md round 11's verdict on them
       is void. → NOTES 2026-09-28.
 
-14. **LXR regression since the PR 23 merge: aborts on a release-counter underflow (open; fix not
-    written).** In the `Testsuite (all GC plans)` run on `ddc53f4007` (run 36534216189), 69
-    tests (124 variants) fail under `MMTK_PLAN=LXR`, every one with SIGABRT after
-    `panicked at ./gc/mmtk-core/src/util/epilogue.rs:11:9: pending_release_packets is still
-    18446744073709551615` (down to 2^64-17 on multi-domain tests). **Regression confirmed from the CI
-    logs:** 0 occurrences of the panic in the baseline run on `cbc66e3efd` (run 28657254889, where LXR
-    failed 5 other tests), 123 in the new run. The rerun on `9631db07fd` (run 36537448938, same GC
-    code) repeats it: 65 tests, 113 panic lines; the failing set differs by 12 tests between the two
-    runs, so which programs hit it is not deterministic. **Mechanism, from reading the source at the pinned
-    mmtk-core `892056da7a` (NOT yet reproduced locally):** the merge enabled the mmtk-core feature
-    `marksweep_as_nonmoving` (binding `4169524e68`); since mmtk-core `c9d9a4af5b`,
-    `CommonPlan::release_nonmoving_space` arms the counter (`MarkSweepSpace::release`) only when
-    `full_heap`; LXR's `release` always calls `self.common.release(tls, false)`; but the mutator-side
-    `common_release_func` skips the free-list release only when `is_nursery_gc()`, which is false for
-    every non-generational plan, so each mutator's `FreeListAllocator::release` calls
-    `release_packet_done` against an unarmed counter. StickyImmix and Bactrian had the same bug class
-    fixed in the merge; LXR did not. **Unknown:** which LXR collections hit it — tests that call
-    `Gc.full_major` (`finaliser.ml`, `globroots.ml`, `gcwords.ml`) still pass under LXR, so either not
-    every collection reaches the path or those calls do not produce one. The fix belongs in mmtk-core (arm and gate LXR consistently).
-    Repro: `env MMTK_PLAN=LXR MMTK_HEAP_SIZE_MB=512 make -C testsuite one TEST=tests/misc/sorts.ml
-    TIMEOUT=120`. → NOTES 2026-09-29 "all-plans testsuite triage".
+14. **LXR release-counter underflow abort (regression from the PR 23 merge) — FIXED 2026-09-29**
+    (mmtk-core PR 2, merge `045f121143`, fix `085bc3be48`; GH issue 25). **Symptom:** after the
+    merge, 65-69 tests under `MMTK_PLAN=LXR` aborted in CI with `pending_release_packets is still
+    18446744073709551615` (`epilogue.rs:11`), in runs 36534216189 and 36537448938 (0 times in the
+    pre-merge baseline run 28657254889). **Cause:** the binding enabled `marksweep_as_nonmoving`,
+    and LXR never armed the mark-sweep space's release counter (`common.release(tls, false)`), but
+    each mutator still decremented it (`is_nursery_gc()` is false for LXR). **Fix:** LXR prepares
+    and sweeps that space as a full-heap collection at Full pauses only (the only pause whose backup
+    trace marks it), and runs the mutator-side free-list release only then. **Verified locally**
+    (macOS arm64, `MMTK_HEAP_SIZE_MB=512`): `misc/sorts.ml` and `lazy/lazy3.ml` abort with the panic
+    on the unfixed submodule and pass on the fix; the full LXR suite on the fix gives 1432 passed,
+    53 skipped, 10 failed, with no panic; GenImmix on the fix gives 1442 passed, 0 failed. **Not
+    validated:** the Full-only sweep with objects actually in that space
+    (`MMTK_MEDIUM_NONMOVING=1`), and `cargo clippy`. The remaining LXR failures are tracked in item 17.
+    → NOTES 2026-09-29 "LXR abort fix verified".
 
 15. **GenCopy: `misc/darkening_work.ml` (native) fails since the merge (open; cause not established).**
     Output `error: writes caused 4 more cycles` instead of `ok` (the test compares
@@ -537,6 +531,22 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     test/CI-configuration matter (heap size or per-test timeout for these plans), not a GC bug as far
     as the logs show. Repro: `env MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=4096 make -C testsuite one
     TEST=tests/weak-ephe-final/weaklifetime.ml TIMEOUT=600`, and time it. → NOTES 2026-09-29.
+
+17. **LXR gives silently wrong results on a small allocation probe (open; pre-existing; priority
+    above item 15).** A probe that keeps 1000 arrays (64 words each) in a 1000-word table while
+    allocating 3,000,000 short-lived arrays should print 1501500000 (GenImmix does). Under LXR it
+    prints 2813004516 at a 64 MiB heap and 1842208410 at 512 MiB. Builds from before the merge
+    (superproject `cbc66e3efd`, submodule `ed02eafc6b`, built 2026-07-03) print the same wrong sums,
+    so it is caused by neither the merge nor the item-14 fix. Cause unknown; under investigation; an
+    issue is to be filed. **Consequence:** the earlier LXR (RQ1) results were validated with the
+    binarytrees/kb checksums, which do not exercise this pattern, so treat LXR results as
+    provisional until this is understood. **Also untriaged (LXR, local run on the item-14 fix):**
+    besides the 5 tests that already failed pre-merge in CI (`forbidden`, `publish`,
+    `gc_mark_stack_overflow`, `weaklifetime`, `weaktest`), `churn`, `domain_parallel_spawn_burn`,
+    `weak_array_par` and one `test.ml` fail with exit -11 or exit 2; whether they are new is unknown
+    (512 MiB on macOS vs CI's 4 GiB on Linux). And an explicit `Gc.full_major ()` produces no
+    collection under LXR (`[mmtk] GCs: 0`, even at a 32 MiB heap, fixed and unfixed builds);
+    whether that is intended is not known. → NOTES 2026-09-29 "LXR abort fix verified".
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
@@ -642,7 +652,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
   rounds 23–32.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (planned 2026-06-25; P3–P5 since LANDED
   on mainline by 2026-07-02 — `MMTK_PLAN=LXR` is wired, single- and multi-domain validated at the time
-  (aborts in 65-69 tests since the 2026-09-29 merge, open item 14), see the intro above
+  (now provisional: open silent-wrong-results bug, item 17), see the intro above
   and NOTES 2026-06-30 / 2026-07-02; the phase plan below is kept as the design record).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write
@@ -780,7 +790,7 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
 | `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (**byte + native**) — SATB; `lazy`-clean; **Q3 fixed** |
 | `Bactrian` *(fork)* | copying nursery + SATB-marked Immix mature (sliced marking + incremental sweep) | nursery yes; mature only at `Full` | ✅ (byte + native) — RQ7; see `gc/mmtk/BACTRIAN.md` |
-| `LXR` *(fork)* | reference counting on Immix + backup trace for cycles | yes | ✅ (byte + native) — RQ1, experimental; needs pinned `MMTK_HEAP_SIZE_MB`; ⚠ **aborts in 65-69 tests since 2026-09-29** (open item 14) |
+| `LXR` *(fork)* | reference counting on Immix + backup trace for cycles | yes | ✅ (byte + native) — RQ1, experimental; needs pinned `MMTK_HEAP_SIZE_MB`; ⚠ **silent wrong results on an allocation probe — results provisional** (open item 17) |
 
 **Native** runs **9 plans** — `Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR` (in-place Immix-block TLAB),
 `GenImmix`/`GenCopy`/`Bactrian` (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) —

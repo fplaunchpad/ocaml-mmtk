@@ -785,8 +785,8 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
   **ConcurrentImmix + SATB (RQ1's enabler) landed bytecode + native**; plan-swapping is clean. What remains
   is per-RQ research, not bring-up.
 - **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier, and (2026-07-02) the **LXR** RC plan
-  (`MMTK_PLAN=LXR`, experimental; aborts in 65-69 testsuite programs since the 2026-09-29 merge —
-  ROADMAP open item 14). *Remaining:* a richer latency harness and a mutation-rate /
+  (`MMTK_PLAN=LXR`, experimental; results provisional — it gives silently wrong results on an
+  allocation probe, ROADMAP open item 17). *Remaining:* a richer latency harness and a mutation-rate /
   lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add

@@ -5,6 +5,69 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-29 - LXR abort fix verified; LXR silent-wrong-results probe (KNOWN FAILURE)
+
+**Fix.** mmtk-core PR 2 (merge `045f121143` on `0.32-ocaml`, fix commit
+`085bc3be48`; GH issue 25) fixes the LXR `pending_release_packets`
+underflow from the triage entry below. LXR now prepares and releases the
+mark-sweep NonMoving space as a full-heap collection at Full pauses only,
+the only pause whose backup trace marks it (`LXR::prepare` / `LXR::release`
+in `src/plan/lxr/global.rs`). `lxr_mutator_release` runs
+`common_release_func`, which under `marksweep_as_nonmoving` only releases
+the NonMoving free-list allocator, at Full pauses only. LOS and immortal
+keep `full_heap = false`. The only shared-code change is that
+`CommonPlan::{prepare,release}_nonmoving_space` become `pub(crate)`. The
+superproject pin moves `892056da7a` -> `045f121143`; the merge's tree is
+identical to `085bc3be48`'s.
+
+**Verification** (main session, macOS arm64, superproject `89d0602e12` +
+submodule `085bc3be48`, `MMTK_HEAP_SIZE_MB=512`):
+- A/B: `tests/misc/sorts.ml` and `tests/lazy/lazy3.ml` under
+  `MMTK_PLAN=LXR` abort with `pending_release_packets is still
+  18446744073709551615` on the unfixed submodule (`892056da7a`) and pass
+  on the fix. So the regression is reproduced locally and the fix is
+  confirmed for the panic.
+- Full testsuite, LXR, fixed build: 1432 passed, 53 skipped, 10 failed,
+  0 occurrences of the panic.
+  - 5 of the failures already failed under LXR in the pre-merge CI
+    baseline: `forbidden`, `publish`, `gc_mark_stack_overflow`,
+    `weaklifetime`, `weaktest`.
+  - The other 4, NOT triaged: `churn`, `domain_parallel_spawn_burn`,
+    `weak_array_par` and one `test.ml`, with exit -11 or exit 2. This run
+    is 512 MiB on macOS vs CI's 4 GiB on Linux, so whether these are new
+    is unknown.
+- Full testsuite, GenImmix, fixed build: 1442 passed, 53 skipped, 0 failed.
+- Not validated: the Full-only sweep with objects actually in the
+  mark-sweep space (`MMTK_MEDIUM_NONMOVING=1`), and `cargo clippy`.
+
+**The triage's unknown is resolved: `Gc.full_major` is a no-op under
+LXR.** A program that allocates and calls `Gc.full_major ()` reports
+`[mmtk] GCs: 0` under LXR, on both the fixed and unfixed builds, even at
+a 32 MiB heap. Tests that rely on it (`finaliser.ml`, `globroots.ml`,
+`gcwords.ml`) therefore never reached the failing path, which is why they
+passed. Why no collection happens, and whether that is intended, is not
+known.
+
+**KNOWN FAILURE: LXR silently computes a wrong result (pre-existing;
+ROADMAP open item 17).** An allocation probe keeps 1000 arrays (64 words
+each) in a 1000-word table while allocating 3,000,000 short-lived
+arrays. The expected sum is 1501500000.
+- GenImmix prints 1501500000.
+- LXR prints 2813004516 at `MMTK_HEAP_SIZE_MB=64` and 1842208410 at 512.
+- Builds from before the merge (superproject `cbc66e3efd`, submodule
+  `ed02eafc6b`, built 2026-07-03) print the same wrong sums. So neither
+  the merge nor the fix above caused it.
+
+The probe's exact source and command lines were not handed to this entry;
+add them when the issue is filed. Cause unknown; under investigation.
+
+Consequence: the LXR (RQ1) results so far were validated with the
+binarytrees/kb checksums, which do not exercise this pattern (a
+long-lived table of arrays alongside heavy short-lived churn). Treat LXR
+results as provisional until this is understood.
+
+---
+
 ## 2026-09-29 - all-plans testsuite triage after the PR 23 merge (KNOWN FAILURES)
 
 `Testsuite (all GC plans)` on `ddc53f4007` (run 36534216189) failed. The
@@ -84,6 +147,10 @@ mmtk-core (arm and gate the MS-nonmoving release consistently for LXR).
 
 Repro: `env MMTK_PLAN=LXR MMTK_HEAP_SIZE_MB=512 make -C testsuite one
 TEST=tests/misc/sorts.ml TIMEOUT=120` (sorts failed byte + native in CI).
+
+**UPDATE (2026-09-29): FIXED** by mmtk-core PR 2 (`045f121143`, fix
+`085bc3be48`; GH issue 25). The A/B reproduction, the testsuite counts, and
+the resolved `Gc.full_major` unknown are in the entry above.
 
 **2. GenCopy `darkening_work.ml` (new; cause not established).**
 The test counts `Gc.quick_stat().major_collections` over 10,000 iterations
