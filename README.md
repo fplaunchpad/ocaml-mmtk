@@ -1,306 +1,278 @@
-# OCaml + MMTk (`ocaml-mmtk`)
+# OCaml + MMTk
 
-A fork of [OCaml](https://github.com/ocaml/ocaml) 5.5 whose garbage collector is
-[MMTk](https://www.mmtk.io), the Memory Management Toolkit. MMTk is the **only**
-collector and is **always on** — there is no opt-out and no stock OCaml GC left in
-the tree. A normal `./configure && make` builds the full compiler, both **bytecode**
-and **native**, on an MMTk-managed heap; it self-hosts (the compiler bootstraps and
-its documentation builds).
+`ocaml-mmtk` is a fork of **OCaml 5.5.0** with
+[MMTk](https://www.mmtk.io), the Memory Management Toolkit, as its only garbage
+collector. It builds the bytecode and native compilers, bootstraps itself, and
+supports multicore programs using `Domain.spawn` and effect handlers. Choose a
+collector at startup with `MMTK_PLAN`; the default is **GenImmix**.
 
-This is also a **GC-research platform**: one functional, immutable-by-default,
-multicore, effect-handler language on which MMTk's many collectors can be compared
-on a common substrate. The research agenda lives in
-[`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md).
+**Research prototype:** native code using the default plan has a reproduced
+silent-corruption bug; see [known limits](#what-works-and-what-is-still-open).
 
-- **Base:** OCaml `5.5.0` (final). **Collector:** MMTk, always on, default plan **GenImmix** (copying nursery + Immix mature — the generational, stock-OCaml-faithful plan).
-- **Binding:** in-tree at [`gc/mmtk/`](gc/mmtk), built against
-  [`mmtk-core`](https://github.com/mmtk/mmtk-core) `0.32` — a small in-tree fork
-  (`gc/mmtk-core`) carrying OCaml-specific deltas (e.g. it skips redundant
-  allocation-time zeroing).
-- Collection is multi-domain, parallel, and stop-the-world; moving plans relocate
-  objects and generational plans use a write barrier. Native code allocates from a
-  TLAB aliased to an MMTk Immix block, so it needs no special code generation. Both
-  single- and multi-domain (`Domain.spawn`) programs run.
+## Why this fork exists
 
-> Runs on **x86-64 Linux** and **macOS (arm64)** — bytecode + native, both validated. Heap grows on
-> demand (memory tracks the live set). Performance: see the quick panel below; tuning is the open
-> milestone (M8, [`PERFORMANCE.md`](PERFORMANCE.md)), measured against a vanilla 5.5.0 opam switch.
+This is a platform for studying garbage collection in a functional language.
+OCaml combines precise roots, mostly immutable data, frequent short-lived
+allocation, multiple domains, and captured continuations. These properties let
+us ask how collector trade-offs change across workloads and language designs.
 
-## Status at a glance
+The central questions are:
 
-- **Done:** the full bring-up (build, NoGC → MarkSweep → Immix, generational plans,
-  multi-domain, native code, weak/ephemeron/finaliser support, the testsuite); **excising
-  the stock GC** (no stock minor/major collector, shared heap, or minor-heap arena remains);
-  advancing the base to **OCaml 5.5.0 final**; the MMTk-native multi-domain stop-the-world
-  handshake; **retiring OCaml's own all-domains STW** so MMTk's `stop_all_mutators` is the
-  *sole* all-domains rendezvous ("one STW" — the `caml_try_run_on_all_domains` family deleted,
-  −478 lines; GH#15 fixed); and **`ConcurrentImmix`** (bytecode + native) — a concurrent marker
-  with an SATB write barrier, proven clean on `lazy` values and on effect-handler continuations.
-- **In progress:** the macro-benchmark performance campaign + analysis (M8); the LXR /
-  ConcurrentImmix testsuite triage backlog; and the parallel-scaling programme in
-  [`SCALABILITY.md`](SCALABILITY.md) (the `Domain.join` crash — GH#3 — is **fixed**: remembered-set
-  buffers were lost at domain termination; flushed at deregister as of 2026-07-02).
-- **Known tails:** a flagged memprof colour read and `runtime_events` emission under MMTk
-  (broken — see ROADMAP / FAQ). (Weak-clear timing under the generational plans — GH#5 — is
-  fixed: full GC under mature pressure + `Gc.major_collections` counts full GCs only.)
-- **Testsuite triage** is complete (item #19): every failure is triaged with evidence — **0 non-flaky
-  failures** under GenImmix/Immix, with 58 known-unsupported/timing tests disabled via a single greppable
-  first-line marker, `(* MMTk DISABLED: <reason> [category] *)`, replacing the `(* TEST *)` block
-  (`grep -rn 'MMTk DISABLED' testsuite/tests` enumerates them; per-test evidence in
-  [`gc/mmtk/TESTSUITE_TRIAGE.md`](gc/mmtk/TESTSUITE_TRIAGE.md)). The only genuine MMTk semantic gaps are
-  two deterministic signal-delivery poll-point diffs (a signal lands at a later safepoint, not lost).
+- Does low pointer mutation make low-latency collection cheap without adding work
+  to every pointer read?
+- When do copying, in-place collection, concurrent marking, or reference counting
+  suit OCaml's allocation and mutation patterns?
+- How much of a performance difference comes from collector policy, and how much
+  comes from the runtime binding and MMTk's shared machinery?
+- How do domain coordination and continuation scanning affect throughput and
+  pause time as programs scale?
 
-The milestone-by-milestone plan and current status are in
-[`ROADMAP.md`](ROADMAP.md).
+[`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) develops the agenda. Two research
+plans make these comparisons concrete: **Bactrian** brings the collector
+architecture closer to stock OCaml, while **LXR** explores reference counting.
+Their differences from stock OCaml and the original LXR design are part of the
+experiments.
 
-### Performance (quick panel)
+## What works, and what is still open
 
-8 stdlib-only sequential CLBG/sandmark programs, native, median of 5 reps on an Apple M4 Pro. Compared
-**at memory parity, reporting both wall time AND max RSS** — a plan that "wins" on wall by using more
-memory is not a win. The tracing plans (vanilla 5.5.0, GenImmix, Immix, ConcurrentImmix, Bactrian) run at
-their natural dynamic heap; `LXR` — which has no dynamic-heap trigger — is pinned per bench at that same
-footprint (`--heap parity`). Run: `uv run quick/quickbench.py --vanilla <dir> --plans "GenImmix Immix
-ConcurrentImmix Bactrian" --heap dynamic …` then a second pass `--plans LXR --heap parity`.
+Bytecode and native execution have been validated on **x86-64 Linux** and
+**Apple Silicon macOS**, including moving and generational collectors,
+multi-domain collection, weak references, ephemerons, and finalisers. Native
+allocation uses the existing compiler fast path, backed by MMTk allocation
+regions. The stock OCaml collector has been removed; compare against a separate
+vanilla OCaml 5.5.0 build.
 
-**Wall** — × vs vanilla 5.5.0 (lower is better):
+On **2026-09-29**, [post-merge Linux CI](https://github.com/fplaunchpad/ocaml-mmtk/actions/runs/36534216189),
+covering bytecode and native variants, reported no failures among 1495 tests
+considered per plan under GenImmix, StickyImmix, SemiSpace, and Bactrian.
+GenCopy failed `misc/darkening_work.ml`; Immix and ConcurrentImmix hit the
+`weaklifetime.ml` timeout, addressed by a pending
+[test heap-pinning change](https://github.com/fplaunchpad/ocaml-mmtk/pull/27).
+The suite includes disabled cases for unsupported features and GC timing
+differences. Memprof is unsupported; [`runtime_events` GC-event emission](https://github.com/fplaunchpad/ocaml-mmtk/issues/20)
+is unimplemented, and [signal-delivery poll points](https://github.com/fplaunchpad/ocaml-mmtk/issues/19)
+differ from stock OCaml in two tests.
 
-![sequential wall ratio vs vanilla](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_ratio.png)
+**Known correctness limits (2026-09-29):** LXR has a documented
+[silent wrong-results bug](https://github.com/fplaunchpad/ocaml-mmtk/issues/26), so
+its results are provisional. The [native `Array.fill` path](runtime/array.c) also
+lacks the generational write barrier: silent corruption has been reproduced
+under **GenImmix (the default)**, StickyImmix, and GenCopy. A fix is in progress.
+Programs using `Thread` and blocking sections have a separate
+[coordination audit](https://github.com/fplaunchpad/ocaml-mmtk/issues/24): source
+reading identifies possible unsafe execution during GC and a thread-exit GC
+hang, but neither has been reproduced.
 
-**Max RSS** — MiB, the memory each plan actually uses (lower is better):
+Explicit `Gc` requests are also under investigation: `Gc.major`, `Gc.full_major`,
+and `Gc.compact` can return before their collection runs, while `Gc.minor` does
+not trigger MMTk in the tested configurations. Current dynamic heap sizing can
+also grow the budget despite a stable live set, reproduced under Immix; its fix
+has not landed. These gaps matter when interpreting tests and benchmark results.
 
-![sequential max RSS](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/seq_rss.png)
+[`ROADMAP.md`](ROADMAP.md) tracks the work;
+[`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) contains dated fixes, validation, and known
+failure cases. Consult the latest entries for current evidence.
 
-<details>
-<summary><b>Sequential table</b> — wall (× vs vanilla) / max RSS (MiB)</summary>
+## Build and run
 
-| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
-|---|--:|--:|--:|--:|--:|--:|
-| binarytrees | 1.00× / 92 | 1.40× / 213 | 2.32× / 190 | 0.91× / 288 | 1.08× / 257 | 0.76× / 309 |
-| nbody | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.00× / 46 | 1.00× / 26 | 1.03× / 73 |
-| fannkuchredux | 1.00× / 2 | 1.00× / 26 | 1.00× / 42 | 1.01× / 46 | 1.00× / 26 | 1.03× / 73 |
-| spectralnorm | 1.00× / 5 | 0.96× / 82 | 1.11× / 94 | 1.13× / 90 | 0.97× / 83 | 1.10× / 218 |
-| mandelbrot | 1.00× / 2 | 1.01× / 26 | 1.01× / 42 | 1.01× / 46 | 1.01× / 26 | 1.11× / 73 |
-| matrix_multiplication | 1.00× / 19 | 0.87× / 38 | 0.87× / 70 | 0.88× / 78 | 0.87× / 38 | 0.88× / 122 |
-| LU_decomposition | 1.00× / 17 | 1.04× / 99 | 1.26× / 98 | 1.30× / 106 | 1.04× / 99 | 1.17× / 258 |
-| kb | 1.00× / 8 | 1.20× / 95 | 1.08× / 103 | 0.94× / 147 | 1.22× / 95 | 1.76× / 199 |
-
-</details>
-
-**Wall.** **`Bactrian` (RQ7) — the stock-*architecture* plan (copying nursery + concurrently-marked,
-(near-)non-moving Immix mature + SATB deletion barrier — vanilla's collector *architecture*, though not
-its implementation: vanilla marks AND sweeps in mutator slices with only tiny colour-flip STW sections,
-while Bactrian marks on GC workers and still sweeps STW at FinalMark; since 2026-08-10 it also enforces
-stock's `Max_young_wosize` law — ≥ 2056 B blocks are born in the mature space, never transiting the
-nursery, see `MMTK_MEDIUM_NONMOVING` in **Configuration**) —
-tracks vanilla within ~8% on 7 of 8 benches** (`binarytrees` 1.08× where GenImmix is 1.40×; `LU` 1.04×;
-`spectralnorm` 0.97×; `matmul` 0.87×), with `kb` the lone loss (1.22×, = GenImmix — the per-minor-GC
-framework floor, see NOTES 2026-06-24/07-02). That is the RQ7 apples-to-apples readout: **most of the
-MMTk-vs-stock gap measured on the other plans is collector-design difference, not MMTk framework
-overhead.** `LXR` (reference counting) is **fastest on allocation-heavy `binarytrees`** (0.76× — in-place
-RC avoids the copying-nursery and re-marking costs) but **slowest on `kb`** (1.76× — the cyclic garbage
-its backup trace must sweep). On `kb`, ConcurrentImmix is now at 0.94× (marking off the critical path);
-the generational plans pay the minor-GC pause floor.
-
-**Memory.** `LXR` carries the **highest RSS across the board** — a fixed ~48 MiB whole-heap RC-metadata tax
-(`RC_TABLE`) plus proportional overhead: ~73 MiB on the tiny-live compute benches (vs GenImmix's 26,
-vanilla's 2) and ~1.5× the tracing plans on the alloc-heavy ones. This is the RQ1 trade-off — RC buys
-throughput on acyclic churn at a real memory cost. `Bactrian`'s footprint matches GenImmix's (same nursery
-+ mature spaces; its concurrent cycles add no measurable RSS on the sequential panel). Every MMTk plan
-still carries a multiple of vanilla's RSS: the compute-bench numbers are exactly each plan's
-**program-independent startup floor** (an empty program measures 26 MiB under GenImmix/Bactrian,
-42 under Immix, 46 under ConcurrentImmix vs vanilla's ~2 — side-metadata tables mapped at init plus
-initial chunk commits; the plan deltas are their extra metadata, e.g. LXR's ~48 MiB RC_TABLE), and the
-alloc-heavy benches add the live×2.2 dynamic-heap headroom + Immix block slack on top — the open
-memory-premium tail (M8).
-
-**Parallel** — strong scaling (a fixed total work split across domains; ideal speedup = #domains) on 4
-stdlib-only `Domain.spawn` benches (now including effect-handler `chameneos_redux`), domains 1→8 on the
-M4 Pro (8 performance cores). Tracing plans run their dynamic heap; `LXR` is pinned per bench at an
-adequate (non-thrashing) heap, with its peak RSS reported alongside.
-
-![speedup vs domains](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/speedup_domains.png)
-
-**Why the parallel gap existed — measured, then fixed twice, then re-measured** (`SCALABILITY.md`
-UPDATEs 4–6): vanilla completes **zero major cycles** on these runs, while MMTk (a) *manufactured*
-domain-scaled major-GC work (one exhaustive full GC per `Domain` termination + a fixed-cadence trigger
-— fixed by the **allocation-paced trigger**, with the lost-remembered-set fix it exposed, GH issue 3),
-and (b) ran all domains against a **flat shared nursery budget**, so minor-GC frequency scaled with the
-aggregate allocation rate and short-lived data was promoted at every too-early shared fill — fixed by
-**per-domain nursery scaling** (stock parity: the default budget is now N×2–N×16 MiB, latched lazily at
-domain spawn/termination). The second fix is the decisive one: it cut `par_binarytrees` GenImmix copied
-objects **9×** and made the generational plans scale:
-
-![GC work manufactured vs domains — before/after](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs/gcwork_domains.png)
-
-<details>
-<summary><b>Parallel table</b> — speedup T(1)/T(8) / peak RSS at 8 domains (MiB)</summary>
-
-| bench | vanilla | GenImmix *(default)* | Immix | ConcurrentImmix | Bactrian | LXR |
-|---|--:|--:|--:|--:|--:|--:|
-| par_matmul | 6.75 / 20 | 3.46 / 108 | 3.44 / 78 | 3.75 / 79 | 3.52 / 107 | 3.45 / 123 |
-| par_spectralnorm | 5.04 / 21 | 3.41 / 318 | 2.89 / 98 | 2.07 / 97 | 3.38 / 319 | 2.79 / 225 |
-| par_binarytrees | 3.98 / 519 | **5.62 / 550** | 3.20 / 356 | 0.31 / 516 | 3.40 / 561 | 0.27 / 574 |
-| chameneos_redux | 4.35 / 294 | 0.47 / 1707 | 0.30 / 335 | 0.32 / 331 | 0.45 / 1724 | 0.39 / 389 |
-
-</details>
-
-**The generational anti-scaling is gone — GenImmix now matches vanilla's absolute wall on the
-alloc-heavy bench.** On `par_binarytrees` at 8 domains GenImmix runs **395 ms vs vanilla's 406 ms**
-(speedup 5.62× vs its own d=1 — super-linear because the per-domain nursery lets short-lived allocation
-die young: copied objects fell 9×, and per-domain scaling *grows the total budget* the way stock's
-per-domain 2 MiB arenas do). `Bactrian` scales too (0.67 → 3.40×, RSS capped at 561 MiB — down from
-1689 before the paced trigger). The residual gaps, in order: (1) the **minor-pause rendezvous floor**
-on compute benches — the MMTk plans sit in the 2.8–3.8× band vs vanilla's 5–6.7× because every minor
-pause is still a global mutators+workers rendezvous (~1 ms at high domain counts vs stock's light
-barrier; `SCALABILITY.md` culprits list); (2) plans without a scalable nursery story: `ConcurrentImmix`
-(0.31×) and `LXR` (0.27×) still anti-scale on alloc-heavy work — mature reclamation is stop-the-world
-in this fork regardless of collector algorithm, and reference counting does not rescue it (RQ1); and
-(3) **effect-handler promotion churn** — new on the panel now that `chameneos_redux` runs on every
-plan. The generational plans are pathological there (GenImmix d=8 wall 12.3 s vs vanilla's 0.32 s,
-RSS 1.7 GB; ~4× even single-domain), and the control-tested cause is **promotion volume × the
-per-promoted-object cost**: parked continuations keep 18% of minor allocation alive (~22 M promoted
-objects — stock promotes the same volume, by design), and each promotion costs ~195 ns vs
-binarytrees' 89 ns vs stock's ≤40 — the framework's copy-path tax doubled by the cont/fiber scan
-machinery (frame-descriptor walks + per-slot revalidation on every fiber-stack slot). Controls
-eliminated the seductive wrong answers: an 88 M-`caml_modify` mutation storm *without* fibers runs
-**faster than vanilla** under GenImmix (remset volume is free), and in-place StickyImmix pays the
-same (not the copying policy). Non-generational `Immix` sidesteps promotion entirely and runs
-chameneos single-domain in 0.90 s, **beating vanilla's 1.26 s** — see `gc/mmtk/NOTES.md`
-2026-07-02 for the fix ranking (nursery-trace fast path, batched cont-stack tracing); at 8 domains
-the per-minor global rendezvous stacks on top, which is why every plan still loses there.
-
-**RQ1/RQ7 (parallel).** With architecture matched (`Bactrian`) *and* nursery capacity matched
-(per-domain scaling), the generational MMTk plans now reproduce stock's alloc-heavy scaling on this
-panel — strong evidence the remaining framework gap is concentrated in the **pause rendezvous
-machinery** (worker-pool wake/park per pause) and the **fiber scan path**, not in tracing or barriers.
-`LXR` remains the sequential binarytrees winner (0.76×) but pays for STW mature reclamation in
-parallel. Turing d=24 revalidation of the scaling fix is owed (SCALABILITY.md has the M4 A/B and the
-mechanism; the macro-bench campaign in `PERFORMANCE.md` is authoritative). `chameneos_redux` now runs on
-**every** plan including LXR (the fiber-stack slot-unlog guards are landed; only a rare, rr-resistant
-LXR race at d≥8 remains open — `gc/mmtk/NOTES.md`), which is what put the fiber-churn pathology on the
-panel where it belongs.
-
-## Building
-
-Exactly like upstream OCaml — the MMTk static library is compiled with `cargo` and
-linked in automatically:
+You need the usual [OCaml build prerequisites](INSTALL.adoc), plus **stable Rust
+and Cargo** on your `PATH`. The MMTk binding builds and links automatically.
 
 ```sh
+git clone --branch 5.5+mmtk https://github.com/fplaunchpad/ocaml-mmtk.git
+cd ocaml-mmtk
+git submodule update --init gc/mmtk-core
 ./configure
-make            # builds the world; gc/mmtk is built and linked for you
-make world.opt  # also build the native compiler
+make -j4 world.opt
 ```
 
-Beyond the usual OCaml build prerequisites (see [`INSTALL.adoc`](INSTALL.adoc)) you
-need **Rust + Cargo** (stable) — the build runs `cargo` to produce the binding.
+`world.opt` builds both bytecode and native compilers and libraries. The
+`gc/mmtk-core` submodule pins the collector implementation; `make` also initializes
+it when missing. Initialize it explicitly before building the Rust binding with
+Cargo directly.
 
-## Running
-
-MMTk is on by default — build and run as usual:
+From the build directory, compile and run a small program with both runtimes:
 
 ```sh
-OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun ./ocamlc myprog.ml -o myprog.byte
-OCAMLLIB=$PWD/stdlib ./runtime/ocamlrun myprog.byte
+cat > hello.ml <<'ML'
+let () = print_endline "Hello from OCaml + MMTk"
+ML
+export OCAMLLIB="$PWD/stdlib"
+./ocamlc.opt hello.ml -o hello.byte
+./runtime/ocamlrun hello.byte
+./ocamlopt.opt hello.ml -o hello.native
+./hello.native
+
+# Select a different collector without rebuilding.
+MMTK_PLAN=Immix ./hello.native
+MMTK_PLAN=LXR MMTK_HEAP_SIZE_MB=512 ./hello.native
 ```
 
-> **Linux:** run under `setarch "$(uname -m)" -R` (disables ASLR) to avoid an
-> occasional start-up abort (`failed to mmap meta memory`).
+On Linux, an occasional startup abort (`failed to mmap meta memory`) can be
+avoided by disabling ASLR for the command:
 
-### Configuration
+```sh
+setarch "$(uname -m)" -R make -j4 world.opt
+setarch "$(uname -m)" -R ./hello.native
+```
+
+## Choose a collector
+
+These plans support **both bytecode and native code**:
+
+| Plan | What it lets you compare |
+|---|---|
+| **GenImmix** (default) | Generational collection: a copying nursery for young objects, with an Immix mature heap. Collections stop all mutators. |
+| **Immix** | Whole-heap mark-region collection with optional evacuation to reduce fragmentation; stop-the-world. |
+| **StickyImmix** | Generational collection with an in-place nursery; stop-the-world. |
+| **Bactrian** | Copying nursery and Immix mature heap; adaptive full or sliced stop-the-world major collection and incremental sweep by default. Optional worker-concurrent marking. |
+| **ConcurrentImmix** | Concurrent marking with a deletion write barrier; mature reclamation remains stop-the-world. |
+| **LXR** | In-place reference counting on Immix, with stop-the-world backup tracing for cycles. **Known wrong results; provisional. Requires a pinned heap.** |
+| **GenCopy** | Copying nursery and copying mature heap; stop-the-world. |
+| **SemiSpace** | Whole-heap copying between two spaces; stop-the-world. |
+| **NoGC** | Allocation without reclamation, useful for bounded experiments. |
+
+The remaining supported plans are **bytecode-only**:
+
+| Plan | Purpose |
+|---|---|
+| **MarkSweep** | Non-moving collection using a free-list allocator. |
+| **MarkCompact** | Sliding compaction, requiring per-object bookkeeping absent from the native allocation fast path. |
+| **PageProtect** | Debugging collector with one page per object. |
+
+The stock MMTk **Compressor** plan is not wired into this binding.
+
+**Bactrian and stock OCaml.** Both use a copying nursery and a mature heap with a
+barrier that preserves old references during marking. Bactrian executes marking
+and sweeping on GC workers; its default policy spreads sufficiently costly
+majors over stop-the-world nursery pauses, including pauses requested to advance
+marking or sweeping when allocation goes directly to the mature heap. Short
+predicted majors, explicit full collections, and allocation emergencies can
+collect the whole heap in one stop-the-world pause (a **Full**).
+Stock OCaml performs major work in mutator slices, and uses a different mature
+allocator. Bactrian's Immix mature heap can also move objects during a Full.
+These differences are part of the comparison, not eliminated framework costs.
+
+**LXR and the paper.** This is a simplified, adapted port of the PLDI'22 LXR
+design. Its reference-counting pauses and backup tracing are stop-the-world;
+it does not reproduce the paper's concurrent backup collector. The backup is
+requested when an RC pause reclaims too little at high occupancy, or leaves the
+heap critically full. Earlier validation included single-domain runs and
+multi-domain `par_binarytrees` at 1–32 domains, but those checks did not exercise
+the pattern now known to give wrong results. The
+[release-counter abort](https://github.com/fplaunchpad/ocaml-mmtk/issues/25) was
+fixed in the current MMTk submodule; that fix does not resolve issue 26.
+LXR participates in the
+[cross-plan testsuite workflow](.github/workflows/testsuite-plans.yml), while
+remaining an experimental research plan.
+
+## Configure a run
+
+Environment variables apply at process startup. Sizes ending in `_MB` are MiB;
+`MMTK_NURSERY` uses raw bytes.
 
 | Variable | Default | Meaning |
-|----------|---------|---------|
-| `MMTK_PLAN` | `GenImmix` | GC plan — see **GC plans** below. |
-| `MMTK_HEAP_SIZE_MB` | _dynamic_ | Pin a fixed heap (MiB). Unset: the heap grows on demand (`heap = live × 2.2`, clamped 32 MiB..RAM), like stock OCaml. |
-| `MMTK_MIN_HEAP_MB` | `32` | Dynamic-heap floor (MiB). The smallest the `live × 2.2` target may shrink to; a too-low floor lets a nursery GC fire mid-build for a low-live/high-alloc program, promoting the half-built object → the generational write barrier then dominates (GH#6; matmul-768 was 19.6s at 16 MiB, 3.2s at 32 MiB). Only applies to the default dynamic heap. |
-| `MMTK_NURSERY` | `Bounded:2097152,16777216` (2–16 MiB) **× live domain count** | Generational-plan nursery (GenImmix/GenCopy/StickyImmix/Bactrian), bounded/absolute and commit-on-demand (adapts down to fit small heaps). The default budget is scaled by the live domain count (N×2–N×16 MiB — stock parity: stock's minor arenas are 2 MiB *per domain*; the max was 64 MiB until 2026-08-12 — the nursery-policy sweep showed a 64 MiB frontier wraps outside the LLC, making fresh-allocation stores DRAM-cold and LU a 1.23× outlier, where 16 MiB is the balanced panel point, SHAPE rounds 26–28), latched at domain spawn/termination and applied lazily at the next trigger check; the dynamic heap gets matching headroom (`SCALABILITY.md` UPDATE 6: par_binarytrees d=8 5.7× faster). On a heap that cannot grow (a pinned `MMTK_HEAP_SIZE_MB`, or the dynamic heap at its maximum) the scaled budget is capped at a quarter of the heap (NOTES 2026-09-28). An explicit pin is never scaled; `MMTK_NURSERY_PER_DOMAIN=0` disables scaling the default. **Value must be raw BYTES** — e.g. `Fixed:33554432`, `Bounded:2097152,134217728`; the `2m,128m` suffix form does **not** parse (silently falls back to the default). |
-| `MMTK_THREADS` | _nproc_ | GC worker threads. **Set `MMTK_THREADS=1` for single-/few-domain runs** — the `nproc` default oversubscribes and slows high-collection workloads (a domain-aware pool is the open fix). |
-| `MMTK_MEDIUM_NONMOVING` | `1` under `Bactrian`, else `0` | Stock's `Max_young_wosize` law: ≥ 2056 B blocks (over `Max_young_wosize` incl. header, below the 16 KiB LOS threshold) are **born in the mature Immix space**, never transiting the nursery — exactly stock's `caml_alloc_shr` placement for the band. Default ON for `Bactrian` (measured: matmul-768 1.03× vanilla and nursery-independent vs a 1.25–1.89× nursery-dependent alignment lottery; bt/kb/LU neutral — SHAPE.md round 23). Off elsewhere (other plans map the band to the common mark-sweep space, unmeasured). `0`/`1` overrides either way. |
-| `MMTK_OVERFLOW_PHASE_LINES` | `16` | mmtk-core: fresh Immix *overflow* blocks start a rotating number of 256 B lines in (mutator allocators only), instead of always at the 32 KiB-aligned block start. Kills the per-block cache-set phase reset that conflict-thrashes same-sized medium-object streams (matmul LLC-loads 904 M → 58 M = the vanilla floor); stands in for the phase continuity glibc's contiguous arena gives stock. `0`/`1` disables. |
-| `MMTK_MARK_SLICED` | `1` (Bactrian) | **Sliced-STW marking**: all major-cycle marking runs as bounded quanta *inside* nursery pauses (one slice per minor — allocation-paced, stock's mark-slice discipline executed on the GC worker with the world stopped), FinalMark drains the rest. Removes the monolithic 78–122 ms full-GC pauses (bt@2M max pause 8.0 ms vs vanilla's 15.2) *and* avoids worker-concurrent marking's cross-core LLC interference (measured +7.9 G mutator cycles on bt). `0` restores the worker-concurrent/adaptive-STW behaviours (the many-core dial). SHAPE.md round 25. (Round 30 repaired the trigger path so cycles actually fire — see `MMTK_CONC_TRIGGER_PCT` — and gated slicing on nursery size — see `MMTK_SLICE_MAX_NURSERY_MB`.) |
-| `MMTK_MARK_SLICE_MS` | `2` | Per-quantum budget for sliced marking (fractional ok). ~A nursery-pause-length slice at the stock-parity 2 MiB nursery. Floor only: at cycle-trigger time the binding hints a debt-proportional budget per stock's slice law — `(live/rate)/(runway/nursery)` — so a large live set's marking actually completes inside the runway instead of draining in one giant FinalMark (round 30). |
-| `MMTK_CONC_TRIGGER_PCT` | `80` | Concurrent early-trigger clamp: `Bactrian`'s cycle fires at `min(baseline×(1+margin), heap_limit×pct%)`. Without it a margin target above the heap limit can never fire — the heap fills first and every major degrades to an emergency monolithic Full (that was ALL of bt's majors at a fixed 192 MiB heap, and every dynamic heap: 120% growth budget < 150% margin). `0` disables (pure margin law). Round 30. |
-| `MMTK_MARK_RATE_MBPMS` | `1.0` | Assumed mark throughput (MB/ms) for the slice-sizing hint above. ~1.0 measured on the Skylake bench host. |
-| `MMTK_SLICE_MAX_NURSERY_MB` | `4` | Feasibility gate: sliced cycles run only when the nursery is at most this big. A big-nursery config's minors are promotion-bound (~45 ms at n16) — no quantum gets pauses under them, and the monolithic Full costs less total GC time at the same worst-case pause. Applies to MINOR-paced cycles only: a mature-direct (tick-paced) workload’s progress pauses are near-empty nursery collections, small at any cap, so tick-origin cycles bypass this gate (fragmed: 195 ms GC as cycles vs 293 ms as Fulls). The small-nursery configs (≤4 MiB) are the latency dial and get true sliced cycles (bt@2M max pause 130→19 ms). Round 30. |
-| `MMTK_MAX_QUANTUM_MS` | `50` | Second feasibility gate: if the hinted per-pause budget exceeds this (heap too tight for the live set), the cycle degrades to a monolithic Full. |
-| `MMTK_COMPACT_OVERHEAD_PCT` | `100` | Mature-compaction law (stock's `Gc.max_overhead` analog, round 30d): when post-sweep Immix reserved bytes exceed the live bytes the major's trace actually marked by this margin, the next major runs as a **compact-all Full** (every block evacuated, headroom-bounded, freed pages returned to the OS). The only reclaim for line-blind waste: small dead objects interleaved with live ones on the same 256B lines free nothing (mature_mutation: 6.6MB live pinned 120MB; peak now 68). Dense heaps never fire (bt/kb/sp: zero). `0` disables. |
-| `MMTK_MEDIUM_TO` | `immix` | `freelist` routes the pretenured ≥2056B band to the common mark-sweep space — vanilla's reclamation regime. **Sound as of round 31** (the space is now collected only by majors; mid-cycle lazy sweeps are parked; births during marking are allocate-black at object AND block level) but still opt-in: MMTk's free-list allocator costs ~3-4× vanilla's pools per allocation (matmul 1.33→4.52s, LU +26% in the A/B), so the band stays on Immix until the allocator has fast paths. |
-| `MMTK_VERBOSE` | unset | Print MMTk init and a GC summary at exit. |
+|---|---|---|
+| `MMTK_PLAN` | `GenImmix` | Select the collector. |
+| `MMTK_HEAP_SIZE_MB` | Unset | Pin a fixed heap. Otherwise the intended target is about 2.2× the live heap, estimated from collector accounting, with nursery headroom and a physical-RAM ceiling; see the current growth bug above. A heap budget is not an RSS limit. |
+| `MMTK_MIN_HEAP_MB` | `32` | Lower bound for the default dynamic heap target. |
+| `MMTK_NURSERY` | `Bounded:2097152,16777216` | Generational nursery budget: 2–16 MiB per live domain by default. Explicit values are not scaled; for example, `Fixed:8388608`. Unit suffixes such as `2m` do not parse. |
+| `MMTK_NURSERY_PER_DOMAIN` | Enabled | Set to `0` to disable domain scaling of the default nursery. When the heap cannot grow, the scaled minimum is constrained to preserve mature-heap space. |
+| `MMTK_THREADS` | Logical CPU count | GC workers. Try `1` for single-domain experiments; record the worker count when comparing results. |
+| `MMTK_VERBOSE` | Unset | Any value, including `0`, enables initialization details and an exit summary; unset it to disable. |
+| `MMTK_PAUSE_LOG` | Unset | Path for per-pause stop-the-world records, useful while GC-event emission through `runtime_events` is unimplemented. |
+| `MMTK_TRANSPARENT_HUGEPAGES` | `true` on Linux; off elsewhere | Request transparent hugepages on Linux. Record this setting in memory comparisons. |
+| `MMTK_ALLOC_JITTER` | `6` | Vary placement before bump allocations of at least 2 KiB, using up to 63 cache-line pads. `0` disables this padding. |
 
-mmtk-core's own `MMTK_*` options (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`, …) also work.
+Both bounded nurseries and explicit fixed pins have a guard against a nursery
+larger than one quarter of the current heap, including dynamic heaps. A bounded
+nursery still respects its minimum, which can exceed that guard. With one domain
+at the 32 MiB heap floor, the effective default nursery maximum is **8 MiB**.
 
-### GC plans
+MMTk's own options, including `MMTK_GC_TRIGGER` and `MMTK_STRESS_FACTOR`, are also
+available. An explicit `MMTK_GC_TRIGGER` overrides the default dynamic policy;
+a pinned `MMTK_HEAP_SIZE_MB` selects the fixed policy.
 
-`MMTK_PLAN` selects the collector at startup (default **`GenImmix`** — generational, copying nursery over
-an Immix mature, the stock-OCaml-faithful fit for OCaml's short-lived allocation). **12** plans are wired
-in bytecode — 10 of 0.32's 11 stock plans **plus our own `LXR`** (reference counting, see below) **and
-`Bactrian`** (RQ7, the stock-OCaml-faithful generational+concurrent plan); **9** run native (those whose
-allocator the inlined TLAB can alias, incl. LXR and Bactrian).
+<details>
+<summary>Advanced collector controls</summary>
 
-| Plan | Description | Runtimes |
-|------|-------------|----------|
-| `Immix` | mark-region, moving (defragments) | bytecode + native |
-| `StickyImmix` | generational, in-place nursery | bytecode + native |
-| `GenImmix` *(default)* | generational, copying nursery + Immix mature | bytecode + native |
-| `GenCopy` | generational, copying nursery + SemiSpace mature | bytecode + native |
-| `SemiSpace` | classic two-space copying | bytecode + native |
-| `NoGC` | bump-only; never reclaims (short programs only) | bytecode + native |
-| `MarkSweep` | non-moving free-list | bytecode (native infeasible — free-list) |
-| `MarkCompact` | sliding compaction (Lisp-2) | bytecode (native infeasible — VO bit + header word) |
-| `PageProtect` | one page per object (debugging) | bytecode |
-| `ConcurrentImmix` | concurrent marking, SATB barrier | bytecode + native (low-latency research plan) |
-| `Bactrian` | generational + concurrent: copying nursery, SATB-marked Immix mature | bytecode + native (RQ7 stock-*architecture* research plan; within ~6% of vanilla on 7/8 seq benches — residual deltas vs vanilla: STW sweep at FinalMark, GC-worker (not mutator-slice) marking; [`gc/mmtk/BACTRIAN.md`](gc/mmtk/BACTRIAN.md)) |
-| `LXR` | reference counting (in-place, on Immix) + concurrent backup trace for cycles | bytecode + native — **experimental (research plan): single- and multi-domain validated (par_binarytrees D=1..32). Requires a pinned `MMTK_HEAP_SIZE_MB`.** |
+Most controls here apply to Bactrian; the early-cycle and compaction thresholds
+also apply to other concurrent plans, including ConcurrentImmix.
+Slice budgets and targets are **not hard bounds on total pause time**: work
+quotas, packet granularity, nursery collection, and emergency drains can exceed
+them.
 
-`ConcurrentImmix` is the low-latency **research** plan: concurrent marking + SATB write barrier
-(bytecode + native), clean on `lazy` and effect-handler continuations (subtle cases in
-[`FAQ.md`](gc/mmtk/FAQ.md)); remaining work is performance-only. Its *allocate-black* marker (never scans
-fresh objects) is also what lets the runtime skip zeroing new memory.
+| Variable | Default | Meaning |
+|---|---|---|
+| `MMTK_MARK_SLICED` | `1` | Adaptive Full/sliced STW mode. `0` selects worker-concurrent marking with STW sweep at the mark-completion pause (FinalMark), and a Full fallback for small mature heaps. |
+| `MMTK_SLICE_WORTH_MS` | `200` | Slice when collecting the whole heap in one pause is predicted to cost more than this. Mature-direct allocation cycles bypass this test. |
+| `MMTK_SLICE_MAX_PAUSE_MS` | `100` | Pause target used for mark-slice sizing and early cycle starts. |
+| `MMTK_MARK_SLICE_MS` | `2` | Time-budget top-up after accounting for incoming work and a share of the marking backlog. |
+| `MMTK_SWEEP_SLICE_MS` | `2` | Sweep budget, supplemented by a share of remaining work. |
+| `MMTK_SWEEP_SLICE_CAP_MS` | `20` | Soft time cap on that sweep-work share. |
+| `MMTK_CONC_TRIGGER_PCT` | `80` | Concurrent plans' early-cycle threshold as a percentage of the heap limit, combined with mature-pressure and growth guards. `0` disables the clamp. |
+| `MMTK_MEDIUM_NONMOVING` | `1` for Bactrian | Allocate blocks ≥2056 B directly in mature space on 64-bit hosts, following stock OCaml's young-allocation cutoff. This controls placement, not a guarantee against later evacuation. |
+| `MMTK_MEDIUM_TO` | `immix` | Set to `freelist` to place the pretenured medium-object band in the common mark-sweep space. Experimental allocator comparison. |
+| `MMTK_COMPACT_OVERHEAD_PCT` | `100` | Concurrent plans' threshold for requesting mature compaction after a Full when reserved space sufficiently exceeds traced live bytes. `0` disables this trigger. |
+| `MMTK_UP_OLDIFY` | `0` | Opt-in stock-style nursery tracing for eligible single-worker Bactrian pauses. |
 
-`LXR` is our **reference-counting** research plan (Zhao/Blackburn/McKinley, PLDI'22): a coalescing
-field-logging write barrier feeds in-place reference counting on an Immix heap, with a periodic
-stop-the-world backup mark/sweep to reclaim cycles (triggered only when RC under-reclaims, so it is
-nearly free on acyclic code). It is **experimental** (a research plan) but now validated **both single-
-and multi-domain**: correct + sanity-clean + at memory parity with Immix; the field barrier is essentially
-free on OCaml's init-write-dominated code; and `par_binarytrees` runs correctly at D=1..32 domains (the
-Domain.join result is kept alive across teardown by a synchronous recursive RC-pin). It **requires a pinned
-`MMTK_HEAP_SIZE_MB`**. Extra knobs: `MMTK_RC_DEBUG`
-(per-pause RC stats), `MMTK_RC_NO_CM` (disable the cycle-collecting backup trace), `MMTK_BARRIER_COUNT`
-(count write-barrier fires). LXR is a **runnable sequential quick-panel plan** — `uv run
-quick/quickbench.py seq --plans LXR --heap 512` (it needs a pinned heap, and is SEQ-only until
-multidomain lands). On the sequential panel at memory parity (fixed 512 MiB heap) it is competitive
-with the tracing plans — at parity with GenImmix on the compute benches, faster on binarytrees
-(0.88×), and ahead of Immix on binarytrees/spectralnorm/LU. It is **not** in the CI cross-plan gate
-yet (it is experimental — a different, non-byte-identical collector).
+Current policy lives in the [Bactrian implementation](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/src/plan/concurrent/bactrian/global.rs)
+and [binding collection code](gc/mmtk/binding/src/collection.rs). Further allocation,
+major-pacing, and compaction experiments are recorded in
+[`gc/mmtk/SHAPE.md`](gc/mmtk/SHAPE.md); consult the implementation for current
+defaults rather than copying settings from historical runs.
 
-The one **unwired** stock plan is **`Compressor`** (needs a unified object-reference model incompatible
-with OCaml's layout). `MarkSweep`/`MarkCompact`/`PageProtect` are bytecode-only (their allocators can't
-back the inlined native TLAB).
+</details>
 
-## Repository layout
+## Performance evidence
 
-```
-gc/mmtk/            in-tree MMTk binding (a self-contained Cargo workspace)
-├── common/         OCaml value layout: header, slot, scanning, object model
-├── binding/        VMBinding impl + C ABI  ->  libmmtk_ocaml.a
-└── include/        mmtk_ocaml.h, the C ABI consumed by the runtime
-runtime/mmtk.c      C glue between the runtime and the binding
-Makefile.mmtk       build glue (cargo invocation + link flags)
-```
+The quick benchmark suite lives on the separate
+[`benchmarks` branch](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks).
+Historical Apple M4 Pro runs from **2026-07-02** found that collector choice changed
+both throughput and memory use: LXR performed well on allocation-heavy,
+acyclic `binarytrees`, taking 0.76× vanilla's time with **309 MiB RSS**, versus
+**92 MiB** for vanilla and **213 MiB** for GenImmix. Per-domain nursery scaling
+substantially improved parallel `binarytrees`; continuation-heavy
+`chameneos_redux` exposed promotion and scanning costs.
 
-In `runtime/`, allocation, the write barrier, root scanning, and domain
-initialization all go through MMTk; the C glue lives in `runtime/mmtk.c`.
+Those results predate the current nursery default, Bactrian's sliced marking and
+incremental sweep, and later runtime fixes. Dynamic heaps and pinned LXR heaps
+also produced different RSS values. They motivate the research questions;
+they are not current-default or equal-memory performance claims.
+LXR results are additionally provisional because of its open wrong-results bug;
+its earlier `chameneos_redux` measurements cannot be treated as valid evidence.
 
-## Learn more
+The **2026-08-12** [SHAPE round 28](gc/mmtk/SHAPE.md#round-28-d5-pareto--the-honest-frontier-front-to-front-2026-08-12)
+compared memory/time frontiers after sweeping heap sizing and nursery settings
+for both collectors. Vanilla dominated Bactrian on `binarytrees`, Knuth–Bendix
+(`kb`), LU, and `spectralnorm`: it offered better time/memory trade-offs than
+those Bactrian configurations.
+This stronger comparison also predates the September merge and later policy
+changes; it is historical evidence, not a current-default result.
 
-- [`ROADMAP.md`](ROADMAP.md) — the live plan and milestone status.
-- [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) — dated design notes and investigations.
-- [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) — correctness & concurrency hazards (mechanism-level Q&A).
-- [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) — the GC-research agenda.
-- [`PERFORMANCE.md`](PERFORMANCE.md) — the GC-performance measurement method of record (M8).
-- [`fork-handoff.md`](fork-handoff.md) — original cold-start brief.
-- [`README.upstream.adoc`](README.upstream.adoc) — the upstream OCaml README.
+[`SCALABILITY.md`](SCALABILITY.md) preserves the scaling experiments and controls.
+[`PERFORMANCE.md`](PERFORMANCE.md) describes the broader measurement methodology,
+including heap sweeps and reporting wall time alongside memory; some setup
+assumptions there are historical. Use the configuration above for current
+defaults and record compiler revisions, heap/nursery settings, domains, GC workers,
+and both time and RSS for a comparison.
+
+## Source and further reading
+
+| Path | Contents |
+|---|---|
+| [`gc/mmtk/`](gc/mmtk) | Rust binding workspace: OCaml value layout, scanning, object model, and C API. |
+| [`gc/mmtk-core/`](gc/mmtk-core) | Pinned fork of MMTk 0.32, including research plans and OCaml-specific changes. |
+| [`runtime/mmtk.c`](runtime/mmtk.c) | Runtime glue for allocation, barriers, and domain coordination. |
+| [`Makefile.mmtk`](Makefile.mmtk) | Cargo build and runtime linking. |
+| [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) | Research agenda and literature. |
+| [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) | Dated design decisions, investigations, and validation. |
+| [`gc/mmtk/TESTSUITE_TRIAGE.md`](gc/mmtk/TESTSUITE_TRIAGE.md) | Evidence behind testsuite exclusions and timing differences. |
+| [`gc/mmtk/BACTRIAN.md`](gc/mmtk/BACTRIAN.md), [`gc/mmtk/FAQ.md`](gc/mmtk/FAQ.md) | Design background and integration hazards; historical descriptions may lag current code. |
+| [`README.upstream.adoc`](README.upstream.adoc) | Upstream OCaml overview. |
 
 ## License
 
-Same as OCaml — see [`LICENSE`](LICENSE). MMTk is licensed under its own terms.
+OCaml retains its [license](LICENSE). MMTk is dual-licensed under
+[MIT](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/LICENSE-MIT)
+and [Apache 2.0](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/LICENSE-APACHE).
