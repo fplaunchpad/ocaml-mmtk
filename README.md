@@ -57,11 +57,11 @@ differ from stock OCaml in two tests.
 [silent wrong-results bug](https://github.com/fplaunchpad/ocaml-mmtk/issues/26), so
 its results are provisional. The [native `Array.fill` path](runtime/array.c) also
 lacks the generational write barrier: silent corruption has been reproduced
-under **GenImmix (the default)**, StickyImmix, and GenCopy. A fix is in progress.
-Programs using `Thread` and blocking sections have a separate
-[coordination audit](https://github.com/fplaunchpad/ocaml-mmtk/issues/24): source
-reading identifies possible unsafe execution during GC and a thread-exit GC
-hang, but neither has been reproduced.
+under **GenImmix (the default)**, StickyImmix, GenCopy, and Bactrian. A fix is in
+progress. Programs using `Thread` with blocking sections have reproduced
+[heap corruption and thread-exit GC hangs](https://github.com/fplaunchpad/ocaml-mmtk/issues/24#issuecomment-5889314954)
+on macOS. The thread-exit hang affects both bytecode and native code; a
+coordination fix is in progress.
 
 Explicit `Gc` requests are also under investigation: `Gc.major`, `Gc.full_major`,
 and `Gc.compact` can return before their collection runs, while `Gc.minor` does
