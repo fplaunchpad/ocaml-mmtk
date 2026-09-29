@@ -6,7 +6,9 @@ framework/implementation cost rather than collector-design difference. This doc
 is the honest axis-by-axis comparison — Bactrian is **architecture-matched, not
 implementation-matched**, and the residual deltas below are exactly the terms
 left in the RQ7 comparison. (Design rationale and bring-up history: NOTES
-2026-07-02. Numbers: README "Performance (quick panel)".)
+2026-07-02. Numbers: the 2026-07-02 quick panel, last in `README.md` at
+`358ea7958c`, section "Performance (quick panel)" — a 2026-07-02 build, before
+PR 23 and the 16 MiB nursery default, not re-measured since.)
 
 ## TL;DR
 
@@ -33,7 +35,8 @@ whatever gap remains after that is the true framework floor.
 incremental (both default), added the compaction law and stock's
 `Max_young_wosize` pretenuring, and moved slice sizing into the plan; see
 ROADMAP's RQ7 bullet and NOTES 2026-09-29. The quick-panel numbers quoted here
-and in README predate most of that work.
+come from a 2026-07-02 build (last in `README.md` at `358ea7958c`), predate most
+of that work and the 16 MiB nursery default, and have not been re-measured.
 
 ## The details
 
@@ -100,7 +103,8 @@ alarm delivery itself works whenever a GC happens).
 
 ### Memory footprint
 
-Measured on macOS/M4 (see README): an **empty program** costs ~2 MiB under
+Measured on macOS/M4 on the 2026-07-02 build (quick panel, last in `README.md`
+at `358ea7958c`; not re-measured since PR 23): an **empty program** costs ~2 MiB under
 vanilla vs a fixed, program-independent startup floor of ~26 MiB under
 GenImmix/Bactrian (42 Immix, 46 ConcurrentImmix, 74 LXR) — side-metadata
 tables mapped at init plus initial chunk commits; the plan deltas are their

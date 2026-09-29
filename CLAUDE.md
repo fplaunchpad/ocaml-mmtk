@@ -88,7 +88,8 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - `ROADMAP.md` — the live plan and milestone status (M0–M9). Plan of record.
 - `gc/mmtk/NOTES.md` — dated design notes, deferred investigations, and
   **known-failure repros** (including saved `rr` trace paths). Newest first.
-- `README.md` — overview + milestone table.
+- `README.md` — overview, build/run, plan and configuration tables (the milestone
+  table is in `ROADMAP.md`).
 - `fork-handoff.md` — original cold-start brief.
 - Binding: `gc/mmtk/` — Cargo workspace; `common/` = version-independent value/layout
   code (header, slot, scanning, object_model), `binding/` = `VMBinding` impl + C ABI
