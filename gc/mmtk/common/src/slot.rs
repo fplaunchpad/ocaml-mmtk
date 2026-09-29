@@ -27,6 +27,19 @@ use crate::header::{tag_of, wosize_of, TAG_INFIX, WORD_SIZE};
 /// enabled). For such slots `load` returns `None` and `store` is never called.
 const NOT_TRACEABLE: usize = usize::MAX;
 
+/// Sentinel `info` value meaning "classify the value at `load` time" — the slot
+/// carries NO cached classification. Used for slots created by a PRE-write
+/// barrier ([`FieldSlot::from_address_deferred`], via
+/// [`OCamlMemorySlice::from_slots_deferred`]): the barrier runs before the store,
+/// so a classification taken then describes the OLD value, while a consumer may
+/// load the slot only after the store — LXR's field barrier buffers the slot as a
+/// deferred RC increment of whatever the field holds at the next RC pause (GH
+/// issue 26: a cached `NOT_TRACEABLE` for an old immediate/atom dropped the
+/// increment of the new referent; a cached ordinary/infix offset mis-derived the
+/// object start when the new value was of the other kind). Never a real infix
+/// offset (those are `wosize * WORD_SIZE`, far below this).
+const DEFERRED: usize = usize::MAX - 1;
+
 /// DEBUG (MMTK_DEBUG_ROOT_RACE), cached — logs each slot whose cached classification
 /// said "traceable pointer" but whose current value is an immediate/null (the
 /// concurrent classify-vs-load race, GH#15). Off unless the env var is set.
@@ -127,14 +140,16 @@ fn is_forwarded(addr: Address) -> bool {
 /// `info` is classified once, at slot creation (during scanning, before any
 /// object moves), and cached: the old object — including its infix header — may
 /// be gone by the time `store` runs, so the offset cannot be recomputed then.
-/// `info` is one of: `NOT_TRACEABLE`, `0` (ordinary reference), or a non-zero
-/// infix byte offset.
+/// `info` is one of: `NOT_TRACEABLE`, `0` (ordinary reference), a non-zero
+/// infix byte offset, or `DEFERRED` (a pre-write-barrier slot, created before the
+/// store it guards: no cached classification, `load` classifies the current value).
 #[derive(Clone, Copy)]
 pub struct FieldSlot {
     addr: *mut AtomicUsize,
     info: usize,
     /// `true` = re-validate the current value on every `load` (the GH#15 guard).
-    /// Set for ROOT slots, which a collection may process while a spawning/
+    /// Set for pre-write-barrier slots (`DEFERRED`, which have nothing cached to
+    /// trust) and for ROOT slots, which a collection may process while a spawning/
     /// terminating domain concurrently mutates them (the global-root path runs
     /// regardless of mutator-stop). `false` = a heap FIELD slot created during
     /// object scanning: under an STW plan the field cannot change between classify
@@ -197,6 +212,20 @@ impl FieldSlot {
         let raw = unsafe { (*addr).load(Ordering::Relaxed) };
         // ROOT slot: always full classify (roots race spawn/terminate; GH#15).
         Self { addr, info: Self::classify(raw), checked: true }
+    }
+
+    /// Create a slot for a PRE-write barrier: the value is classified when the
+    /// slot is loaded, never at creation (see [`DEFERRED`]). The barrier's own
+    /// load of the old value (LXR decrement, SATB grey) and a consumer's later
+    /// load of the new value (LXR increment at the next pause) therefore each see
+    /// the value the slot holds at that moment. `checked` keeps such slots off the
+    /// trusted fast path, which would use the (absent) cached `info`. `store` is
+    /// not supported: no pre-write-barrier consumer writes a slot back (LXR here
+    /// promotes in place; SATB only reads), and the infix offset of a value
+    /// cannot be recovered once its object has been forwarded.
+    #[inline]
+    pub fn from_address_deferred(address: Address) -> Self {
+        Self { addr: address.to_mut_ptr::<AtomicUsize>(), info: DEFERRED, checked: true }
     }
 
     #[inline]
@@ -309,6 +338,17 @@ impl Slot for FieldSlot {
             return Some(unsafe { ObjectReference::from_raw_address_unchecked(start) });
         }
         let raw = self.raw_value();
+        // Pre-write-barrier slot: no cached classification — classify the value the
+        // slot holds NOW (GH issue 26; see `DEFERRED`). `classify` applies the full
+        // immediate / null / `is_in_mmtk_spaces` filter and derives the infix offset.
+        if self.info == DEFERRED {
+            let info = Self::classify(raw);
+            if info == NOT_TRACEABLE {
+                return None;
+            }
+            let start = unsafe { Address::from_usize(raw) } - info;
+            return Some(unsafe { ObjectReference::from_raw_address_unchecked(start) });
+        }
         // GH#15: re-validate the CURRENT value, not just the cached classification.
         // `info` was classified at capture (under roots_mutex / at a safepoint), but a
         // terminating/spawning domain — scanned via the global-root path, which a
@@ -368,6 +408,7 @@ impl Slot for FieldSlot {
     /// re-applying the infix offset so an interior pointer keeps pointing into
     /// the relocated parent at the same word offset.
     fn store(&self, object: ObjectReference) {
+        debug_assert!(self.info != DEFERRED, "store to a pre-write-barrier slot: {:?}", self);
         let new_raw = object.to_raw_address().as_usize() + self.info;
         unsafe {
             (*self.addr).store(new_raw, Ordering::Relaxed);
@@ -390,12 +431,26 @@ impl Slot for FieldSlot {
 pub struct OCamlMemorySlice {
     start: Address,
     count: usize,
+    /// Built by a PRE-write barrier (before the store): its slots are
+    /// [`FieldSlot::from_address_deferred`], classified at load, not at iteration.
+    deferred: bool,
 }
 
 impl OCamlMemorySlice {
+    /// A region whose slots are classified when iterated — for the generational
+    /// (post-write) region barrier, whose slices are iterated at the next GC, after
+    /// the stores, with the world stopped.
     #[inline]
     pub fn from_slots(start: Address, count: usize) -> Self {
-        Self { start, count }
+        Self { start, count, deferred: false }
+    }
+
+    /// A region for a PRE-write barrier (`memory_region_copy_pre`: SATB, LXR's
+    /// field-logging RC barrier). Its slots are iterated before the store but may
+    /// be loaded after it, so they must not cache a classification (GH issue 26).
+    #[inline]
+    pub fn from_slots_deferred(start: Address, count: usize) -> Self {
+        Self { start, count, deferred: true }
     }
 }
 
@@ -403,6 +458,7 @@ impl OCamlMemorySlice {
 pub struct OCamlSliceIter {
     cur: Address,
     end: Address,
+    deferred: bool,
 }
 
 impl Iterator for OCamlSliceIter {
@@ -410,7 +466,11 @@ impl Iterator for OCamlSliceIter {
     #[inline]
     fn next(&mut self) -> Option<FieldSlot> {
         if self.cur < self.end {
-            let slot = FieldSlot::from_address(self.cur);
+            let slot = if self.deferred {
+                FieldSlot::from_address_deferred(self.cur)
+            } else {
+                FieldSlot::from_address(self.cur)
+            };
             self.cur += WORD_SIZE;
             Some(slot)
         } else {
@@ -427,6 +487,7 @@ impl MemorySlice for OCamlMemorySlice {
         OCamlSliceIter {
             cur: self.start,
             end: self.start + self.count * WORD_SIZE,
+            deferred: self.deferred,
         }
     }
 

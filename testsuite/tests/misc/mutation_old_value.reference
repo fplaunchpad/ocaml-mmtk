@@ -1,0 +1,9 @@
+atom -> block: ok
+None -> Some: ok
+ref atom -> block: ok
+atom -> tmp -> block: ok
+blit atom -> block: ok
+ordinary -> infix closure: ok
+infix -> ordinary closure: ok
+infix -> infix closure: ok
+None -> Some infix closure: ok

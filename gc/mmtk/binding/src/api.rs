@@ -596,9 +596,12 @@ pub extern "C" fn mmtk_ocaml_satb_barrier(
 ) {
     let mutator = unsafe { &mut *(mutator as *mut mmtk::Mutator<OCamlVM>) };
     let start = unsafe { Address::from_usize(start) };
-    let dst = OCamlMemorySlice::from_slots(start, count);
+    // Pre-write: the slots are loaded both now (old value: SATB grey, LXR
+    // decrement) and, for LXR, at the next RC pause (new value: the buffered
+    // increment), so they must classify at load time (GH issue 26).
+    let dst = OCamlMemorySlice::from_slots_deferred(start, count);
     // SATB pre-write path ignores `src`; pass an empty slice.
-    let src = OCamlMemorySlice::from_slots(start, 0);
+    let src = OCamlMemorySlice::from_slots_deferred(start, 0);
     memory_manager::memory_region_copy_pre::<OCamlVM>(mutator, src, dst);
 }
 
