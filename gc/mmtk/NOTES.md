@@ -5,6 +5,135 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-29 - all-plans testsuite triage after the PR 23 merge (KNOWN FAILURES)
+
+`Testsuite (all GC plans)` on `ddc53f4007` (run 36534216189) failed. The
+build job passed and every gating job reached a full summary (1495 tests
+considered), so the failures are test results, not infra, time cap, or the
+gate script. The workflow file is unchanged since `cbc66e3efd` (same
+`MMTK_HEAP_SIZE_MB: 4096`, `TIMEOUT=120`), so the baseline is run
+28657254889 on `cbc66e3efd`. Tracked as ROADMAP open items 14-16. The rerun on `9631db07fd` (run
+36537448938; identical GC code: docs, a comment-only `api.rs` change, and a
+submodule pin with an identical tree) is summarised under each item.
+
+| Plan | Failing tests (run 36534216189) | Signature | In baseline? |
+|---|---|---|---|
+| Immix | `weak-ephe-final/weaklifetime.ml` (bytecode) | exit -9 (120 s timeout) | yes |
+| ConcurrentImmix | `weaklifetime.ml` (bytecode) | exit -9 (120 s timeout) | yes |
+| GenCopy | `misc/darkening_work.ml` (native) | output `error: writes caused 4 more cycles` | no |
+| LXR | 69 tests / 124 variants | all exit -6 after `pending_release_packets is still 2^64-k` | no |
+
+GenImmix, StickyImmix, SemiSpace and Bactrian passed all 1495. The
+report-only plans (MarkSweep, MarkCompact, PageProtect, Compressor, NoGC)
+were not examined.
+
+**1. LXR: release-counter underflow (regression).**
+Verified from the log: 123 lines of `thread 'mmtk-gc-worker' panicked at
+./gc/mmtk-core/src/util/epilogue.rs:11:9: pending_release_packets is still
+18446744073709551615` (values down to 2^64-17, larger deficits on
+multi-domain tests), each followed by the binding's `FATAL: panic in MMTk/GC
+code is unrecoverable; aborting`. Rerun 36537448938: 65 tests fail, all
+exit -6, 113 panic lines. The failing sets differ between the two runs
+(only in the first: `domain_dls2`, `domains`, `lazy8`, `pingpong`,
+`t330-compact-2/4`, `used_cont`, `weak_bigarray`; only in the rerun:
+`arrays`, `t330-compact-3`, `test_caml_runparams`, `test_dropped_events`),
+so which programs hit it is not deterministic. The baseline LXR job had 0 such lines (it
+failed 5 other tests: `forbidden`/`publish` -11, `gc_mark_stack_overflow`,
+`weaklifetime`, `weaktest`).
+
+Mechanism, read from mmtk-core at the pinned `892056da7a`; NOT reproduced
+locally:
+- The binding now builds mmtk-core with `marksweep_as_nonmoving`
+  (`gc/mmtk/Cargo.toml`, from `4169524e68`); before the merge the features
+  were only `object_pinning`.
+- `src/plan/lxr/global.rs:235`: LXR's `release` always calls
+  `self.common.release(tls, false)`, for RefCount and Full pauses alike.
+  Every other non-generational plan passes `true`.
+- `src/plan/global.rs:758-762` `CommonPlan::release` calls
+  `release_nonmoving_space(full_heap)`; at `:853-865`, under
+  `marksweep_as_nonmoving`, that calls `self.nonmoving.release()` only
+  `if _full_heap` (since mmtk-core `c9d9a4af5b`). So under LXR,
+  `MarkSweepSpace::release`
+  (`src/policy/marksweepspace/native_ms/global.rs:436-452`), the only place
+  that arms `pending_release_packets = num_mutators + 1`, never runs.
+- Mutator side: `src/plan/lxr/mutator.rs:22-33` `lxr_mutator_release` ends
+  with `common_release_func(mutator, tls)`.
+  `src/plan/mutator_context.rs:73-82` calls the NonMoving
+  `FreeListAllocator::release()` whenever `!is_nursery_gc(mutator)`, and
+  `:55-60` defines
+  `is_nursery_gc = mutator.plan.generational().is_some_and(|g| g.is_current_gc_nursery())`.
+  LXR does not override `Plan::generational`, whose default
+  (`src/plan/global.rs:192-196`) returns `None`, so `is_nursery_gc` is false.
+- `src/util/alloc/free_list_allocator.rs:481-514` `release()`
+  unconditionally ends with `self.space.release_packet_done()`, which is
+  `fetch_sub(1)` at `native_ms/global.rs:533-534`, on the unarmed (0)
+  counter. It wraps to 2^64 - (number of mutators).
+- `MarkSweepSpace::end_of_gc` (`native_ms/global.rs:461-465`) runs
+  `epilogue::debug_assert_counter_zero`, which panics
+  (`src/util/epilogue.rs:11`).
+- The same bug class was fixed for StickyImmix (mmtk-core `4bd0674237`) and
+  Bactrian (`bactrian/mutator.rs:91`) in this merge, not for LXR. Both LXR
+  pause kinds schedule `Release` (`lxr/global.rs:581`, `:611`), which
+  creates the `ReleaseMutator` packets.
+
+Unknown: which LXR collections hit it. Tests that call `Gc.full_major`
+(`finaliser.ml`, `globroots.ml`, `gcwords.ml`) pass under LXR in the same
+run, so either not every collection reaches this path or those calls do not
+produce an LXR collection. Not investigated. Fix not written; it belongs in
+mmtk-core (arm and gate the MS-nonmoving release consistently for LXR).
+
+Repro: `env MMTK_PLAN=LXR MMTK_HEAP_SIZE_MB=512 make -C testsuite one
+TEST=tests/misc/sorts.ml TIMEOUT=120` (sorts failed byte + native in CI).
+
+**2. GenCopy `darkening_work.ml` (new; cause not established).**
+The test counts `Gc.quick_stat().major_collections` over 10,000 iterations
+with and without no-op writes `table.(i) <- buf` and fails if they differ by
+more than 2. The diff in the log is `-ok` / `+error: writes caused 4 more
+cycles`. GenCopy passed the whole suite at `cbc66e3efd` and on 9 of the 10
+earlier runs checked since `20d3ad42ed`; the exception, `f8328524d3`, failed
+on `publish.ml`. GenImmix/StickyImmix/Bactrian pass this test.
+
+Hypothesis (unconfirmed): the major count for a generational
+non-concurrent plan is set by the pacing law in
+`gc/mmtk/binding/src/collection.rs`, which the merge retuned:
+- `e41c5383b2`: default nursery max 64 -> 16 MiB. Each minor credits
+  `nursery_max_bytes()` to the backstop, and the pressure floor is
+  `max(8 MiB, max_nursery_pages)`.
+- `970a2721ce`: mature floor 32 -> 8 MiB.
+- `f35a1ed592` / `e5fd83a11b`: margin 120 -> 14 -> 150 %.
+- `78ab9698a2` / `e16d20e0ae`: allocation-denominated backstop,
+  `max(512 MiB x domains, 2 x baseline)`.
+
+Why the write loop in particular adds cycles was not worked out. The
+mmtk-core `a7b10f3d85` LOS-in-pressure change applies to GenImmix and
+Bactrian, not GenCopy.
+
+Not a one-off: the rerun 36537448938 failed the same test with `error:
+writes caused 3 more cycles` (4 in the first run). The size of the excess
+varies from run to run, but it is above the tolerance of 2 in both.
+
+Repro: `env MMTK_PLAN=GenCopy MMTK_HEAP_SIZE_MB=4096 make -C testsuite one
+TEST=tests/misc/darkening_work.ml TIMEOUT=120`. Then run the built binary
+with `MMTK_PACE_DEBUG=1 MMTK_VERBOSE=1` to see which trigger fires. A/B
+with `MMTK_NURSERY=Bounded:2097152,67108864` and `MMTK_MATURE_FLOOR_MB=64`.
+
+**3. Immix / ConcurrentImmix `weaklifetime.ml` timeout (pre-existing).**
+Exit -9 is ocamltest's `TIMEOUT=120` SIGKILL. It failed the same way in the
+baseline and on every run checked since `20d3ad42ed`, except one Immix pass
+at `f8328524d3`. This run Immix native passed and only bytecode timed out.
+The test loops until 20 major collections. On a non-generational plan every
+GC is full but fires only when the fixed 4 GiB heap fills, so 20 cycles
+need a lot of allocation (see the GH#5 "Timeout note" entry below). In the
+rerun 36537448938, Immix timed out again on bytecode while ConcurrentImmix
+passed the whole suite, which is consistent with a timing margin. This is a
+CI heap/timeout configuration matter, not a merge regression. The two jobs
+are red on it independent of anything else.
+
+Repro: `env MMTK_PLAN=Immix MMTK_HEAP_SIZE_MB=4096 make -C testsuite one
+TEST=tests/weak-ephe-final/weaklifetime.ml TIMEOUT=600`, timed.
+
+---
+
 ## 2026-09-29 - catch-up: Bactrian work from 2026-08-12 to 2026-09-22 that had no entry here
 
 Written at merge time (PR 23, `ddc53f4007`; mmtk-core PR 1, pinned at
