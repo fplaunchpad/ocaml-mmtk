@@ -14,24 +14,28 @@ there**), [`fork-handoff.md`](fork-handoff.md) (original rationale).
 
 **Project shape.** This repo *is* the OCaml fork (base `5.5.0` final, branch
 `5.5+mmtk`), distributed as `ocaml-mmtk`. The MMTk binding is in-tree at
-[`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 from crates.io (not vendored).
+[`gc/mmtk/`](gc/mmtk) and depends on `mmtk-core` 0.32 via our fork, the git submodule
+`gc/mmtk-core` (`fplaunchpad/mmtk-core`, branch `0.32-ocaml`), which `gc/mmtk/Cargo.toml`
+substitutes for the crates.io `mmtk` through `[patch.crates-io]`.
 MMTk is **always-on and the only collector** — no opt-out; the stock minor *and*
 major GC have been excised (M9). `MMTK_PLAN` selects the plan (default `GenImmix`).
 Native code uses TLAB nursery-aliasing onto an MMTk bump/Immix region, so it requires a
-plan whose Default allocator is a bump/Immix region (the eight:
-`Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR`, `GenImmix`/`GenCopy`, `SemiSpace`/`NoGC`); bytecode runs under any plan.
+plan whose Default allocator is a bump/Immix region (the nine:
+`Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR`, `GenImmix`/`GenCopy`/`Bactrian`, `SemiSpace`/`NoGC`); bytecode runs under any plan.
 **`LXR`** is our reference-counting **research plan** (PLDI'22 RC-on-Immix): single-domain validated
 (correct, sanity-clean, at memory parity with Immix; the field barrier is near-free on OCaml's
 init-write-dominated code; a backup trace reclaims cycles) — **experimental; single- AND multi-domain
 validated** (par_binarytrees D=1..32); requires a
-pinned `MMTK_HEAP_SIZE_MB` and is **not** in the CI plan matrix. Design/status in `gc/mmtk/NOTES.md`. Run
+pinned `MMTK_HEAP_SIZE_MB`; it runs in the all-plans testsuite workflow (`testsuite-plans.yml`) but is
+**not** in the byte-identical CLBG cross-plan gate. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
 **space-overhead** heap — `heap = live × 2.2` after each full GC, à la stock's `Gc.space_overhead`,
 clamped 32 MiB..RAM; replaced MemBalancer, whose sqrt rule under-provisioned big live sets — binarytrees
 3.5× → 1.27× slower than stock. Floor raised 16→32 MiB (GH#6): a 16 MiB floor let a nursery GC fire during
 matmul's matrix-build phase, promoting the half-built result matrix → the O(n³) compute loop then paid the
 generational write barrier on every write (matmul-768 19.6s → 3.1s once the build stays in-nursery);
-tunable via `MMTK_MIN_HEAP_MB`), `MMTK_NURSERY` (default bounded 2–64 MiB), `MMTK_VERBOSE`;
+tunable via `MMTK_MIN_HEAP_MB`), `MMTK_NURSERY` (default bounded 2–16 MiB × live domain count; the max was 64 MiB until
+2026-08-12, `e41c5383b2`), `MMTK_VERBOSE`;
 mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACTOR`,
 `MMTK_IMMIX_ALWAYS_DEFRAG`, …).
 
@@ -50,10 +54,10 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix`), single- and multi-domain (`Domain.spawn` clean); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | **Weak arrays, ephemerons, finalisers** — `process_weak_refs` on by default (`MMTK_WEAK_REFS=0` opts out to the memory-safe never-clear interim). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, custom-block finalisers (incl. unmarshalled blocks), cross-domain orphaned-finaliser adoption. `pr3612`+`pr5233` pass. Bar #11 (resurrection ordering + orphaned ephemerons). | 🟢 done (default-on) |
 | M7 | **Pass the OCaml testsuite** — full bytecode suite ~1450/1547 pass under Immix/StickyImmix (`setarch -R`, per-test timeout). Non-pass are known-unsupported (statmemprof, runtime-events, `Gc.stat`-pacing) or the bug #3b intermittent multidomain hang — none are MMTk correctness diffs (output byte-identical to stock). | 🟢 done |
-| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. | 🟡 **open milestone** |
+| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. (These first-sweep figures are historical; the current quick panel is in `README.md`, where spectralnorm is 0.96× vanilla under GenImmix.) | 🟡 **open milestone** |
 | M9 | **MMTk-only: excise the stock GC** — always-on; stock minor + major GC deleted; `shared_heap.c`/`.h` deleted (−1665 lines, live colour-machinery relocated to `major_gc.{c,h}`); per-domain minor-heap arena removed; `Gc.stat` reimplemented on MMTk stats; `Is_young` reservation retired. `ocaml-mmtk` is a single-GC runtime. **Complete** bar #11 (weak-clear semantics) + the flagged `memprof.c` colour read. Stage/bug depth: `gc/mmtk/NOTES.md`. | 🟢 done |
 | — | Parallel collection: verified correct; marking scales ~8.4× on 16 threads (parallel-friendly heaps) | ✅ |
-| — | **GC plans:** 10 wired (bytecode), 1 deferred (Compressor) — see the GC plans table below | 🟢 |
+| — | **GC plans:** 12 wired (bytecode: 10 stock mmtk-core plans + our `Bactrian` and `LXR`), 9 native, 1 deferred (Compressor) — see the GC plans table below | 🟢 |
 
 ---
 
@@ -159,7 +163,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    - **Measurement blocker:** `runtime_events` is **broken under MMTk** — the real STW
      window (`collection.rs:224-287`) emits *zero* events while surviving stock spans wrap
      neutered no-ops, so **olly currently reports fictional tiny pauses**; use `bpftrace`
-     uprobes until #R1–#R4 land. Host `turing`: set governor=performance + `opam install
+     uprobes until #R1–#R4 land (GH#20). Host `turing`: set governor=performance + `opam install
      runtime_events_tools` (perf/turbo already OK).
    - **Prereqs that don't exist yet:** a lifetime-dispersion (Gini) profiler (#P1) + a
      per-GC survival/mutation meter (#P2) — RQ2's workload fingerprint needs them.
@@ -372,12 +376,12 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     **Complete (2026-06-29):** a full-clone GenImmix run (1700 pass) triaged every failure with evidence
     (isolated re-run + actual-vs-reference diff). **58 markers** total now (30 baseline + 28 new); final
     **GenImmix/Immix = 0 non-flaky failures** (2 left enabled as load-timing-flaky, pass in isolation). The 28
-    categorize as: 11 `runtime_events` `[unsupported]`, 9 finaliser/weak/ephemeron deferral `[semantic-timing]`,
+    categorize as: 11 `runtime_events` `[unsupported]` (GH#20), 9 finaliser/weak/ephemeron deferral `[semantic-timing]` (GH#21),
     3 `Gc.stat`/minor-counter `[stock-counter]`, 2 signal-poll `[behavioral-diff]`, 1 alignment, 1
     gdb-worker-threads infra, 1 slow-timeout. **The only genuine MMTk semantic gaps** are the **2 deterministic
     signal-delivery poll-point diffs** (`callback/signals_alloc.ml`, `lib-unix/kill/unix_kill.ml` — a signal
     lands at a later safepoint, not lost; no correctness gap, `sanity` unaffected) → one low-priority follow-up
-    (align signal poll/safepoint with stock). Per-test evidence + categories in **`gc/mmtk/TESTSUITE_TRIAGE.md`**.
+    (align signal poll/safepoint with stock; GH#19). Per-test evidence + categories in **`gc/mmtk/TESTSUITE_TRIAGE.md`**.
     Original triage protocol below.
 
     Work
@@ -434,7 +438,9 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 12. **#21 — nursery findings (spin-off of the RQ10 pole-B experiment); ONE clean fix (BUG B), the rest needs
     care.** Investigated 2026-06-25 (turing + local mainline). Findings, with the important caveat that the
     nursery-cap win is **fixed-heap-only**:
-    - **(a) Raise the default cap 64→256 MiB — DEFERRED; helps only with a fixed large heap, MOOT under the
+    - **(a) [SUPERSEDED 2026-08-12: the default max went the other way, 64→16 MiB per domain (`e41c5383b2`,
+      SHAPE.md rounds 26–28), trading binarytrees' surplus for the LU outlier.]**
+      Raise the default cap 64→256 MiB — DEFERRED; helps only with a fixed large heap, MOOT under the
       default dynamic heap.** With `MMTK_HEAP_SIZE_MB` pinned large (turing, 4 GiB), 256 MiB beats 64 MiB on
       par_binarytrees d21 (~20% faster, S(8) 1.23→1.59, GCs 114→28). **But under the DEFAULT (dynamic
       space-overhead) heap the cap is moot** — confirmed local: binarytrees-19 gives 281 GCs @256 MiB vs 285
@@ -463,13 +469,28 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       survival/age-driven promotion (don't promote an actively-mutated young object) OR a write-barrier fast path
       for freshly-promoted objects, NOT a higher floor. (An adaptive churn-escalating floor was prototyped and
       rejected: it cannot fix the cliff — the penalty is locked in by the first GC, before any churn signal — and
-      it overshot RSS 2–5×; see ~/gh6-progress.md on turing.)
+      it overshot RSS 2–5×; see ~/gh6-progress.md on turing.) **Age-driven promotion was since tried for
+      Bactrian** (survivor aging, `MMTK_NURSERY_AGE`, NOTES 2026-08-08): a measured negative on binarytrees,
+      then **disabled as unsound** (mmtk-core `a9b553a486`, 2026-09-08 — the remembered set does not persist
+      across aging minors; the knob is now ignored with a warning). So this residual is still open.
     - **NOT a mainline bug: "degenerate default install / 913 GCs"** was a **church `fix/bug3c-cross-stw` build
       artifact** — clean mainline (local + turing) gives 114 GCs (correct 64 MiB). Check before merging that
       branch; not a mainline issue.
     - **Note the limit:** the nursery is a *level* lever, not a *slope* fix — even at a large fixed heap,
       GenImmix-256 MiB still regresses d4→d8, so the residual multi-domain sublinearity is the per-collection STW
       cost, addressed by off-STW marking (ConcurrentImmix), not the nursery. → RQ10; NOTES 2026-06-25.
+
+13. **Known failures recorded in NOTES but not otherwise tracked (open).**
+    - **Near-OOM SEGV** — just above the true OOM point, `binarytrees 20` at a fixed 36–52 MiB heap
+      segfaults in `ScanMutatorRoots` nondeterministically instead of raising `Out_of_memory` (GenImmix
+      mostly, Bactrian once). Not investigated further; an `rr` candidate. Related to item 3. → NOTES
+      "Near-OOM SEGV" (2026-08-06).
+    - **fragmed OOMs under Bactrian** — `fragmed` at 64 MiB with 4 workers (NOTES 2026-08-13, "needs its own
+      look") and `fragmed-300` at 192 MiB (NOTES 2026-08-12, "a pacing-tightness item, not corruption").
+      Whether the September pacing rework changed either is not recorded.
+    - **Unmeasured:** the rotating deterministic pads (`MMTK_ALLOC_JITTER=24/25`) were never actually
+      exercised before 2026-09-28 (a parser bug made them mode 5), so SHAPE.md round 11's verdict on them
+      is void. → NOTES 2026-09-28.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
@@ -517,10 +538,10 @@ The active research/measurement threads behind the M8 milestone — the index; d
   `8 × ndomains` (d=1 semantics unchanged — `weaklifetime` still green), and domain termination runs a
   *minor* (not exhaustive) collection — which unmasked GH#3 (fixed, see #16/#31). After: fulls 807→39,
   par_binarytrees d8/d24 wall −22/−25%, GenImmix S(8) 0.89→1.02.
-- **RQ7 — `Bactrian` hybrid (flagship research direction) — v1 LANDED (2026-07-02, branch `bactrian`).**
+- **RQ7 — `Bactrian` hybrid (flagship research direction) — v1 LANDED (2026-07-02, branch `bactrian`, since merged to mainline).**
   The stock-architecture MMTk plan (architecture-matched, not implementation-matched — gc/mmtk/BACTRIAN.md): copying nursery (GenImmix) + concurrently-marked,
   STW-evacuated Immix mature (ConcurrentImmix) + slot-granular SATB deletion barrier, composed as
-  `MMTK_PLAN=Bactrian` in the mmtk-core fork (submodule branch `bactrian`). Every pause except `Full` is
+  `MMTK_PLAN=Bactrian` in the mmtk-core fork (developed on submodule branch `bactrian`, now in `0.32-ocaml`). Every pause except `Full` is
   nursery-anchored (InitialMark = minor GC + snapshot seeding; FinalMark = minor GC + remark + sweep);
   GH#5 mature pressure starts a concurrent cycle, user GCs stay STW Full. Validated: testsuite 1441
   passed / 2 failed with both failures shared with the GenImmix baseline (zero plan-specific);
@@ -538,7 +559,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
   backstop, and Max_young_wosize pretenuring DEFAULT-ON (≥ 2056 B born mature + overflow-block
   line-phase rotation + remset immediate filter → matmul 1.03× vanilla, nursery-independent; was a
   1.25–1.89× alignment lottery) — W-instruction parity certified panel-wide, W/D2-pause-count/
-  mark-cadence matched at the 2 MiB stock-parity nursery (SHAPE.md rounds 1–23). Rounds 24–26
+  mark-cadence matched at the 2 MiB stock-parity nursery ([`gc/mmtk/SHAPE.md`](gc/mmtk/SHAPE.md) rounds 1–23). Rounds 24–26
   (2026-08-11/12): G economics landed (thin LTO, header-sentinel forwarding = stock oldify's
   value-range protocol, UP direct-trace closure → GC −23 %, bt 0.84×); **sliced-STW marking
   DEFAULT-ON** (stock's mark slices as in-pause quanta → bt@2M max pause 8.0 ms vs vanilla's
@@ -546,11 +567,36 @@ The active research/measurement threads behind the M8 milestone — the index; d
   **JCC-erratum layout lottery** (matmul DSB 99 %→2 % on a 16-byte draw; assembler mitigation on
   both toolchains → matmul 0.98×, kb 0.98×, fannkuch 1.00×, and vanilla's own fannkuch build was
   a victim) and **allocation-frontier warmth** (LU/spectralnorm store-side RFO: L2-warm arena /
-  LLC-warm nursery / DRAM-cold tiers).** Remaining RQ7 sub-questions: the frontier-warmth policy
-  (nursery default vs per-minor cost — the two bound each other), D2 period calibration
-  (pressure % vs stock's space_overhead), and the STW minor-pause rendezvous floor.
-  → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02, 2026-08-09/10/12; SHAPE rounds 23–26.
-- **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
+  LLC-warm nursery / DRAM-cold tiers).** **Rounds 27–32 + the September pacing rework
+  (2026-08-12..09-28; merged to mainline 2026-09-29 as PR 23 `ddc53f4007` + mmtk-core PR 1 `892056da7a`):**
+  nursery default **64→16 MiB per domain** (`e41c5383b2`; round 27 found warmth benches and survivor
+  benches want opposite sizes — 16 MiB is the balanced point); **D2 period calibrated** (pressure margin
+  120%→14% `f35a1ed592`, then 150% once incremental sweep moved the baseline to post-sweep `e5fd83a11b`;
+  pressure floor 32→8 MiB `970a2721ce`; early-trigger clamp `MMTK_CONC_TRIGGER_PCT`=80 `d7e8b6d9ff`);
+  **incremental sweep** — FinalMark's mature chunk sweep drained as budgeted quanta in later nursery pauses,
+  on by default with sliced marking (mmtk-core `c01edca806`, round 29); a mature-direct pacing tick for
+  pretenure/LOS-heavy programs (`29d16b434c`); a **mature-compaction law** (`MMTK_COMPACT_OVERHEAD_PCT`,
+  default 100 → compact-all Full; `8a7c7d4ec8`/`16505c1235`, mmtk-core `7ddf1ed2bf`, round 30d);
+  **UP-oldify** (opt-in `MMTK_UP_OLDIFY=1`: the binding walks the nursery closure natively via a new
+  mmtk-core hook, `Scanning::up_oldify_packet`; `33bb7e4cbc`, mmtk-core `32d8057efa`, round 30); the
+  mark-sweep nonmoving space made sound under generational/concurrent collection, with the free-list band
+  (`MMTK_MEDIUM_TO=freelist`) kept opt-in (mmtk-core `c9d9a4af5b`, round 31); fused-metadata plain ops under
+  the UP window (mmtk-core `9cda6a4816`, round 32); then the plan took over slice sizing — slice a cycle iff
+  the predicted monolithic Full is too long, slices paced from the runway frozen at InitialMark and the
+  measured mark rate, the binding only requests cycles (`22ade70f20`; mmtk-core `50f56f5987`, `4660d08769`,
+  `22351d1644`, `9372c33c01`, `abd1879f6f`); LOS counted toward mature pressure (mmtk-core `a7b10f3d85`)
+  and off-heap custom-block memory wired into pacing (`d9816ef9db`, `e16d20e0ae`). **Survivor aging** was
+  tried and is **disabled** as unsound (mmtk-core `a9b553a486`). **Open RQ7 sub-questions:** the STW
+  minor-pause rendezvous floor; the round-28 D5 finding that vanilla's pareto front dominates Bactrian's on
+  bt/kb/LU/sp (constant metadata floor, space overhead on the front, bt's per-minor wall floor), with
+  block-reuse ordering proposed there as the next lever (its outcome is not recorded); and the adversarial
+  benches' gaps (mature_mutation, fragmed — round 32 attributes fragmed to missing in-place reuse for
+  multi-line objects and names a pool-class fast allocator, not policy, as the cure).
+  → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02, 2026-08-09/10/12/13/14, 2026-09-29; SHAPE.md
+  rounds 23–32.
+- **LXR integration — RQ1's read-barrier-free, low-latency vehicle (planned 2026-06-25; P3–P5 since LANDED
+  on mainline by 2026-07-02 — `MMTK_PLAN=LXR` is wired, single- and multi-domain validated, see the intro above
+  and NOTES 2026-06-30 / 2026-07-02; the phase plan below is kept as the design record).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write
   barrier** — exactly the design RQ1 predicts OCaml's immutable-by-default heap makes unusually cheap (most
@@ -632,9 +678,10 @@ The active research/measurement threads behind the M8 milestone — the index; d
     need the full correctness tail, consistent with prioritising the research question over the
     completionist grind. → RESEARCH_QUESTIONS **RQ1** (flagship); the LXR-fork study + the enumerated API diff +
     the touch-set are in `gc/mmtk/NOTES.md` (2026-06-25).
-- **Scalability gap (open M8 work).** No multicore speedup-vs-cores data: the parallel/multidomain
-  macro-benches are disabled, so there is no throughput-vs-domains curve. Re-enable them (or stand up the
-  quick-panel/Sandmark-style scaling harness — task #36). Micro-benches already show ~2× on parallel
+- **Scalability gap (open M8 work).** Speedup-vs-domains is now measured on the quick panel's stdlib-only
+  `Domain.spawn` benches (README "Parallel"; `SCALABILITY.md`), so the remaining gap (GitHub issue 7, open)
+  is the parallel/multidomain *macro*-benches (merlin, lavyek), which were never ported to this fork's suite. Port them
+  (or extend the quick-panel scaling harness — task #36). Micro-benches already show ~2× on parallel
   alloc-heavy. → PERFORMANCE.md §1/§6; GitHub #7.
 
 ### Shipped (done — one line each; depth in NOTES)
@@ -667,8 +714,9 @@ The binding is *moving-ready* (forwarding-pointer spec, pinning bit, updatable s
 straight to mmtk-core (no hardcoded allowlist); the forwarding-bits side-metadata spec
 is registered **iff** `moves_objects && !needs_forward_after_liveness`. So wiring a new
 bump-pointer plan is mostly validation, not trait code. mmtk-core 0.32 offers 11 plans;
-**10 are wired**, 1 deferred (Compressor). The `Testsuite (all GC plans)` CI workflow
-(`.github/workflows/testsuite-plans.yml`) runs the suite under all 11 to surface
+**10 are wired**, 1 deferred (Compressor); our fork adds two research plans, **`Bactrian`** (RQ7) and
+**`LXR`** (RQ1), for **12 wired** in all. The `Testsuite (all GC plans)` CI workflow
+(`.github/workflows/testsuite-plans.yml`) runs the suite under all 13 to surface
 per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 
 | Plan | Kind | Moving | Wired up? |
@@ -684,9 +732,11 @@ per-plan breakage; CLBG `run.sh validate` is the byte-identical cross-plan gate.
 | `PageProtect` | debug — page-granularity alloc | no | ✅ (bytecode, manual — exceeds CI time cap) |
 | `Compressor` | bitmap mark-compact | yes | ❌ **deferred** (unified obj-ref model) |
 | `ConcurrentImmix` | concurrent non-moving Immix, SATB | no | ✅ (**byte + native**) — SATB; `lazy`-clean; **Q3 fixed** |
+| `Bactrian` *(fork)* | copying nursery + SATB-marked Immix mature (sliced marking + incremental sweep) | nursery yes; mature only at `Full` | ✅ (byte + native) — RQ7; see `gc/mmtk/BACTRIAN.md` |
+| `LXR` *(fork)* | reference counting on Immix + backup trace for cycles | yes | ✅ (byte + native) — RQ1, experimental; needs pinned `MMTK_HEAP_SIZE_MB` |
 
-**Native** runs **7 plans** — `Immix`/`StickyImmix`/`ConcurrentImmix` (in-place Immix-block TLAB),
-`GenImmix`/`GenCopy` (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) —
+**Native** runs **9 plans** — `Immix`/`StickyImmix`/`ConcurrentImmix`/`LXR` (in-place Immix-block TLAB),
+`GenImmix`/`GenCopy`/`Bactrian` (copy-nursery `BumpPointer` TLAB), and `SemiSpace`/`NoGC` (also `BumpPointer` Default) —
 i.e. every plan whose Default allocator is a bump/Immix region the inlined TLAB can alias; the moving-root fixup is reused
 from the major path. `MarkSweep` (free-list), `MarkCompact` (per-object VO bit + reserved Lisp-2 header
 word the gapless TLAB can't produce), and `PageProtect` abort at startup on native (bytecode-only).
@@ -711,7 +761,8 @@ short-lived-allocation profile favours a copying nursery; see `PERFORMANCE.md`).
   lines — which also makes **no-zero (RQ8) safe + enabled on ConcurrentImmix**), plus an atomics-SATB-ordering
   bug found + fixed (`d0c721a8b7`). **Open (perf):** the UNLOG-bit gate is **de-prioritized** (native
   characterization: the SATB barrier is ~free, <0.1% self — empirically a non-issue); the sanity-build ~10 MB
-  deadlock (`rr`) remains.
+  deadlock has a fix landed (mmtk-core `72ee627050`, open work item 8; GH#4 closed), though the intermittent
+  hang was never re-captured to confirm it gone.
   → open work #8; RESEARCH_QUESTIONS RQ1; FAQ Q1–Q4; NOTES (2026-06-23).
 
 ---

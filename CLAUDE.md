@@ -6,7 +6,9 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 ## What this repo is
 
 - This repo **is** the OCaml 5.5 fork distributed as `mmtk-ocaml`: a normally-built
-  OCaml whose garbage collector is **MMTk** (crates.io `mmtk` 0.32). It is *not* a
+  OCaml whose garbage collector is **MMTk** (`mmtk` 0.32, from our fork: the git submodule
+  `gc/mmtk-core` = `fplaunchpad/mmtk-core` branch `0.32-ocaml`, substituted for the crates.io crate via
+  `[patch.crates-io]` in `gc/mmtk/Cargo.toml`). It is *not* a
   separate binding bolted onto stock OCaml — we hack on and ship this tree.
 - MMTk is **always-on** (milestone M9). Default plan is **GenImmix** (copying nursery + Immix
   mature; the generational, stock-OCaml-faithful plan). Both the bytecode
@@ -145,13 +147,15 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 
 ## GC plan & env knobs
 
-- `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `Bactrian` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
-  Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix/Bactrian.
+- `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `Bactrian` | `LXR` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
+  Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix/Bactrian/LXR (`LXR` needs a pinned `MMTK_HEAP_SIZE_MB`).
   `Bactrian` (RQ7) = copying nursery + concurrently-marked STW-evacuated Immix mature + SATB —
-  stock-ARCHITECTURE (sweep is STW at FinalMark; since 2026-08-11 marking runs as **sliced-STW
-  quanta inside nursery pauses** by default — stock's mark-slice discipline on the GC worker,
-  `MMTK_MARK_SLICED=0` restores worker-concurrent marking; SHAPE.md rounds 23–26 cover the
-  W-parity campaign: pretenuring, UP-trace, sliced marking, JCC-erratum methodology); debug
+  stock-ARCHITECTURE (since 2026-08-11 marking runs as **sliced-STW quanta inside nursery pauses**
+  by default — stock's mark-slice discipline on the GC worker — and in that mode FinalMark's mature
+  sweep is deferred to budgeted **incremental-sweep** quanta in later nursery pauses (mmtk-core
+  `c01edca806`, `MMTK_SWEEP_SLICE_MS`); `MMTK_MARK_SLICED=0` restores worker-concurrent marking with
+  the STW FinalMark sweep; `gc/mmtk/SHAPE.md` rounds 1–32 are the shape campaign: pretenuring,
+  UP-trace, sliced marking, JCC-erratum methodology, incremental sweep, compaction, UP-oldify); debug
   knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
 - `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
   full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 32 MiB (MMTK_MIN_HEAP_MB)..physical-RAM, so
@@ -159,7 +163,7 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   programs — binarytrees was 3.5× slower; now 1.27×. Override via `MMTK_GC_TRIGGER`), `MMTK_NURSERY`
   (raw BYTES only, e.g. `Fixed:8388608` / `Bounded:2097152,8388608`; the `2m,8m` *suffix* form does **not**
   parse — it silently falls back to mmtk-core's default, ROADMAP #21 BUG B; default = bounded **2–16 MiB scaled by the live domain
-  count** (N×2–N×16 MiB, stock-parity: stock gives each domain its own 2 MiB arena; 64 MiB until 2026-08-12 — see SHAPE rounds 26–28 for the frontier-warmth sweep that picked 16) — latched from the
+  count** (N×2–N×16 MiB, stock-parity: stock gives each domain its own 2 MiB arena; 64 MiB until 2026-08-12 — see `gc/mmtk/SHAPE.md` rounds 26–28 for the frontier-warmth sweep that picked 16) — latched from the
   domain registry at spawn/termination, consumed lazily at the next trigger check; the space-overhead
   heap gets matching headroom for the scaled portion (SCALABILITY.md UPDATE 6: par_binarytrees d=8
   5.7× faster, copied objects ÷9). An explicit `MMTK_NURSERY` pin is never scaled; opt out of scaling
