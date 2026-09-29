@@ -46,7 +46,7 @@ On **2026-09-29**, [post-merge Linux CI](https://github.com/fplaunchpad/ocaml-mm
 covering bytecode and native variants, reported no failures among 1495 tests
 considered per plan under GenImmix, StickyImmix, SemiSpace, and Bactrian.
 GenCopy failed `misc/darkening_work.ml`; Immix and ConcurrentImmix hit the
-`weaklifetime.ml` timeout, addressed by a pending
+`weaklifetime.ml` timeout, addressed by a merged
 [test heap-pinning change](https://github.com/fplaunchpad/ocaml-mmtk/pull/27).
 The suite includes disabled cases for unsupported features and GC timing
 differences. Memprof is unsupported; [`runtime_events` GC-event emission](https://github.com/fplaunchpad/ocaml-mmtk/issues/20)
