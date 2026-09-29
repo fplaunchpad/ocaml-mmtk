@@ -1503,8 +1503,10 @@ void caml_mmtk_become_running(uintnat domain_state_addr)
 int caml_mmtk_check_running_on = 0;
 
 /* Race-window widening for tests (MMTK_CHECK_RUNNING_WIDEN_US, detector on
-   only): sleep between a blocking-section release of the domain lock and
-   the STOPPED mark, i.e. inside the window the audit calls GAP-1. */
+   only): sleep just before a STOPPED mark. Before the GH issue 24 fix the
+   mark came after the blocking-section hook had released the domain lock,
+   so this widened the GAP-1 window; now the mark is made by the lock holder
+   before the release and the sleep only delays the release. */
 static long caml_mmtk_check_widen_us = 0;
 
 /* Debug bookkeeping, per domain slot (only touched when the detector is on):
@@ -1924,23 +1926,15 @@ void caml_mmtk_quiesce_running_domains(void)
 /* A domain is entering / leaving a C blocking section. While blocking it is
    safe for GC; on leaving it must wait out any in-progress collection.
 
-   `dom` is the domain's caml_domain_state address, captured by the caller
-   (runtime/signals.c) while Caml_state was still bound -- it must NOT be read
-   from Caml_state here. The blocking-section hooks release/re-acquire the
-   domain lock around these calls, which clears/restores Caml_state
-   asymmetrically: `caml_enter_blocking_section` calls enter AFTER the hook
-   released the lock (Caml_state is NULL), while `caml_leave_blocking_section`
-   calls leave AFTER the hook re-acquired it (Caml_state is valid). The previous
-   code read Caml_state_opt directly, so the enter found it NULL and skipped the
-   `stopped` increment while leave still decremented it -- underflowing the
-   usize count to a huge value, making `stop_all_mutators`'s `stopped >= n`
-   barrier always true. The GC then never waited for running domains to reach a
-   safepoint and scanned the live, mutating roots of a still-running domain,
-   handing an immediate/foreign value to trace_object: the `cannot trace object
-   0x1` (Val_int 0) panic in the parallel spawn-burn tests. `dom == 0` (no
-   domain bound, e.g. caml_open_descriptor_in during early startup) is a no-op,
-   and the `mmtk_mutator != NULL` guard keeps enter/leave balanced across
-   binding. */
+   Callers hold the domain lock and pass their caml_domain_state address:
+   the default blocking-section hooks (runtime/signals.c) call enter just
+   before releasing the lock and leave just after re-acquiring it, and the
+   systhreads master lock does the same on a release with no waiting thread
+   and on the next acquire (GH issue 24: only the lock holder may change the
+   domain's RUNNING state, or a late STOPPED mark can erase the RUNNING mark
+   of the thread that took the lock next). `dom == 0` (no domain bound) is
+   a no-op, and the `mmtk_mutator != NULL` guard keeps enter/leave balanced
+   across binding and after a domain has been deregistered. */
 void caml_mmtk_enter_blocking(uintnat dom)
 {
   if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL) {

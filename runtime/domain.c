@@ -727,6 +727,15 @@ void caml_init_domains(uintnat max_domains, uintnat minor_heap_wsz)
   if (!domain_self) caml_fatal_error("Failed to create main domain");
   CAMLassert (domain_self->state->unique_id == 0);
 
+  /* The main domain holds its domain lock and is about to run OCaml (the
+     program, or the C code that embeds it), so it is a must-stop MMTk
+     participant from here on, like a spawned domain after
+     domain_thread_func's first RUNNING edge. It was born STOPPED at bind
+     (caml_mmtk_domain_init); without this edge it ran OCaml outside the
+     RUNNING set until its first blocking section or collection (GH issue
+     24). No collection can be active yet, so this does not park. */
+  caml_mmtk_leave_blocking((uintnat) domain_self->state);
+
   caml_init_signal_handling();
 }
 
@@ -1171,16 +1180,15 @@ CAMLprim value caml_domain_spawn(value callback, value term_sync)
        raise can escape mid-handshake). interruptor->lock is independent of
        domain_lock (which the enter hook releases), so drop it around the
        section and re-test p.status under it to avoid a lost wakeup. */
-    caml_domain_state *self = domain_self->state;
     caml_plat_unlock(&interruptor->lock);
+    /* The hooks take the domain out of MMTk's RUNNING set and put it back
+       (GH issue 24; see caml_enter_blocking_section_default). */
     caml_enter_blocking_section_hook();
-    caml_mmtk_enter_blocking((uintnat) self);
     caml_plat_lock_blocking(&interruptor->lock);
     if (p.status == Dom_starting)
       caml_plat_wait(&interruptor->cond, &interruptor->lock);
     caml_plat_unlock(&interruptor->lock);
     caml_leave_blocking_section_hook();
-    caml_mmtk_leave_blocking((uintnat) self);
     caml_plat_lock_blocking(&interruptor->lock);
   }
   caml_plat_unlock(&interruptor->lock);

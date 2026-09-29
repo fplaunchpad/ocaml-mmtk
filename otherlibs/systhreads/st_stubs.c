@@ -73,19 +73,42 @@ SetThreadDescription(HANDLE hThread, PCWSTR lpThreadDescription);
 
 typedef int st_retcode;
 
-/* Under always-on MMTk the per-domain backup thread has been retired (MMTk's
-   stop_all_mutators is the sole all-domains rendezvous; a thread that releases
-   the domain lock is removed from the RUNNING set and not awaited), so
-   acquiring and releasing the domain lock is all these need to do. The
-   other_threads_waiting argument is unused now but kept for the masterlock ABI.
-   */
+/* Under always-on MMTk the per-domain backup thread has been retired: MMTk's
+   stop_all_mutators is the sole all-domains rendezvous, and it waits only for
+   the domains in its RUNNING set. That set is per domain while the master
+   lock is shared by all the systhreads of the domain, so (GH issue 24) the
+   RUNNING state of a domain is owned by the master lock: only the thread that
+   holds it (m->busy) changes it, and the domain is RUNNING exactly when some
+   thread holds the lock or is being handed it.
+
+   Release: upstream called st_bt_lock_release(waiters == 0) under m->lock
+   and handed the domain to its backup thread (caml_bt_exit_ocaml) only when
+   nobody was waiting for the lock; with a waiter, the domain stayed "in
+   OCaml" for the successor. We do the same with the RUNNING set: with no
+   waiter the domain is marked STOPPED here, under m->lock and before the
+   domain lock is released, so no successor can take the lock before the mark
+   lands (a mark made after the unlock could erase the successor's RUNNING
+   mark). With a waiter the domain stays RUNNING and the successor inherits
+   it, which also covers a thread woken in st_thread_yield: nothing on that
+   path marks RUNNING. The waiter is committed to take the lock (it counted
+   itself in m->waiters and waits on m->is_free), and until it reaches its
+   first safepoint a collection simply waits for it.
+
+   Acquire: see thread_lock_acquire. st_mmtk_running below records, for the
+   lock holder, whether the domain is in the RUNNING set; it is read and
+   written only by the holder of m->busy (release writes it under m->lock
+   before clearing busy is published), so it needs no further locking. */
+static void st_mmtk_release_domain(void);
+
 static void st_bt_lock_acquire(void) {
   caml_acquire_domain_lock();
   return;
 }
 
-static void st_bt_lock_release(bool other_threads_waiting) {
-  (void)other_threads_waiting;
+/* Called under m->lock with the domain lock still held. [no_waiter] is
+   upstream's [waiters == 0]. */
+static void st_bt_lock_release(bool no_waiter) {
+  if (no_waiter) st_mmtk_release_domain();
   caml_release_domain_lock();
   return;
 }
@@ -149,6 +172,9 @@ struct caml_thread_table {
   int tick_thread_running;
   st_thread_id tick_thread_id;
   atomic_uintnat tick_thread_stop;
+  /* Whether the domain is in MMTk's RUNNING set; owned by the master-lock
+     holder (see st_bt_lock_release). */
+  bool st_mmtk_running;
 };
 
 /* thread_table instance, up to caml_params->max_domains */
@@ -156,14 +182,35 @@ static struct caml_thread_table* thread_table;
 
 #define Thread_lock(dom_id) &thread_table[dom_id].thread_lock
 
+/* Take the master lock. If the previous holder released it with nobody
+   waiting, the domain was marked STOPPED and we must mark it RUNNING again
+   before this thread touches the domain's root state (restore_runtime_state,
+   the thread ring) or runs OCaml. caml_mmtk_leave_blocking parks
+   cooperatively while a collection is active: it releases the domain lock
+   but keeps m->busy, so no other systhread of the domain can run meanwhile,
+   and the root state it leaves for the collection is the one the previous
+   holder saved, which is consistent. If the lock was handed over with the
+   domain still RUNNING, there is nothing to do and no STW-mutex traffic. */
 static void thread_lock_acquire(int dom_id)
 {
   st_masterlock_acquire(Thread_lock(dom_id));
+  if (!thread_table[dom_id].st_mmtk_running) {
+    caml_mmtk_leave_blocking((uintnat) Caml_state);
+    thread_table[dom_id].st_mmtk_running = true;
+  }
 }
 
 static void thread_lock_release(int dom_id)
 {
   st_masterlock_release(Thread_lock(dom_id));
+}
+
+/* The no-waiter half of st_bt_lock_release: the domain leaves the RUNNING
+   set. The caller has saved its runtime state and holds the domain lock. */
+static void st_mmtk_release_domain(void)
+{
+  thread_table[Caml_state->id].st_mmtk_running = false;
+  caml_mmtk_enter_blocking((uintnat) Caml_state);
 }
 
 /* Used to signal that the "tick" thread for this domain should be stopped. */
@@ -489,6 +536,9 @@ static void caml_thread_reinitialize(void)
      effort. */
   if (st_masterlock_init(m) != 0)
     caml_fatal_error("Unix.fork: failed to reinitialize master lock");
+  /* The child's copy of MMTk's RUNNING set still holds this domain, which
+     was running OCaml in the parent when it forked. */
+  thread_table[Caml_state->id].st_mmtk_running = true;
 
   /* Reinitialize IO mutexes, in case the fork happened while another thread
      had locked the channel. If so, we're likely in an inconsistent state,
@@ -544,6 +594,10 @@ static value caml_thread_domain_initialize_hook_exn(void)
   int ret = st_masterlock_init(Thread_lock(Caml_state->id));
   if (ret != 0)
     return caml_check_error_exn(ret, "caml_thread_domain_initialize_hook");
+  /* The initialising thread holds the new master lock (busy) and is running
+     OCaml, so its domain is RUNNING (domain 0 since caml_init_domains, a
+     spawned domain since domain_thread_func). */
+  thread_table[Caml_state->id].st_mmtk_running = true;
 
   new_thread =
     (caml_thread_t) caml_stat_alloc_noexc(sizeof(struct caml_thread_struct));
@@ -707,18 +761,11 @@ caml_thread_start(void * v)
 
   thread_init_current(th);
 
-  /* MMTk STW safety (GH#17 Bug B): we acquired the master lock and are about to
-     run OCaml on this domain WITHOUT going through caml_leave_blocking_section,
-     so the domain is not in MMTk's RUNNING set. If another thread on this
-     domain blocked it (e.g. the spawning thread is in Thread.join), MMTk would
-     see the domain as safe-stopped and scan THIS thread's live, still-mutating
-     stack -- reading mutator-written words (e.g. tagged immediates) as return
-     addresses, so caml_find_frame_descr returns NULL (fiber.c CAMLassert(d) in
-     debug; a NULL frame_descr deref / SIGSEGV in release). Mark the domain
-     RUNNING (and cooperatively park if a collection is already in progress)
-     before any OCaml runs, mirroring what caml_leave_blocking_section does via
-     caml_mmtk_leave_blocking. */
-  caml_mmtk_become_running((uintnat) Caml_state);
+  /* MMTk STW safety (GH#17 Bug B, GH issue 24): thread_lock_acquire above
+     left the domain in MMTk's RUNNING set (re-marking it, before
+     thread_init_current touched the root state, if the previous holder had
+     marked it STOPPED), so a collection cannot scan this thread's stack while
+     it runs. */
   /* GH issue 24 detector: about to run the thread's closure. */
   Caml_mmtk_check_running("caml_thread_start");
 
@@ -873,13 +920,10 @@ int caml_c_thread_register_in_domain_index(uintnat domain_index,
 
   thread_init_current(th);
 
-  /* MMTk STW safety (GH#17 Bug B): same gap as caml_thread_start -- we hold the
-     master lock and are about to run/allocate OCaml without having gone through
-     caml_leave_blocking_section, so the domain is not in MMTk's RUNNING set.
-     Mark it RUNNING before the allocation below so the STW protocol cannot scan
-     this thread's live stack. (We re-block the regular way via
-     caml_enter_blocking_section_no_pending at the end.) */
-  caml_mmtk_become_running((uintnat) Caml_state);
+  /* MMTk STW safety (GH#17 Bug B, GH issue 24): as in caml_thread_start,
+     thread_lock_acquire left the domain RUNNING before the allocation below.
+     (We re-block the regular way via caml_enter_blocking_section_no_pending
+     at the end.) */
   /* GH issue 24 detector: about to allocate the thread descriptor. */
   Caml_mmtk_check_running("caml_c_thread_register");
 

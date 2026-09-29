@@ -266,14 +266,11 @@ extern void caml_mmtk_quiesce_ack(caml_domain_state *d);
 extern void caml_mmtk_quiesce_running_domains(void);
 
 /* Blocking-section participation: a domain in a C blocking section is safe for
- * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking are called
- * from caml_enter/leave_blocking_section with the domain's caml_domain_state
- * address, captured by the caller while Caml_state is still bound -- these must
- * NOT read Caml_state themselves, as the blocking-section hooks
- * release/re-acquire the domain lock asymmetrically around the calls (enter
- * sees Caml_state NULL, leave sees it valid), which would unbalance MMTk's
- * safe-stopped accounting. caml_mmtk_domain_terminate deregisters a terminating
- * domain. */
+ * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking take the
+ * domain's caml_domain_state address and are called by the holder of the
+ * domain lock: the default blocking-section hooks, and the systhreads master
+ * lock (GH issue 24; see runtime/signals.c and st_stubs.c).
+ * caml_mmtk_domain_terminate deregisters a terminating domain. */
 extern void caml_mmtk_enter_blocking(uintnat dom);
 extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
