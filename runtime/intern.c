@@ -106,6 +106,15 @@ struct caml_intern_state {
      would otherwise trigger a moving GC mid-unmarshal, relocating/collecting
      the partially-built structure that intern_rec is still filling through raw
      pointers. */
+
+  value * mature_blocks;
+  /* MMTk: scannable blocks placed outside the nursery, collected only when
+     there is no [intern_obj_table] to find them in (data marshaled with
+     No_sharing). See the end of intern_rec. */
+
+  asize_t mature_count;
+  asize_t mature_size;
+  /* Number of entries used in, and capacity of, [mature_blocks]. */
 };
 
 static void init_intern_stack(struct caml_intern_state* s)
@@ -134,6 +143,9 @@ static struct caml_intern_state* init_intern_state (void)
   s->intern_dest = NULL;
   s->intern_dest_end = NULL;
   s->gc_was_disabled = 0;
+  s->mature_blocks = NULL;
+  s->mature_count = 0;
+  s->mature_size = 0;
   init_intern_stack(s);
 
   Caml_state->intern_state = s;
@@ -316,6 +328,12 @@ static void intern_cleanup(struct caml_intern_state* s)
     s->intern_obj_table = NULL;
     s->intern_num_objects = 0;
   }
+  if (s->mature_blocks != NULL) {
+    caml_stat_free(s->mature_blocks);
+    s->mature_blocks = NULL;
+    s->mature_size = 0;
+  }
+  s->mature_count = 0;
   s->intern_dest = NULL;
   s->intern_dest_end = NULL;
   /* free the recursion stack */
@@ -508,6 +526,28 @@ static value intern_alloc_obj(struct caml_intern_state* s, caml_domain_state* d,
   return v;
 }
 
+/* MMTk: note a freshly allocated block [v] that the end of intern_rec must
+   hand to the region barrier. That pass normally walks [intern_obj_table],
+   but data marshaled with No_sharing has no object table, so its mature
+   blocks are listed here instead. Nursery and no-scan blocks need nothing. */
+static void intern_note_mature_block(struct caml_intern_state* s, value v)
+{
+  if (s->intern_obj_table != NULL || Tag_val(v) >= No_scan_tag
+      || !caml_mmtk_alloc_shr_is_mature(Wosize_val(v)))
+    return;
+  if (s->mature_count == s->mature_size) {
+    asize_t n = s->mature_size == 0 ? 64 : 2 * s->mature_size;
+    value *t = caml_stat_resize_noexc(s->mature_blocks, n * sizeof(value));
+    if (t == NULL) {
+      intern_cleanup(s);
+      caml_raise_out_of_memory();
+    }
+    s->mature_blocks = t;
+    s->mature_size = n;
+  }
+  s->mature_blocks[s->mature_count++] = v;
+}
+
 static void intern_rec(struct caml_intern_state* s,
                        const char * fun_name,
                        volatile value *dest)
@@ -591,6 +631,7 @@ static void intern_rec(struct caml_intern_state* s,
       } else {
         v = intern_alloc_obj (s, d, size, tag);
         intern_record_obj(s, v);
+        intern_note_mature_block(s, v);
         /* For objects, we need to freshen the oid */
         if (tag == Object_tag) {
           if (CAMLunlikely(size < 2))
@@ -854,6 +895,13 @@ static void intern_rec(struct caml_intern_state* s,
         caml_mmtk_region_barrier(&Field(b, 0), Wosize_val(b));
     }
   }
+  /* Without an object table (No_sharing), the same blocks were listed by
+     intern_note_mature_block as they were allocated. */
+  for (asize_t i = 0; i < s->mature_count; i++) {
+    value b = s->mature_blocks[i];
+    caml_mmtk_region_barrier(&Field(b, 0), Wosize_val(b));
+  }
+  s->mature_count = 0;
   /* We are done. Cleanup the stack and leave the function */
   intern_free_stack(s);
 }
