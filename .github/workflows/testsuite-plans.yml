@@ -13,6 +13,8 @@ on:
   push:
     paths:
       - 'gc/mmtk/**'
+      # The mmtk-core submodule is a gitlink, which 'gc/mmtk/**' does not match.
+      - 'gc/mmtk-core'
       - 'runtime/**'
       - '.github/workflows/testsuite-plans.yml'
 
