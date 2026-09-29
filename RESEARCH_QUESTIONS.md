@@ -359,8 +359,9 @@ Concrete findings already in hand:
 
 **Later instances of the same lessons (2026-09-29; observations, not yet results).** Each is
 tracked in ROADMAP (open items 17-19):
-- *Every store path must reach the barrier.* Native `Array.fill` skips the generational barrier, which
-  silently corrupts the default plan (item 18).
+- *Every store path must reach the barrier.* Native `Array.fill` and `No_sharing` unmarshalling skip the
+  generational barrier, which silently corrupts the default plan (item 18, GH issue 28). The testsuite had
+  no old-to-young test for bulk primitives, so a native/bytecode split in a barrier went unseen.
 - *A barrier that runs before the store must not trust cached state.* The LXR field barrier classified
   a slot by its old value and lost the new value's RC increment (item 17).
 - *Coordination impedance.* Retiring the backup thread left a per-domain RUNNING flag that is

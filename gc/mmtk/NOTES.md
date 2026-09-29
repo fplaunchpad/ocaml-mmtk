@@ -5,14 +5,14 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## 2026-09-29 - later findings: native bulk-store barrier gap, LXR root cause and capacity, GH issue 24 confirmed, pacing on reserved pages, explicit Gc requests (KNOWN FAILURES)
+## 2026-09-29 - later findings: bulk-store barrier gaps (GH issue 28), LXR root cause and capacity, GH issue 24 confirmed, pacing on reserved pages, explicit Gc requests (KNOWN FAILURES)
 
 Evidence labels: *verified* = reproduced by running; *source reading*;
 *inferred*; *unknown*. Code references are to the tree at `358ea7958c`
 (mmtk-core `045f121143`); line numbers are approximate. Tracked as ROADMAP
-open items 15-23, in priority order 18, 19, 20, 21, 22, 23.
+open items 15-24, in priority order 18, 19, 20, 21, 22, 23, 24.
 
-### Native bulk stores skip the generational barrier (ROADMAP item 18)
+### Bulk stores skip the generational barrier (ROADMAP item 18, GH issue 28)
 
 *Source reading:* `caml_uniform_array_fill` (`runtime/array.c` ~773-777) calls
 `caml_mmtk_region_barrier` only under `#ifndef NATIVE_CODE`. Native
@@ -39,9 +39,80 @@ slots out of 1000:
 2026-07-03 build (`cbc66e3efd`) gives 878/1000 under GenImmix. No testsuite
 test covers the pattern, so GenImmix is green despite it.
 
-A fix, an audit of every native store path, and a regression test are in
-progress on branch `fix/native-bulk-store-barrier`. The GitHub issue is to be
-filed.
+**Now GH issue 28, together with a second gap found by the store-path
+audit.**
+
+History (git):
+- `b0dc6460e3` (2026-06-19) added the fill barrier inside
+  `#ifndef NATIVE_CODE`.
+- `af6afd77ba` (06-21) kept it bytecode-only.
+- `16373f099c` (06-22) wired the native barrier into `caml_modify` and
+  `caml_initialize` but missed this third site.
+- `49588c70ae` (06-24) made GenImmix the default.
+
+So the default plan has been affected since 2026-06-24.
+
+*Second gap, `No_sharing` unmarshalling, both runtimes.* This covers
+`Marshal.from_string` and `input_value` of data marshalled with
+`No_sharing`.
+- *Source reading:* the barrier pass that `451b4ebaf0` (2026-09-23) added to
+  `intern_rec` walks `intern_obj_table`. That table is allocated only when
+  the data records shared objects, so for `No_sharing` data the pass does
+  nothing.
+- *Verified:* 100/100 corrupted under Bactrian, native and bytecode. Medium
+  pretenuring is on by default there since `16169a12a0` (2026-08-10).
+  GenImmix, StickyImmix and GenCopy corrupt only with
+  `MMTK_MEDIUM_NONMOVING=1` (exit 139).
+
+*Store-path audit (source reading):* there is no other gap. Every other store
+goes through `caml_modify`/`caml_initialize` or a scanned root list. The
+audit covered `caml_modify`, `Obj.set_field`, Hashtbl, `Array.blit` (always
+via `caml_modify`, because `Is_young` is always false under MMTk), atomics,
+`Atomic.make_contended`, the `Array` constructors, `Obj.dup`/`with_tag`,
+lazy forcing, Weak/ephemeron keys, DLS, global roots, `Gc.finalise`, effect
+continuations, and Marshal with sharing. ocamlopt emits every pointer store
+as an out-of-line `caml_modify`/`caml_initialize` (`asmcomp/cmm_helpers.ml`
+~2279-2295). The full table is in GH issue 28.
+
+*Fix, on a branch, not merged:* commit `3c4b074899` on
+`fix/native-bulk-store-barrier`.
+- `runtime/array.c`: the `#ifndef NATIVE_CODE` guard is removed.
+- `runtime/intern.c`: mature blocks are listed when there is no object table
+  and are handed to the region barrier at the end of `intern_rec`.
+- Regression test: `testsuite/tests/gc-roots/old_to_young_bulk_stores.ml`.
+
+*Verified on the fix branch:*
+- The probe gives 0/1000 for both `fill` and `blit` under GenImmix,
+  StickyImmix, GenCopy, Bactrian and Immix (native).
+- The regression test passes under GenImmix, Bactrian, StickyImmix and LXR.
+
+A full testsuite run is pending.
+
+**Lesson:** the testsuite had no old-to-young test for bulk primitives, which
+is why GenImmix stayed green. A barrier split between the native and bytecode
+runtimes needs a test in each runtime.
+
+**Side findings from the audit (pre-existing, not fixed, unchanged by this
+fix; ROADMAP item 24):**
+- Native StickyImmix: `Obj.Ephemeron.set_data` into an aged ephemeron loses
+  199/200 data blocks while the key is live. Bytecode is fine. *Inferred:*
+  weak/ephemeron processing rather than a barrier.
+- Immix with the non-default `MMTK_MEDIUM_NONMOVING=1` segfaults on
+  large-array probes.
+
+**Related, UNVERIFIED (source reading, no reproducer; present at mmtk-core
+`045f121143` and not introduced by any fix above):**
+- `intern_rec` (`runtime/intern.c` ~534-540) suppresses collection with
+  `caml_mmtk_disable_collection` while it holds raw pointers into half-built
+  objects.
+- That counter is read only through `VMCollection::is_collection_enabled`
+  (`runtime/mmtk.c` ~71-91, `gc/mmtk/binding/src/collection.rs` ~797).
+- A forced request skips that check (mmtk-core `util/heap/gc_trigger.rs`
+  ~180, `if force || ...`), and the binding's explicit-GC entry points pass
+  `force = true` (`gc/mmtk/binding/src/api.rs` ~673 and ~692).
+
+So a custom-block deserialize callback that forces a GC during unmarshalling
+could collect in the middle of `intern_rec`.
 
 ### LXR wrong results: root cause and fix (GH issue 26; ROADMAP item 17)
 
@@ -118,8 +189,21 @@ deferred on `Gc.full_major`; 9 tests disabled).
 *Unknown:* why `finaliser.ml`, `globroots.ml` and `gcwords.ml` passed under
 the unfixed LXR of ROADMAP item 14.
 
-A prototype fix exists but is not validated and not landed. It waits for the
-pending-or-active global collection and routes `Gc.minor` into MMTk.
+*Fix, not yet merged* (local topic commits, under verification):
+- mmtk-core `885ed5a880`, "Expose pending collection requests to VM
+  bindings" (`MMTK::is_collection_requested`). Hash as reported; not in this
+  repository's object store.
+- ocaml-mmtk `6fc57da0f8`, "Wait for explicit GC requests to complete a
+  pause":
+  - `park_until_resumed` waits while a collection is pending or active.
+  - `GC_COUNT` is published before mutators resume.
+  - `caml_gc_minor` calls `caml_mmtk_collect_minor`.
+  - New test: `testsuite/tests/gc-roots/explicit_gc.ml`.
+
+Scope limit: it waits for the global STW pause only. It does not establish
+completion of a whole ConcurrentImmix cycle, an LXR backup cycle, or
+finaliser callbacks. LXR weak retention and an `alloc_async` timeout remain
+open.
 
 ### GH issue 24 confirmed by running (ROADMAP item 19)
 
@@ -158,7 +242,8 @@ Root cause of the class (source reading): the backup-thread retirement
 ("GH#20" entry, 2026-06-29) kept a per-domain flag but made it
 safety-critical without tying it to master-lock ownership.
 
-Fix direction, not written yet:
+Results are posted on GH issue 24. A fix is in progress on the same branch
+(not merged). Its direction:
 - Mark STOPPED at lock release only if nobody is waiting (upstream's
   `st_bt_lock_release(waiters == 0)` condition).
 - Whoever takes the lock from STOPPED runs `become_running` before
@@ -187,8 +272,24 @@ case is verified working: a 64 MiB allocation from an 8 MiB floor.
 
 GenImmix does not grow on this probe (330 GCs at the 8 MiB floor, 66 at 32
 MiB), because its collections are nursery-triggered. That is a difference for
-this probe, not general immunity. A fix is in progress, not landed: size from
-the post-GC reservation plus the largest actual pending request.
+this probe, not general immunity.
+
+*Fix, not yet merged:* mmtk-core commit `f0afe6ed00` (a local topic commit;
+hash as reported, not in this repository's object store; only
+`src/util/heap/gc_trigger.rs`). It sizes the demand target from the largest
+actual pending request instead of the whole pre-GC reservation.
+
+Its author's results, not re-run independently:
+
+| probe | before | after |
+|---|---|---|
+| Immix garbage probe, 8 MiB floor | 7 collections, grows to 128 MiB | 67 collections, stays at 8 MiB |
+| Immix garbage probe, 32 MiB floor | 5 collections, grows to 128 MiB | 16 collections, stays at 32 MiB |
+| GenImmix, 8 / 32 MiB floor | 330 / 66 collections | unchanged |
+
+The 64 MiB large-allocation case and a ~64 MiB growing-live builder still
+pass under both plans. Bactrian and ConcurrentImmix garbage probes stay near
+the floor.
 
 **(b) GenCopy `darkening_work.ml`.** Figures are from the diagnostic's
 report; not re-run.
