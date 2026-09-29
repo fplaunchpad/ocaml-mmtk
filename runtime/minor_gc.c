@@ -170,12 +170,6 @@ void caml_empty_minor_heap_domain_clear(caml_domain_state* domain)
   domain->extra_heap_resources_minor = 0.0;
 }
 
-/* Increment the counter non-atomically, when it is already known that this
-   thread is alone in trying to increment it. */
-static void nonatomic_increment_counter(atomic_uintnat* counter) {
-  atomic_store_relaxed(counter, 1 + atomic_load_relaxed(counter));
-}
-
 /* Per-domain young-region reset -- the sole load-bearing residue of the old
    all-domains minor-empty STW (caml_empty_minor_heap_promote, excise Phase 3a).
    Runs on the TRIGGERING domain at its own safepoint (caml_poll_gc_work,
@@ -222,8 +216,12 @@ void caml_minor_gc_domain_bookkeeping(caml_domain_state* domain, int bump_count)
   caml_memprof_after_minor_gc(domain);
   caml_final_update_last_minor(domain);
   caml_empty_minor_heap_domain_clear(domain); /* incl. caml_final_empty_young */
+  /* Atomic: without the minor STW, several domains can get here at once.
+     Stock's non-atomic bump was safe only inside that STW; here a lost
+     update can move the count backwards, below caml_major_slice_epoch
+     (the debug assertion in advance_global_major_slice_epoch). */
   if (bump_count)
-    nonatomic_increment_counter(&caml_minor_collections_count);
+    atomic_fetch_add(&caml_minor_collections_count, 1);
 }
 
 /* Called by minor allocations when [Caml_state->young_ptr] reaches
@@ -261,6 +259,14 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
        minor GC; otherwise we empty the minor heap. */
     CAML_EV_COUNTER(EV_C_FORCE_MINOR_ALLOC_SMALL, 1);
     if (caml_mmtk_tlab) {
+      if (caml_mmtk_poll_debug) {
+        static _Atomic long n = 0;
+        long k = ++n;
+        if (k <= 5 || k % 1000000 == 0)
+          fprintf(stderr, "[dispatch] #%ld wh=%ld young=[%p,%p) ptr=%p\n",
+                  k, (long)whsize, (void *)dom_st->young_start,
+                  (void *)dom_st->young_end, (void *)dom_st->young_ptr);
+      }
       if (!caml_mmtk_refill_tlab(dom_st, whsize)) {
         /* MMTk bug #4: this raise happens from inside caml_call_gc's saved-regs
            window (caml_garbage_collection -> here). Recycle the popped gc_regs

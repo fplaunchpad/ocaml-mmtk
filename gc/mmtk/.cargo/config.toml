@@ -1,0 +1,6 @@
+# JCC-erratum mitigation for the GC staticlib (SHAPE.md round 26): pad
+# branches/fused pairs off 32-byte boundaries, same as the AS flag both
+# OCaml toolchains build with. Keeps G-side code layout deterministic —
+# without it every staticlib rebuild re-rolls worker-loop DSB coverage.
+[build]
+rustflags = ["-Cllvm-args=-x86-branches-within-32B-boundaries"]

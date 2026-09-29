@@ -771,7 +771,9 @@ CAMLprim value caml_uniform_array_fill(
      */
   for (intnat i = 0; i < len; i++) fp[i] = val;
 #ifndef NATIVE_CODE
-  caml_mmtk_region_barrier(fp, len);
+  /* Immediate fills create no heap edges (same filter as caml_initialize /
+     write_barrier); the SATB barrier above already handled the OLD values. */
+  if (Is_block(val)) caml_mmtk_region_barrier(fp, len);
 #endif
   return Val_unit;
 }

@@ -148,14 +148,18 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
 - `MMTK_PLAN` = `GenImmix` (default) | `Immix` | `StickyImmix` | `ConcurrentImmix` | `Bactrian` | `GenCopy` | `SemiSpace` | `MarkSweep` | `NoGC`.
   Native code requires a bump/Immix-Default plan (TLAB nursery-aliasing): GenImmix/Immix/StickyImmix/GenCopy/SemiSpace/ConcurrentImmix/Bactrian.
   `Bactrian` (RQ7) = copying nursery + concurrently-marked STW-evacuated Immix mature + SATB —
-  stock-ARCHITECTURE (not implementation: sweep is STW at FinalMark, marking on GC workers — NOTES 2026-07-02); debug knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
+  stock-ARCHITECTURE (sweep is STW at FinalMark; since 2026-08-11 marking runs as **sliced-STW
+  quanta inside nursery pauses** by default — stock's mark-slice discipline on the GC worker,
+  `MMTK_MARK_SLICED=0` restores worker-concurrent marking; SHAPE.md rounds 23–26 cover the
+  W-parity campaign: pretenuring, UP-trace, sliced marking, JCC-erratum methodology); debug
+  knobs `BACTRIAN_TRACE=1`, `BACTRIAN_NO_CONCURRENT=1` (see NOTES 2026-07-02).
 - `MMTK_HEAP_SIZE_MB` (pin a **fixed** heap; default is a **space-overhead** heap — after each
-  full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 16 MiB..physical-RAM, so
+  full GC, `heap = live × 2.2` à la stock's `Gc.space_overhead`, clamped 32 MiB (MMTK_MIN_HEAP_MB)..physical-RAM, so
   RSS tracks the live set. Replaced MemBalancer, whose sqrt rule under-provisioned big-live-set
   programs — binarytrees was 3.5× slower; now 1.27×. Override via `MMTK_GC_TRIGGER`), `MMTK_NURSERY`
   (raw BYTES only, e.g. `Fixed:8388608` / `Bounded:2097152,8388608`; the `2m,8m` *suffix* form does **not**
-  parse — it silently falls back to mmtk-core's default, ROADMAP #21 BUG B; default = bounded **2–64 MiB scaled by the live domain
-  count** (N×2–N×64 MiB, stock-parity: stock gives each domain its own 2 MiB arena) — latched from the
+  parse — it silently falls back to mmtk-core's default, ROADMAP #21 BUG B; default = bounded **2–16 MiB scaled by the live domain
+  count** (N×2–N×16 MiB, stock-parity: stock gives each domain its own 2 MiB arena; 64 MiB until 2026-08-12 — see SHAPE rounds 26–28 for the frontier-warmth sweep that picked 16) — latched from the
   domain registry at spawn/termination, consumed lazily at the next trigger check; the space-overhead
   heap gets matching headroom for the scaled portion (SCALABILITY.md UPDATE 6: par_binarytrees d=8
   5.7× faster, copied objects ÷9). An explicit `MMTK_NURSERY` pin is never scaled; opt out of scaling

@@ -84,6 +84,10 @@ extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
  * Out_of_memory, so the unmarshaller can clean up first. See runtime/intern.c.
  */
 extern value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag);
+/* 1 if a caml_mmtk_alloc_shr block of this size is born outside the nursery
+   under a generational plan (its unbarriered pointer fields need
+   caml_mmtk_region_barrier). */
+extern int caml_mmtk_alloc_shr_is_mature(mlsize_t wosize);
 
 /* Stop-the-world support. caml_mmtk_stw_poll is called from
  * caml_handle_gc_interrupt: if a collection is in progress it parks this domain
@@ -114,6 +118,8 @@ extern void caml_mmtk_scan_ephe_roots(scanning_action f, void *fdata,
  * clean_pass then clears dead keys/data and forwards survivors. See
  * gc/mmtk/NOTES.md (M6 design). */
 extern int caml_mmtk_weak_refs;
+/* MMTK_POLL_DEBUG, read once at MMTk init. */
+extern int caml_mmtk_poll_debug;
 typedef int   (*caml_mmtk_ephe_reachable_fn)(value v);
 typedef value (*caml_mmtk_ephe_forward_fn)(value v);
 typedef value (*caml_mmtk_ephe_retain_fn)(void *ctx, value v);
@@ -181,6 +187,17 @@ extern uintnat caml_mmtk_heap_size_bytes(void);
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */
 extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
+/* Rust-side mature-direct pacing tick (pretenure/LOS bytes; SHAPE round 30). */
+extern void mmtk_ocaml_mature_alloc_tick(size_t bytes);
+/* Rust-side off-heap accounting: credited bytes count toward reserved pages
+ * (Collection::vm_live_bytes), so off-heap custom memory drives heap-full
+ * checks and heap sizing; reset binding-side when a full GC's sweep ends. */
+extern void mmtk_ocaml_offheap_credit(size_t bytes);
+/* Off-heap custom-block pressure -> the mature pacing tick. Called from
+ * alloc_custom_gen with the block's RAW out-of-heap byte size (the stock
+ * accumulators clamp per-block resources before summing, under-counting large
+ * blocks by orders of magnitude). */
+extern void caml_mmtk_custom_mem_pressure(size_t bytes);
 
 /* SATB (snapshot-at-the-beginning) deletion write barrier for the concurrent
  * plan (ConcurrentImmix). Greys the OLD referents in `count` value-sized slots
@@ -232,6 +249,16 @@ extern void caml_mmtk_quiesce_running_domains(void);
 extern void caml_mmtk_enter_blocking(uintnat dom);
 extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
+/* Domain creation vs MMTk collections (see domain_create). A domain being
+ * created registers its mutator and takes its first TLAB block, which must
+ * not overlap a collection. caml_mmtk_try_begin_bind claims a binding slot
+ * and returns 1, or returns 0 while a collection is active (the caller then
+ * drops its locks, calls caml_mmtk_wait_collection_done and retries).
+ * While the slot is held nothing may block for a collection: the domain's
+ * first TLAB refill uses a non-blocking allocation (see
+ * mmtk_ocaml_refill_tlab_at_bind). caml_mmtk_end_bind releases the slot. */
+extern int caml_mmtk_try_begin_bind(void);
+extern void caml_mmtk_end_bind(void);
 /* Deregister a force-cancelled peer (excise Phase 3b, caml_stop_all_domains)
  * from MMTk's registry + RUNNING set, WITHOUT waiting for an in-flight
  * collection (the peer's roots are not torn down, so there is nothing to

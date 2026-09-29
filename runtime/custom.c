@@ -96,6 +96,14 @@ static value alloc_custom_gen (const struct custom_operations * ops,
      flag is off or the block has no finalizer. */
   if (ops->finalize != NULL)
     caml_mmtk_register_finalizable(result);
+  /* Credit the off-heap bytes to MMTk pacing HERE, where [mem] is still raw
+     bytes. The stock accumulators above clamp res to max (~heap/150) before
+     summing ratios, so reconstructing bytes from the ratio under-counts a
+     large block by 1-2 orders of magnitude -- measured: 12.4MB video frames
+     credited at ~0.4MB each let a ~180MB frame pool balloon to 61GB before
+     the collection cadence caught up. */
+  if (mem != 0)
+    caml_mmtk_custom_mem_pressure(mem);
   CAMLreturn(result);
 }
 

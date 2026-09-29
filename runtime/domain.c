@@ -426,6 +426,7 @@ static void domain_create(uintnat initial_minor_heap_wsize,
   caml_domain_state* domain_state;
   struct interruptor* s;
   uintnat stack_wsize = caml_get_init_stack_wsize();
+  int bind_slot = 0;   /* MMTk binding slot held (see below) */
 
   CAMLassert (domain_self == 0);
 
@@ -471,7 +472,26 @@ static void domain_create(uintnat initial_minor_heap_wsize,
 
   caml_plat_lock_blocking(&d->domain_lock);
 
-  /* This is the first thing we do after acquiring the domain lock,
+  /* MMTk: hold a binding slot from here to the end of creation, so the
+     mutator registration and first TLAB refill in caml_mmtk_domain_init never
+     overlap an MMTk collection (see caml/mmtk.h). While a collection is
+     active the slot is refused; wait it out holding NEITHER lock. A RUNNING
+     domain may be blocked on all_domains_lock (caml_stop_all_domains) while
+     that collection waits for it, and a terminating domain that last used
+     this slot holds d->domain_lock while it waits for the collection, so the
+     slot is claimed only after d->domain_lock is ours. Released at
+     domain_init_complete, the single exit of every path below. */
+  while (!caml_mmtk_try_begin_bind()) {
+    caml_plat_unlock(&d->domain_lock);
+    caml_plat_unlock(&all_domains_lock);
+    caml_mmtk_wait_collection_done();
+    caml_plat_lock_blocking(&all_domains_lock);
+    caml_plat_lock_blocking(&d->domain_lock);
+  }
+  bind_slot = 1;
+
+  /* This is the first thing we do after acquiring the domain lock (and the
+     MMTk binding slot),
      so that [caml_domain_alone()] returns accurate result even
      during domain initialization. */
   atomic_fetch_add(&caml_num_domains_running, 1);
@@ -641,6 +661,7 @@ domain_parking_failure:
 
 domain_init_complete:
   caml_gc_log("domain init complete");
+  if (bind_slot) caml_mmtk_end_bind();
   caml_plat_unlock(&all_domains_lock);
 }
 
@@ -983,6 +1004,15 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
   /* This domain currently holds a lock for [mut], which is kept alive
      by a global root inside ml_values. */
   caml_plat_mutex *mut = Term_mutex(ml_values->term_sync);
+  /* Release the local roots BEFORE the domain is terminated (stock has no
+     CAMLparam here). CAMLparam0 captured &Caml_state->local_roots; after
+     caml_domain_terminate that domain state can be reused by a newly spawned
+     domain, so a late CAMLreturn0 would overwrite the new domain's
+     local_roots with our saved frame (NULL here), unrooting its live C
+     locals. A collection then moves their objects without updating them,
+     and a later GC traces the stale old copies (memory-model/publish,
+     lib-str/parallel SIGSEGV). [v] is published and no longer needed. */
+  CAMLdrop;
   /* Join all systhreads on this domain and release the runtime state. */
   caml_domain_terminate(false);
   /* This domain has signaled all the waiting domains to be woken up.
@@ -992,7 +1022,6 @@ static void sync_and_terminate(struct domain_ml_values *ml_values,
      this point but we can use [caml_plat_unlock]. */
   caml_plat_unlock(mut);
   caml_plat_assert_all_locks_unlocked();
-  CAMLreturn0;
 }
 
 static CAML_THREAD_FUNCTION
@@ -1315,6 +1344,41 @@ void caml_poll_gc_work(void)
        this domain has passed a safepoint. Plain atomic store, no lock. */
     caml_mmtk_quiesce_ack(d);
     caml_reset_young_limit(d);
+    /* An EXHAUSTED TLAB re-arms the safepoint trap: young_ptr sits at/below
+       young_limit and only the allocation path (caml_alloc_small_dispatch)
+       ever refills. An allocation-free compute phase after a draining
+       allocation then traps on EVERY loop back-edge poll, through the whole
+       caml_call_gc machinery, doing nothing - measured 453M traps / 82G
+       mutator instructions on matmul-768 with a 16MB nursery ("the 8.9x
+       catastrophe", SHAPE.md round 20). Refill here to clear the trap; if
+       the refill fails (heap genuinely exhausted) leave state as-is - the
+       next real allocation raises Out_of_memory as before. */
+    /* NOTE the comparison: ocamlopt-emitted poll points trap on
+       young_ptr <= young_limit (jbe), while Caml_check_gc_interrupt tests
+       the STRICT young_ptr < young_limit. The discarded-TLAB state
+       (uninterrupt sets young_ptr == young_start == young_end, and
+       young_limit == young_trigger == young_start) therefore traps at
+       every generated poll while every C-side check answers "no
+       interrupt" - an unfixable-from-C livelock unless this guard uses
+       the emitted condition. matmul-768 @ 16MB nursery: ~453M no-op trap
+       round-trips, 82G mutator instructions (SHAPE round 20). */
+    if ((uintnat)d->young_ptr <= atomic_load_relaxed(&d->young_limit)) {
+      static _Atomic long caml_mmtk_poll_traps = 0;
+      static _Atomic long caml_mmtk_poll_refill_fail = 0;
+      int ok = caml_mmtk_refill_tlab(d, Whsize_wosize(0));
+      if (!ok) caml_mmtk_poll_refill_fail++;
+      if (caml_mmtk_poll_debug) {
+        long n = ++caml_mmtk_poll_traps;
+        if (n <= 5 || n % 10000000 == 0)
+          fprintf(stderr,
+                  "[poll-debug] trap#%ld refill=%d young=[%p,%p) ptr=%p "
+                  "trigger=%p limit=%#lx fails=%ld\n",
+                  n, ok, (void *)d->young_start, (void *)d->young_end,
+                  (void *)d->young_ptr, (void *)d->young_trigger,
+                  (unsigned long)atomic_load_relaxed(&d->young_limit),
+                  (long)caml_mmtk_poll_refill_fail);
+      }
+    }
     return;
   }
 

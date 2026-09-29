@@ -1,3 +1,18 @@
+Working version (MMTk fork)
+---------------------------
+
+### Runtime system:
+
+- fplaunchpad/ocaml-mmtk#23, fplaunchpad/mmtk-core#1: MMTk binding, Bactrian
+  plan: rework the GC pacing. Nursery pauses carry sliced marking quanta paced
+  by the measured mark rate and the remaining allocation runway, the heap
+  limit is sized from the bytes marked at cycle completion instead of after
+  every minor collection (eio peak RSS 24 GB -> 4 GB), the quantum-hint law
+  moves from the binding into mmtk-core, and the mark-sweep nonmoving space
+  is collected by major collections only. runtime/mmtk.c now builds on
+  macOS and Windows and on x86-64, AArch64 and 32-bit ARM.
+  (Pragyansh Chaturvedi)
+
 OCaml 5.5.0 (19 June 2026)
 -------------------------
 

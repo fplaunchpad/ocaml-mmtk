@@ -532,8 +532,24 @@ The active research/measurement threads behind the M8 milestone — the index; d
   (`33ae0009f8`; SCALABILITY.md UPDATE 5): manufactured majors de-manufactured, GenImmix
   par_binarytrees anti-scaling eliminated (S(8) 0.89→1.02), Bactrian no longer permanently mid-cycle
   (8-domain RSS 1689→504 MiB, though its S(8) is 0.67 — it now pays paced full pauses instead of
-  floating garbage). Remaining RQ7 sub-questions: mutator-paced mark slices, concurrent sweep, and the
-  STW minor-pause rendezvous floor. → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02.
+  floating garbage). **W-parity campaign (2026-08-06..10, branch `shape/tweaks` + shape-bench
+  `quick/campaigns/wnight-20260808/`): UP-trace single-tracer plain-op mode (locked RMWs/object
+  5.7→1.1; bt whole-process 0.90× vanilla), poll-trap-livelock fix, allocation-denominated full-GC
+  backstop, and Max_young_wosize pretenuring DEFAULT-ON (≥ 2056 B born mature + overflow-block
+  line-phase rotation + remset immediate filter → matmul 1.03× vanilla, nursery-independent; was a
+  1.25–1.89× alignment lottery) — W-instruction parity certified panel-wide, W/D2-pause-count/
+  mark-cadence matched at the 2 MiB stock-parity nursery (SHAPE.md rounds 1–23). Rounds 24–26
+  (2026-08-11/12): G economics landed (thin LTO, header-sentinel forwarding = stock oldify's
+  value-range protocol, UP direct-trace closure → GC −23 %, bt 0.84×); **sliced-STW marking
+  DEFAULT-ON** (stock's mark slices as in-pause quanta → bt@2M max pause 8.0 ms vs vanilla's
+  15.2, D3 tail matched); the residual-gap mystery resolved into two named mechanisms — the
+  **JCC-erratum layout lottery** (matmul DSB 99 %→2 % on a 16-byte draw; assembler mitigation on
+  both toolchains → matmul 0.98×, kb 0.98×, fannkuch 1.00×, and vanilla's own fannkuch build was
+  a victim) and **allocation-frontier warmth** (LU/spectralnorm store-side RFO: L2-warm arena /
+  LLC-warm nursery / DRAM-cold tiers).** Remaining RQ7 sub-questions: the frontier-warmth policy
+  (nursery default vs per-minor cost — the two bound each other), D2 period calibration
+  (pressure % vs stock's space_overhead), and the STW minor-pause rendezvous floor.
+  → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02, 2026-08-09/10/12; SHAPE rounds 23–26.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (PLAN, 2026-06-25).** **LXR** (Zhao,
   Blackburn & McKinley, PLDI'22) is reference counting on a hierarchical Immix heap + occasional concurrent
   SATB backup tracing for cycles, with **no read barrier** and a cheap **coalescing field-logging write

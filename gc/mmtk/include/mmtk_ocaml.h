@@ -104,6 +104,14 @@ void mmtk_ocaml_deregister_domain(uintptr_t domain_state_addr);
     Used by the terminate path after deregistration so the domain's roots stay
     valid until any collection that snapshotted the registry has finished. */
 void mmtk_ocaml_wait_collection_done(void);
+/* Binding slots for domain creation: refused (0) while a collection is
+   active; a started collection waits for held slots to drain. */
+int mmtk_ocaml_try_begin_bind(void);
+/* First TLAB refill of a domain being created: never blocks for a GC and may
+   exceed the heap limit by one block (see mmtk_ocaml_refill_tlab). */
+bool mmtk_ocaml_refill_tlab_at_bind(MMTk_Mutator mutator, size_t min_bytes,
+                                    uintptr_t *out_start, uintptr_t *out_end);
+void mmtk_ocaml_end_bind(void);
 
 /** Ragged safepoint (excise Phase 2, step 1). Snapshot the addresses of domains
     currently RUNNING OCaml into buf[0..len); returns the count written
@@ -185,6 +193,18 @@ size_t mmtk_ocaml_total_gc_count(void);
 
 /** Total stop-the-world GC time so far, in milliseconds. */
 uint64_t mmtk_ocaml_gc_time_ms(void);
+
+/** Arm per-pause STW recording (backlog #R1). mmtk_ocaml_gc_time_ms is a SUM and
+ *  so cannot distinguish many small pauses from a few large ones — the very
+ *  distinction the GC space-time shape comparison rests on. Records accumulate in
+ *  memory (24 bytes each) so the pause path stays free of I/O; call
+ *  mmtk_ocaml_pause_log_dump at exit to write them. Off by default. */
+void mmtk_ocaml_pause_log_enable(void);
+
+/** Write the recorded pauses to `path` as NDJSON, one {at,dur,full} per line,
+ *  with times in seconds relative to the first pause. Returns the number of
+ *  records written, 0 if recording was never armed, or -1 on I/O failure. */
+int64_t mmtk_ocaml_pause_log_dump(const char *path);
 
 /** Register a custom block (with a finalize op) on MMTk's finalizer queue. Kept
  *  alive + forwarded until unreachable, then returned by mmtk_ocaml_poll_finalizable. */

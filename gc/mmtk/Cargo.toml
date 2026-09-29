@@ -15,7 +15,7 @@ members = ["common", "binding"]
 resolver = "2"
 
 [workspace.dependencies]
-mmtk        = { version = "0.32", features = ["object_pinning"] }
+mmtk        = { version = "0.32", features = ["object_pinning", "sticky_immix_non_moving_nursery", "marksweep_as_nonmoving"] }
 lazy_static = "1.5"
 libc        = "0.2"
 
@@ -28,3 +28,11 @@ mmtk = { path = "../mmtk-core" }
 [profile.release]
 # Bring-up: keep debug info in the release staticlib for easier gdb/lldb work.
 debug = true
+# Thin LTO + one codegen unit: the binding's slot/scanning layer
+# (mmtk-ocaml-common) is called from mmtk-core generics across a crate
+# boundary — without LTO those calls stay outlined (FieldSlot::from_address
+# alone measured 6% of GC-worker cycles on bt@16M; scan_ocaml_object 6.3%,
+# visit_slot 4.0%). Vanilla's oldify is one inlined C loop; this is the
+# build-config half of matching its per-object economics.
+lto = "thin"
+codegen-units = 1

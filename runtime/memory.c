@@ -196,8 +196,14 @@ Caml_inline void write_barrier(
      caml_modify, field is 0). The barrier itself no-ops for non-generational
      plans and before init (it checks caml_mmtk_generational, 0 until a
      generational plan binds the mutator), so on the default native Immix fast
-     path the cost is a single predictable branch. */
-  caml_mmtk_region_barrier(Op_val(obj) + field, 1);
+     path the cost is a single predictable branch.
+
+     Gated on Is_block(new_val): an immediate store creates no heap edge, so
+     there is nothing for a young collection to find in this slot - the same
+     filter stock's caml_modify applies before touching the ref table. (The
+     SATB barrier below is NOT gated on it: SATB greys the OLD referent,
+     which exists regardless of what is being stored.) */
+  if (Is_block(new_val)) caml_mmtk_region_barrier(Op_val(obj) + field, 1);
 
   /* SATB deletion barrier for the concurrent plan (ConcurrentImmix).
      write_barrier runs BEFORE the actual store (see caml_modify), so the slot
@@ -283,6 +289,15 @@ CAMLexport void caml_adjust_gc_speed (mlsize_t res, mlsize_t max)
   Caml_state->extra_heap_resources += (double) res / (double) max;
   if (Caml_state->extra_heap_resources > 0.2){
     CAML_EV_COUNTER (EV_C_REQUEST_MAJOR_ADJUST_GC_SPEED, 1);
+    /* Under always-on MMTk the stock consumer of this accumulator
+       (update_major_slice_work, reached via the major slice) never runs - the
+       slice request lands in an inert stub - so without a reset here the
+       accumulator ratchets past the threshold once and then every later
+       custom allocation re-fires an interrupt for nothing. The MMTk-side
+       pressure credit happens with raw bytes in alloc_custom_gen
+       (caml_mmtk_custom_mem_pressure); here we only consume the stock
+       accumulator to kill the ratchet. */
+    Caml_state->extra_heap_resources = 0.0;
     caml_request_major_slice (1);
   }
 }
@@ -296,6 +311,13 @@ CAMLexport void caml_adjust_minor_gc_speed (mlsize_t res, mlsize_t max)
   if (max == 0) max = 1;
   Caml_state->extra_heap_resources_minor += (double) res / (double) max;
   if (Caml_state->extra_heap_resources_minor > 1.0) {
+    /* Reset here under MMTk: the stock reset point
+       (caml_empty_minor_heap_domain_clear) is only reached on the bytecode
+       minor path, so on native the accumulator would ratchet and every later
+       small-custom allocation would re-request a minor GC. Stock zeroes it at
+       the minor GC this request triggers; consuming it at the request point
+       is the same cadence. */
+    Caml_state->extra_heap_resources_minor = 0.0;
     caml_request_minor_gc ();
   }
 }
@@ -339,8 +361,14 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
      generational plans (no-op otherwise). Replaces the stock minor
      remembered-set update, which is dead under always-on MMTk (major_ref is
      never consumed). Both the bytecode and native runtimes record it (see
-     write_barrier). */
-  caml_mmtk_region_barrier(fp, 1);
+     write_barrier).
+
+     Immediates are never heap edges, so skip them - stock's caml_initialize
+     applies the same filter (only young values enter the ref table). Without
+     it, initialising a born-mature array (Max_young_wosize pretenuring)
+     buffers one remset entry PER SLOT: matmul-768's int rows alone retained
+     46 MB of modbuf between GCs (721 64KB segments, measured). */
+  if (Is_block(val)) caml_mmtk_region_barrier(fp, 1);
 }
 
 CAMLprim value caml_atomic_load_field (value obj, value vfield)

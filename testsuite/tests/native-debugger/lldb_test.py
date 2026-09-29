@@ -18,11 +18,13 @@ def print_backtrace(debugger, command, result, dict):
     if target:
         process = target.GetProcess()
         if process:
-            frame_info = {}
+            # Only the stopped (selected) thread: the reference outputs show
+            # one stack. Under MMTk the GC worker threads already exist at
+            # the first breakpoint, and walking every thread printed their
+            # stacks too.
             thread = process.GetSelectedThread()
-            for thread in process:
-                for frame in thread:
-                    print("frame %i: %s`%s"% (frame.idx, frame.module.file.basename, trim_basename(frame.name)))
+            for frame in thread:
+                print("frame %i: %s`%s"% (frame.idx, frame.module.file.basename, trim_basename(frame.name)))
         else:
             result.SetError('No current process for the debugger. Has a process to debug been launched?')
     else:
