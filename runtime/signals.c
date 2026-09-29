@@ -142,14 +142,26 @@ CAMLexport void caml_record_signal(int signal_number)
 
 /* Management of blocking sections. */
 
+/* The blocking-section hooks own the domain's MMTk RUNNING state (GH issue
+   24): the domain leaves the RUNNING set before its lock is released and
+   rejoins it (parking cooperatively while a collection is active) right
+   after the lock is re-acquired, before any OCaml runs. The systhreads hooks
+   do the same through the master lock, keeping the domain RUNNING when the
+   lock is handed to a waiting thread (see otherlibs/systhreads/st_stubs.c).
+   Marking in the hooks rather than after them in the callers below means the
+   mark is made by the thread that holds the lock: a mark made after the
+   unlock could erase the RUNNING mark of a thread that has taken the lock
+   in between. */
 static void caml_enter_blocking_section_default(void)
 {
+  caml_mmtk_enter_blocking((uintnat) Caml_state);
   caml_release_domain_lock();
 }
 
 static void caml_leave_blocking_section_default(void)
 {
   caml_acquire_domain_lock();
+  caml_mmtk_leave_blocking((uintnat) Caml_state);
 }
 
 CAMLexport void (*caml_enter_blocking_section_hook)(void) =
@@ -177,22 +189,21 @@ CAMLexport void caml_enter_blocking_section(void)
        lock, we cannot read [young_ptr] and we cannot call
        [Caml_check_gc_interrupt]. */
     if (atomic_load_relaxed(&domain->young_limit) != CAML_UINTNAT_MAX) break;
+    /* The leave hook re-acquires the lock and makes the domain RUNNING
+       again, so the pending actions below (OCaml signal handlers included)
+       run as a must-stop participant. */
     caml_leave_blocking_section_hook ();
+    /* GH issue 24 detector: about to run pending actions. */
+    Caml_mmtk_check_running("caml_enter_blocking_section (retry)");
   }
-  /* Now committed to the blocking section: safe for MMTk STW. Pass the domain
-     identity captured above -- the hook released the domain lock, so Caml_state
-     is NULL here and must not be read (see caml/mmtk.h: a NULL read here
-     skipped the safe-stopped accounting, desyncing MMTk's stop barrier). */
-  caml_mmtk_enter_blocking((uintnat) domain);
+  /* Now committed to the blocking section. The hook has already taken the
+     domain out of MMTk's RUNNING set (or handed it, RUNNING, to a waiting
+     systhread). */
 }
 
 CAMLexport void caml_enter_blocking_section_no_pending(void)
 {
-  /* Capture the domain before the hook releases the lock and nulls Caml_state.
-     */
-  uintnat domain = (uintnat) Caml_state;
   caml_enter_blocking_section_hook ();
-  caml_mmtk_enter_blocking(domain);
 }
 
 CAMLexport void caml_leave_blocking_section(void)
@@ -200,11 +211,9 @@ CAMLexport void caml_leave_blocking_section(void)
   int saved_errno;
   /* Save the value of errno (PR#5982). */
   saved_errno = errno;
+  /* The hook re-acquires the domain lock and leaves the domain in MMTk's
+     RUNNING set, having waited out any collection in progress. */
   caml_leave_blocking_section_hook ();
-  /* Leaving the blocking section: wait out any in-progress MMTk collection
-     before running OCaml again, then stop counting as safe-stopped. The hook
-     re-acquired the domain lock, so Caml_state is valid again. */
-  caml_mmtk_leave_blocking((uintnat) Caml_state);
   Caml_check_caml_state();
 
   /* Some other thread may have switched [Caml_state->action_pending]
@@ -222,6 +231,9 @@ CAMLexport void caml_leave_blocking_section(void)
   */
   if (caml_check_pending_signals())
     caml_set_action_pending(Caml_state);
+
+  /* GH issue 24 detector: we hold the domain lock and return to OCaml. */
+  Caml_mmtk_check_running("caml_leave_blocking_section");
 
   errno = saved_errno;
 }

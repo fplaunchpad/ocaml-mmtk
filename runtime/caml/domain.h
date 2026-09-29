@@ -71,6 +71,9 @@ void caml_update_young_limit_after_c_call(caml_domain_state *);
 
 CAMLextern void caml_reset_domain_lock(void);
 CAMLextern intnat caml_domain_is_multicore (void);
+/* 0 once the current domain has left the STW participant set while
+   terminating (see caml_mmtk_check_running). */
+CAMLextern int caml_domain_is_stw_participant(void);
 CAMLextern void caml_acquire_domain_lock(void);
 CAMLextern void caml_release_domain_lock(void);
 

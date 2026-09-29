@@ -31,6 +31,12 @@
 #else
 #include <unistd.h>
 #endif
+#if defined(__APPLE__) || defined(__GLIBC__)
+#include <execinfo.h>   /* backtrace: RUNNING-set detector diagnostics */
+#endif
+#ifndef _WIN32
+#include <pthread.h>    /* pthread_self: RUNNING-set detector diagnostics */
+#endif
 
 /* The MMTk glue is compiled into both the bytecode and native runtimes. The few
    bytecode-interpreter-specific bits (caml_mmtk_alloc_small) are harmless when
@@ -329,6 +335,17 @@ static void caml_mut_gc_dump(void)
 /* ------------------------------------------------------------------------ */
 
 static void caml_mmtk_report_copied(void);
+static void caml_mmtk_check_running_init(void);  /* GH issue 24 detector */
+static void caml_mmtk_check_note_bound(caml_domain_state *dom);
+static void caml_mmtk_check_note_running(uintnat dom, void *pc);
+static void caml_mmtk_check_count_stw(void);
+static void caml_mmtk_check_note_stopped(uintnat dom, void *pc);
+/* Return address of the current function, for detector diagnostics. */
+#if defined(__GNUC__) || defined(__clang__)
+#define CAML_MMTK_CALLER_PC __builtin_return_address(0)
+#else
+#define CAML_MMTK_CALLER_PC NULL
+#endif
 static void caml_e1_dump(void);  /* E1 write-barrier counter dump (atexit) */
 static void caml_mmtk_dump_pause_log(void);  /* #R1 per-pause dump (atexit) */
 /* Held from init to atexit; points into the environment, so it stays valid. */
@@ -367,6 +384,7 @@ void caml_mmtk_init(void)
 
   mmtk_ocaml_init(heap_bytes, plan);
   caml_mmtk_initialised = 1;
+  caml_mmtk_check_running_init();
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
   /* Bactrian (RQ7) is BOTH: a copying nursery (generational barrier) and a
      concurrently-marked mature space (SATB deletion barrier + continuation
@@ -544,6 +562,7 @@ void caml_mmtk_domain_init(caml_domain_state *dom)
 {
   caml_mmtk_init();
   dom->mmtk_mutator = mmtk_ocaml_bind_mutator((uintptr_t)dom);
+  if (caml_mmtk_check_running_on) caml_mmtk_check_note_bound(dom);
   /* For collecting plans, spawn the GC worker threads once (must happen before
      an allocation can trigger a collection). */
   if (caml_mmtk_collects && !caml_mmtk_collection_started) {
@@ -1446,6 +1465,7 @@ void caml_mmtk_quiesce_ack(caml_domain_state *d)
    suffices.) */
 static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
 {
+  if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
   caml_release_domain_lock();
   mmtk_ocaml_stw_park(domain_state_addr);   /* mark STOPPED, wait for resume */
   caml_acquire_domain_lock();
@@ -1461,8 +1481,263 @@ static void caml_mmtk_cooperative_park(uintnat domain_state_addr)
    child starting OCaml. */
 void caml_mmtk_become_running(uintnat domain_state_addr)
 {
-  while (!mmtk_ocaml_try_mark_running(domain_state_addr))
+  if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
+  while (!mmtk_ocaml_try_mark_running(domain_state_addr)) {
     caml_mmtk_cooperative_park(domain_state_addr);
+    if (caml_mmtk_check_running_on) caml_mmtk_check_count_stw();
+  }
+  if (caml_mmtk_check_running_on)
+    caml_mmtk_check_note_running(domain_state_addr, CAML_MMTK_CALLER_PC);
+}
+
+/* RUNNING-set detector (GH issue 24; see caml/mmtk.h). The mode is set once
+   in caml_mmtk_init, before any second thread or domain exists, and is
+   read-only afterwards, from MMTK_CHECK_RUNNING:
+     0 = off ("0"; the default outside the debug runtime);
+     1 = abort on the first violation (any other value; the debug default);
+     2 = "warn": report the first violation per site and kind, count all of
+         them, print a summary at exit, and keep running;
+     3 = "lost": like 1 but only for kind lost-running; never-running
+         violations (a domain that has had no RUNNING edge since it was
+         bound) are only counted in the exit summary. */
+int caml_mmtk_check_running_on = 0;
+
+/* Race-window widening for tests (MMTK_CHECK_RUNNING_WIDEN_US, detector on
+   only): sleep just before a STOPPED mark. Before the GH issue 24 fix the
+   mark came after the blocking-section hook had released the domain lock,
+   so this widened the GAP-1 window; now the mark is made by the lock holder
+   before the release and the sleep only delays the release. */
+static long caml_mmtk_check_widen_us = 0;
+
+/* Debug bookkeeping, per domain slot (only touched when the detector is on):
+   whether the domain has had a RUNNING edge since it was bound, and who last
+   marked it STOPPED (caller's return address, OS thread). Updated without the
+   domain lock by design (caml_enter_blocking_section marks STOPPED after the
+   hook released it), hence relaxed atomics: this is diagnostic data only. */
+#define CAML_MMTK_CHECK_SLOTS 256
+static atomic_uintnat caml_mmtk_ever_running[CAML_MMTK_CHECK_SLOTS];
+static atomic_uintnat caml_mmtk_last_stop_pc[CAML_MMTK_CHECK_SLOTS];
+static atomic_uintnat caml_mmtk_last_stop_thr[CAML_MMTK_CHECK_SLOTS];
+
+/* Warn-mode counters: [site][kind], kind 0 = domain never RUNNING since bind,
+   kind 1 = domain was RUNNING before and lost the mark. */
+#define CAML_MMTK_CHECK_SITES 8
+static _Atomic(const char *) caml_mmtk_check_site[CAML_MMTK_CHECK_SITES];
+static atomic_uintnat caml_mmtk_check_count[CAML_MMTK_CHECK_SITES][2];
+
+static uintnat caml_mmtk_thread_self(void)
+{
+#ifdef _WIN32
+  return (uintnat) GetCurrentThreadId();
+#else
+  return (uintnat) pthread_self();
+#endif
+}
+
+/* GAP-2 window counter: a thread rewrote its domain's root fields
+   (restore_runtime_state) while a collection was active and the domain was
+   not RUNNING, i.e. while the pause may be scanning those very fields. */
+static atomic_uintnat caml_mmtk_check_restore_in_pause;
+
+void caml_mmtk_check_restore(void)
+{
+  caml_domain_state *d = Caml_state_opt;
+  if (d == NULL || d->mmtk_mutator == NULL) return;
+  if (mmtk_ocaml_stw_active() && !mmtk_ocaml_is_running((uintptr_t) d))
+    atomic_fetch_add(&caml_mmtk_check_restore_in_pause, 1);
+}
+
+/* STW-mutex acquisitions made by RUNNING-set transitions (enter_blocking,
+   try_mark_running, park); the detector's own queries are not counted.
+   Printed in the warn/lost summary, to measure the cost per blocking
+   section of the master-lock hand-off. */
+static atomic_uintnat caml_mmtk_check_stw_count;
+
+static void caml_mmtk_check_count_stw(void)
+{
+  atomic_fetch_add(&caml_mmtk_check_stw_count, 1);
+}
+
+static void caml_mmtk_check_running_summary(void)
+{
+  if (caml_mmtk_check_running_on == 2 && getenv("MMTK_CHECK_RUNNING_STW"))
+    fprintf(stderr, "[mmtk] RUNNING-set transitions: STW-mutex "
+            "acquisitions=%lu\n",
+            (unsigned long) atomic_load(&caml_mmtk_check_stw_count));
+  uintnat r = atomic_load(&caml_mmtk_check_restore_in_pause);
+  if (r != 0)
+    fprintf(stderr,
+            "[mmtk] RUNNING-set check: restore_runtime_state during an "
+            "active pause while not RUNNING: %lu\n", (unsigned long) r);
+  for (int i = 0; i < CAML_MMTK_CHECK_SITES; i++) {
+    const char *site = atomic_load(&caml_mmtk_check_site[i]);
+    if (site == NULL) continue;
+    fprintf(stderr,
+            "[mmtk] RUNNING-set violations at %s: never-running=%lu "
+            "lost-running=%lu\n", site,
+            (unsigned long) atomic_load(&caml_mmtk_check_count[i][0]),
+            (unsigned long) atomic_load(&caml_mmtk_check_count[i][1]));
+  }
+}
+
+static void caml_mmtk_check_running_init(void)
+{
+  const char *e = getenv("MMTK_CHECK_RUNNING");
+  if (e == NULL || e[0] == '\0') {
+#ifdef DEBUG
+    caml_mmtk_check_running_on = 1;
+#else
+    caml_mmtk_check_running_on = 0;
+#endif
+  } else if (strcmp(e, "0") == 0) {
+    caml_mmtk_check_running_on = 0;
+  } else if (strcmp(e, "warn") == 0) {
+    caml_mmtk_check_running_on = 2;
+    atexit(caml_mmtk_check_running_summary);
+  } else if (strcmp(e, "lost") == 0) {
+    caml_mmtk_check_running_on = 3;
+    atexit(caml_mmtk_check_running_summary);
+  } else {
+    caml_mmtk_check_running_on = 1;
+  }
+  if (caml_mmtk_check_running_on == 1)
+    atexit(caml_mmtk_check_running_summary);
+  if (caml_mmtk_check_running_on) {
+    const char *w = getenv("MMTK_CHECK_RUNNING_WIDEN_US");
+    if (w != NULL) caml_mmtk_check_widen_us = strtol(w, NULL, 10);
+  }
+}
+
+/* The calling thread's own last RUNNING edge (caller of
+   caml_mmtk_become_running), cleared when the thread may instead have been
+   handed the lock by st_thread_yield (caml_mmtk_check_note_yield). Lets a
+   report tell "this thread marked RUNNING itself and the mark was erased
+   behind it" (a late STOPPED from another thread) from "this thread got the
+   lock through a yield hand-off" (nobody marked RUNNING for it). */
+static CAMLthread_local uintnat caml_mmtk_my_edge_pc;
+
+static void caml_mmtk_check_note_running(uintnat dom, void *pc)
+{
+  int id = ((caml_domain_state *) dom)->id;
+  if (id >= 0 && id < CAML_MMTK_CHECK_SLOTS)
+    atomic_store_relaxed(&caml_mmtk_ever_running[id], 1);
+  caml_mmtk_my_edge_pc = (uintnat) pc;
+}
+
+void caml_mmtk_check_note_yield(void)
+{
+  caml_mmtk_my_edge_pc = 0;
+}
+
+static void caml_mmtk_check_note_stopped(uintnat dom, void *pc)
+{
+  int id = ((caml_domain_state *) dom)->id;
+  if (id >= 0 && id < CAML_MMTK_CHECK_SLOTS) {
+    atomic_store_relaxed(&caml_mmtk_last_stop_pc[id], (uintnat) pc);
+    atomic_store_relaxed(&caml_mmtk_last_stop_thr[id],
+                         caml_mmtk_thread_self());
+  }
+}
+
+/* A domain slot was (re)bound: forget the previous occupant's history. */
+static void caml_mmtk_check_note_bound(caml_domain_state *dom)
+{
+  if (dom->id >= 0 && dom->id < CAML_MMTK_CHECK_SLOTS) {
+    atomic_store_relaxed(&caml_mmtk_ever_running[dom->id], 0);
+    atomic_store_relaxed(&caml_mmtk_last_stop_pc[dom->id], 0);
+    atomic_store_relaxed(&caml_mmtk_last_stop_thr[dom->id], 0);
+  }
+}
+
+/* The slow path of Caml_mmtk_check_running. Called by a thread that holds
+   its domain lock and is about to run OCaml code.
+
+   Guards (the windows in which a lock holder is legitimately absent from the
+   RUNNING set, all excluded here):
+   - no domain bound (Caml_state_opt == NULL) or its mutator not yet
+     registered (mmtk_mutator == NULL): boot and the spawn window before
+     caml_mmtk_domain_init;
+   - the domain has left the runtime's STW participant set on its terminate
+     path (caml_domain_is_stw_participant() == 0): domain.c marks it
+     STOPPED just before that, and it runs no OCaml afterwards;
+   - parking: the check sites are after caml_mmtk_become_running /
+     caml_mmtk_stw_poll return, never inside a park, so a parked domain is
+     never checked.
+   A domain that was bound but has had no RUNNING edge yet is NOT excused:
+   it is reported with kind "never-running".
+
+   Lock order: the caller holds its domain lock (and, under systhreads, owns
+   the master lock, i.e. m->busy, but not m->lock). mmtk_ocaml_is_running
+   takes only the binding's STW mutex, a leaf lock: nothing is acquired while
+   it is held, and stop_all_mutators drops it before poisoning domains. This
+   is the same domain-lock -> STW-mutex order that caml_mmtk_become_running
+   (mmtk_ocaml_try_mark_running) already uses, so the check adds no new lock
+   edge. It never waits on gc_active and does not touch the RUNNING set, so it
+   cannot change the protocol; the extra STW-mutex acquisition may perturb
+   timing. */
+void caml_mmtk_check_running(const char *where, const char *file, int line)
+{
+  caml_domain_state *d = Caml_state_opt;
+  int id, kind, first = 1;
+  uintnat stop_pc = 0, stop_thr = 0;
+  if (d == NULL || d->mmtk_mutator == NULL) return;
+  if (!caml_domain_is_stw_participant()) return;
+  if (mmtk_ocaml_is_running((uintptr_t) d)) return;
+  id = d->id;
+  kind = 1;
+  if (id >= 0 && id < CAML_MMTK_CHECK_SLOTS) {
+    kind = atomic_load_relaxed(&caml_mmtk_ever_running[id]) ? 1 : 0;
+    stop_pc = atomic_load_relaxed(&caml_mmtk_last_stop_pc[id]);
+    stop_thr = atomic_load_relaxed(&caml_mmtk_last_stop_thr[id]);
+  }
+  {
+    int i;
+    for (i = 0; i < CAML_MMTK_CHECK_SITES; i++) {
+      const char *expected = NULL;
+      if (atomic_compare_exchange_strong(&caml_mmtk_check_site[i],
+                                         &expected, where)
+          || expected == where)
+        break;
+    }
+    if (i < CAML_MMTK_CHECK_SITES)
+      first = atomic_fetch_add(&caml_mmtk_check_count[i][kind], 1) == 0;
+  }
+  /* warn: report the first per site and kind; lost: count never-running
+     silently (a separate, boot-time gap) and act on lost-running only. */
+  if (caml_mmtk_check_running_on == 2 && !first) return;
+  if (caml_mmtk_check_running_on == 3 && kind == 0) return;
+  fprintf(stderr,
+          "[mmtk] RUNNING-set violation (GH issue 24) at %s (%s:%d): "
+          "domain %d holds its lock and runs OCaml but is not RUNNING; "
+          "kind=%s gc_active=%d thread=0x%lx last-stop-by thread=0x%lx "
+          "pc=%p own-last-running-edge pc=%p\n",
+          where, file, line, id,
+          kind ? "lost-running" : "never-running",
+          (int) mmtk_ocaml_stw_active(),
+          (unsigned long) caml_mmtk_thread_self(),
+          (unsigned long) stop_thr, (void *) stop_pc,
+          (void *) caml_mmtk_my_edge_pc);
+#if defined(__APPLE__) || defined(__GLIBC__)
+  {
+    void *pcs[64];
+    int n = backtrace(pcs, 64);
+    backtrace_symbols_fd(pcs, n, 2);
+    if (stop_pc != 0) {
+      void *p = (void *) stop_pc;
+      fprintf(stderr, "[mmtk]   last STOPPED mark came from: ");
+      fflush(stderr);
+      backtrace_symbols_fd(&p, 1, 2);
+    }
+    if (caml_mmtk_my_edge_pc != 0) {
+      void *p = (void *) caml_mmtk_my_edge_pc;
+      fprintf(stderr, "[mmtk]   own last RUNNING edge came from: ");
+      fflush(stderr);
+      backtrace_symbols_fd(&p, 1, 2);
+    }
+  }
+#endif
+  fflush(stderr);
+  if (caml_mmtk_check_running_on != 2) abort();
 }
 
 /* Park the calling domain for an in-progress MMTk collection, then resume as a
@@ -1651,27 +1926,26 @@ void caml_mmtk_quiesce_running_domains(void)
 /* A domain is entering / leaving a C blocking section. While blocking it is
    safe for GC; on leaving it must wait out any in-progress collection.
 
-   `dom` is the domain's caml_domain_state address, captured by the caller
-   (runtime/signals.c) while Caml_state was still bound -- it must NOT be read
-   from Caml_state here. The blocking-section hooks release/re-acquire the
-   domain lock around these calls, which clears/restores Caml_state
-   asymmetrically: `caml_enter_blocking_section` calls enter AFTER the hook
-   released the lock (Caml_state is NULL), while `caml_leave_blocking_section`
-   calls leave AFTER the hook re-acquired it (Caml_state is valid). The previous
-   code read Caml_state_opt directly, so the enter found it NULL and skipped the
-   `stopped` increment while leave still decremented it -- underflowing the
-   usize count to a huge value, making `stop_all_mutators`'s `stopped >= n`
-   barrier always true. The GC then never waited for running domains to reach a
-   safepoint and scanned the live, mutating roots of a still-running domain,
-   handing an immediate/foreign value to trace_object: the `cannot trace object
-   0x1` (Val_int 0) panic in the parallel spawn-burn tests. `dom == 0` (no
-   domain bound, e.g. caml_open_descriptor_in during early startup) is a no-op,
-   and the `mmtk_mutator != NULL` guard keeps enter/leave balanced across
-   binding. */
+   Callers hold the domain lock and pass their caml_domain_state address:
+   the default blocking-section hooks (runtime/signals.c) call enter just
+   before releasing the lock and leave just after re-acquiring it, and the
+   systhreads master lock does the same on a release with no waiting thread
+   and on the next acquire (GH issue 24: only the lock holder may change the
+   domain's RUNNING state, or a late STOPPED mark can erase the RUNNING mark
+   of the thread that took the lock next). `dom == 0` (no domain bound) is
+   a no-op, and the `mmtk_mutator != NULL` guard keeps enter/leave balanced
+   across binding and after a domain has been deregistered. */
 void caml_mmtk_enter_blocking(uintnat dom)
 {
-  if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL)
+  if (dom != 0 && ((caml_domain_state *) dom)->mmtk_mutator != NULL) {
+    if (caml_mmtk_check_running_on && caml_mmtk_check_widen_us > 0)
+      caml_mmtk_sleep_us((unsigned) caml_mmtk_check_widen_us);
     mmtk_ocaml_enter_blocking(dom);
+    if (caml_mmtk_check_running_on) {
+      caml_mmtk_check_count_stw();
+      caml_mmtk_check_note_stopped(dom, CAML_MMTK_CALLER_PC);
+    }
+  }
 }
 
 void caml_mmtk_leave_blocking(uintnat dom)

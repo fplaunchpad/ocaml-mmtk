@@ -100,6 +100,34 @@ extern void caml_mmtk_park(uintnat domain_state_addr);
  * meanwhile). Used on every STOPPED->RUNNING edge. */
 extern void caml_mmtk_become_running(uintnat domain_state_addr);
 
+/* RUNNING-set detector (GH issue 24). Invariant: a thread that holds its
+ * domain's lock and is about to run OCaml must find its domain in MMTk's
+ * RUNNING set, else stop_all_mutators treats the domain as safe-stopped and
+ * scans a live stack. Caml_mmtk_check_running(where) checks it at the points
+ * a thread (re)starts running OCaml and, on a violation, prints a one-line
+ * diagnostic naming [where] plus a C backtrace and aborts. On by default in
+ * the debug runtime (MMTK_CHECK_RUNNING=0 turns it off); off by default in
+ * the other runtimes (MMTK_CHECK_RUNNING=1 turns it on; =warn reports and
+ * continues; =lost aborts only on a lost RUNNING mark, see runtime/mmtk.c).
+ * When off the cost is one load of a cached flag. The flag is an exported
+ * variable rather than an #ifdef DEBUG so that library stubs (systhreads),
+ * which are compiled once and linked against every runtime variant, follow
+ * the runtime's choice. */
+CAMLextern int caml_mmtk_check_running_on;
+CAMLextern void caml_mmtk_check_running(const char *where, const char *file,
+                                        int line);
+/* Detector bookkeeping: the calling thread may have been handed the domain
+ * lock by a yield (see runtime/mmtk.c). */
+CAMLextern void caml_mmtk_check_note_yield(void);
+/* Detector bookkeeping: count a restore_runtime_state that runs while a
+ * collection is active and the domain is not RUNNING (see runtime/mmtk.c). */
+CAMLextern void caml_mmtk_check_restore(void);
+#define Caml_mmtk_check_running(where)                                  \
+  do {                                                                  \
+    if (caml_mmtk_check_running_on)                                     \
+      caml_mmtk_check_running((where), __FILE__, __LINE__);             \
+  } while (0)
+
 /* Report a domain's weak arrays / ephemerons (domain->ephe_info lists) as
  * strong roots, so MMTk keeps them alive and updated instead of letting them
  * dangle. Conservative interim until proper weak-reference processing exists.
@@ -238,14 +266,11 @@ extern void caml_mmtk_quiesce_ack(caml_domain_state *d);
 extern void caml_mmtk_quiesce_running_domains(void);
 
 /* Blocking-section participation: a domain in a C blocking section is safe for
- * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking are called
- * from caml_enter/leave_blocking_section with the domain's caml_domain_state
- * address, captured by the caller while Caml_state is still bound -- these must
- * NOT read Caml_state themselves, as the blocking-section hooks
- * release/re-acquire the domain lock asymmetrically around the calls (enter
- * sees Caml_state NULL, leave sees it valid), which would unbalance MMTk's
- * safe-stopped accounting. caml_mmtk_domain_terminate deregisters a terminating
- * domain. */
+ * GC (not mutating; sp published). caml_mmtk_enter/leave_blocking take the
+ * domain's caml_domain_state address and are called by the holder of the
+ * domain lock: the default blocking-section hooks, and the systhreads master
+ * lock (GH issue 24; see runtime/signals.c and st_stubs.c).
+ * caml_mmtk_domain_terminate deregisters a terminating domain. */
 extern void caml_mmtk_enter_blocking(uintnat dom);
 extern void caml_mmtk_leave_blocking(uintnat dom);
 extern void caml_mmtk_domain_terminate(caml_domain_state *dom);
