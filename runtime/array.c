@@ -764,17 +764,18 @@ CAMLprim value caml_uniform_array_fill(
      a %-builtin), so native code also calls in here -- there is no inlined
      array-fill fast path to bypass it. */
   caml_mmtk_satb_barrier(fp, len);
-  /* MMTk owns the heap: fill the range, then (bytecode) remember it via the
-     MMTk region barrier for generational plans (no-op otherwise). OCaml's stock
-     remembered-set / SATB fill is bypassed. Native takes no barrier here (see
-     write_barrier -- a gap for native StickyImmix, fine for the default Immix).
-     */
+  /* MMTk owns the heap: fill the range, then remember it via the MMTk region
+     barrier for the generational plans (GenImmix, the default, StickyImmix,
+     GenCopy, Bactrian; a no-op otherwise). OCaml's stock remembered-set /
+     SATB fill is bypassed. Both runtimes need this: the fill loop is a plain
+     store, so if [array] is mature and [val] is a nursery object, nothing
+     else records the edge and the next nursery GC frees [val] under it.
+     (Native code once skipped this barrier, from when native caml_modify
+     took none either; see write_barrier in memory.c.) */
   for (intnat i = 0; i < len; i++) fp[i] = val;
-#ifndef NATIVE_CODE
   /* Immediate fills create no heap edges (same filter as caml_initialize /
      write_barrier); the SATB barrier above already handled the OLD values. */
   if (Is_block(val)) caml_mmtk_region_barrier(fp, len);
-#endif
   return Val_unit;
 }
 
