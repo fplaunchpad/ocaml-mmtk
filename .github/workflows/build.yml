@@ -298,27 +298,6 @@ jobs:
           for dir in $PARALLEL_TESTS; do \
            bash -cxe "SHOW_TIMINGS=1 tools/ci/actions/runner.sh test_prefix $dir"; \
           done
-      # A crashing test on macOS leaves no core file, but the system writes a
-      # crash report (thread backtraces, faulting address) for it. Print the
-      # ones from this run into the log and keep them as an artifact.
-      - name: macOS crash reports
-        if: ${{ failure() && startsWith(matrix.os, 'macos-') }}
-        run: |
-          dir="$HOME/Library/Logs/DiagnosticReports"
-          ls -la "$dir" || exit 0
-          for f in "$dir"/*.ips; do
-            [ -e "$f" ] || continue
-            echo "::group::$f"
-            cat "$f"
-            echo '::endgroup::'
-          done
-      - name: Upload macOS crash reports
-        if: ${{ failure() && startsWith(matrix.os, 'macos-') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: crash-reports-${{ matrix.name }}
-          path: ~/Library/Logs/DiagnosticReports/
-          if-no-files-found: ignore
       - name: Install
         if: ${{ matrix.test-in-prefix }}
         run: |
