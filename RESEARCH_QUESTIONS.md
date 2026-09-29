@@ -357,6 +357,15 @@ Concrete findings already in hand:
   their referents were collected — the classic "every allocation path must reach the GC" lesson. All three
   are generalisable GC-runtime-interface findings, root-caused under `rr`.
 
+**Later instances of the same lessons (2026-09-29; observations, not yet results).** Each is
+tracked in ROADMAP (open items 17-19):
+- *Every store path must reach the barrier.* Native `Array.fill` skips the generational barrier, which
+  silently corrupts the default plan (item 18).
+- *A barrier that runs before the store must not trust cached state.* The LXR field barrier classified
+  a slot by its old value and lost the new value's RC increment (item 17).
+- *Coordination impedance.* Retiring the backup thread left a per-domain RUNNING flag that is
+  safety-critical but not tied to master-lock ownership, and systhreads handoffs break it (item 19).
+
 **Honest framing.** The headline is not "OCaml was easy." It is **"a GC-friendly design eliminates the
 *root/motion* impedance the Julia/CRuby reports spent most of their effort on, but the *coordination*
 impedance (safepoints, GC-safe regions, every-alloc-path-traced) persists and bit us three times."** That
@@ -500,6 +509,16 @@ lets the binding run the whole nursery closure itself, stock-`oldify`-style, ins
 default-off and its measured effect is only in SHAPE.md round 30. Whether this is a point where the
 framework *resists* expressing the host collector (payoff 1 above), or simply a missing extension point,
 is an open question for the RQ4/RQ7 write-up.
+
+**A pacing observation (2026-09-29; not yet a result).** Two pacing failures share one shape (ROADMAP
+open item 20). The dynamic heap sizes itself from the page reservation seen at a heap-full poll, so
+under Immix an all-garbage program grows its heap limit to the cap while retaining 23 pages. And on
+GenCopy `darkening_work`, the mature-pressure law reads reserved pages, which GC-worker block tails
+inflate, so harmless writes change the number of major collections. Stock OCaml paces major work by
+allocated words, so it has no analogue of either failure. Both come from MMTk's page-reservation
+accounting meeting a pacing law modelled on OCaml's `space_overhead`. For RQ7 this is a candidate
+expressiveness point: matching stock's pacing may need a live-bytes or allocated-words signal that
+the framework does not currently provide to the plan.
 
 ---
 
@@ -785,8 +804,8 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
   **ConcurrentImmix + SATB (RQ1's enabler) landed bytecode + native**; plan-swapping is clean. What remains
   is per-RQ research, not bring-up.
 - **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier, and (2026-07-02) the **LXR** RC plan
-  (`MMTK_PLAN=LXR`, experimental; results provisional — it gives silently wrong results on an
-  allocation probe, ROADMAP open item 17). *Remaining:* a richer latency harness and a mutation-rate /
+  (`MMTK_PLAN=LXR`, experimental; results provisional — a silent wrong-results bug is root-caused with a fix on a
+  branch, not yet merged, and the fix exposes a capacity problem; ROADMAP open items 17 and 21). *Remaining:* a richer latency harness and a mutation-rate /
   lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add

@@ -158,6 +158,17 @@ GC introduces run-to-run nondeterminism (collection timing depends on allocation
 - **Host settings (verified on `turing`).** `perf_event_paranoid = -1` (perf/bpftrace work without sudo — good). `intel_pstate/no_turbo = 1` (turbo already off — leave it). **`scaling_governor = powersave` — MUST change to `performance`** before any timing run (`sudo cpupower frequency-set -g performance`), else clock scaling adds variance. CPU is 2-socket Xeon Gold 5120 (28 cores) — NUMA matters; **pin to one socket** (`taskset -c 0-13`).
 - **`sanity` feature is a correctness tool, not a measured config.** Full-heap re-trace after each GC is far too slow to leave on for timing. Verify a moving plan with `sanity` at a small heap in a *separate* run; time with `sanity` off.
 - **Known hangs distort aggregates.** Several tests/benches hang under MMTk (statmemprof, some finaliser cases, the bug #3c burn-pattern multidomain hang). Use a **per-run timeout** and *report* timed-out cells as failures — do not silently drop them. **Never wrap a run in an outer `timeout N …`**: if it fires before the inner timeout it orphans the `setpgid`'d process group, which then runs forever (we leaked ~17 runaway `ocamlrun` this way). Use the harness's own timeout / `setsid` + kill the group. A benchmark that intermittently hangs is a workload-characterization finding, not a data point to average in.
+- **Platform- and default-dependent memory behaviour (checked against the code at `045f121143`, 2026-09-29).**
+  - `MMTK_RELEASE_LOS_PAGES` (return freed large-object pages of 2 MiB or more to the OS) is compiled
+    only on Linux (`gc/mmtk-core/src/util/heap/freelistpageresource.rs`). On macOS large-object memory
+    is not returned to the OS, so RSS comparisons on the M4 are affected.
+  - `MMTK_TRANSPARENT_HUGEPAGES` defaults to on under Linux only (`gc/mmtk/binding/src/api.rs`).
+  - The bump-allocation granule `MMTK_BUMP_BLOCK_KB` defaults to 512 KiB, though the doc comment in
+    `gc/mmtk-core/src/util/alloc/bumpallocator.rs` still says 32 KiB.
+  - The nursery maximum is capped at a quarter of the current heap
+    (`gc/mmtk-core/src/util/heap/gc_trigger.rs`, `get_max_nursery_bytes` / `clamp_fixed_nursery`), so
+    at the 32 MiB dynamic-heap floor the effective default nursery maximum is 8 MiB, not 16.
+  Record the host OS and these settings with every RSS number.
 - **Kill stray runners before measuring.** `pgrep -x ocamlrun` and clean by PID — **never `pkill -f`** (it can match your own ssh command line and kill your session).
 
 ---
