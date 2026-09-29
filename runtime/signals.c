@@ -178,6 +178,10 @@ CAMLexport void caml_enter_blocking_section(void)
        [Caml_check_gc_interrupt]. */
     if (atomic_load_relaxed(&domain->young_limit) != CAML_UINTNAT_MAX) break;
     caml_leave_blocking_section_hook ();
+    /* GH issue 24 detector: the retry re-acquired the lock without marking
+       RUNNING and is about to run pending actions (OCaml signal handlers
+       included). */
+    Caml_mmtk_check_running("caml_enter_blocking_section (retry)");
   }
   /* Now committed to the blocking section: safe for MMTk STW. Pass the domain
      identity captured above -- the hook released the domain lock, so Caml_state
@@ -222,6 +226,9 @@ CAMLexport void caml_leave_blocking_section(void)
   */
   if (caml_check_pending_signals())
     caml_set_action_pending(Caml_state);
+
+  /* GH issue 24 detector: we hold the domain lock and return to OCaml. */
+  Caml_mmtk_check_running("caml_leave_blocking_section");
 
   errno = saved_errno;
 }

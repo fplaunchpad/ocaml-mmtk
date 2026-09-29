@@ -302,6 +302,8 @@ static void caml_thread_leave_blocking_section(void)
   caml_thread_t th = This_thread;
   /* Wait until the runtime is free */
   thread_lock_acquire(th->domain_id);
+  /* GH issue 24 detector: is this restore racing an active pause? */
+  if (caml_mmtk_check_running_on) caml_mmtk_check_restore();
   /* Update Active_thread to point to the thread descriptor
      corresponding to the thread currently executing and restore the
      runtime state */
@@ -701,6 +703,7 @@ caml_thread_start(void * v)
   /* Acquire lock of domain */
   caml_init_domain_self(dom_id);
   thread_lock_acquire(dom_id);
+  if (caml_mmtk_check_running_on) caml_mmtk_check_restore();
 
   thread_init_current(th);
 
@@ -716,6 +719,8 @@ caml_thread_start(void * v)
      before any OCaml runs, mirroring what caml_leave_blocking_section does via
      caml_mmtk_leave_blocking. */
   caml_mmtk_become_running((uintnat) Caml_state);
+  /* GH issue 24 detector: about to run the thread's closure. */
+  Caml_mmtk_check_running("caml_thread_start");
 
   clos = Start_closure(Active_thread->descr);
   caml_modify(&(Start_closure(Active_thread->descr)), Val_unit);
@@ -875,6 +880,8 @@ int caml_c_thread_register_in_domain_index(uintnat domain_index,
      this thread's live stack. (We re-block the regular way via
      caml_enter_blocking_section_no_pending at the end.) */
   caml_mmtk_become_running((uintnat) Caml_state);
+  /* GH issue 24 detector: about to allocate the thread descriptor. */
+  Caml_mmtk_check_running("caml_c_thread_register");
 
   /* We can now allocate the thread descriptor on the major heap */
   value res = caml_thread_new_descriptor_exn(Val_unit);  /* no closure */
@@ -967,9 +974,19 @@ static void thread_yield(void)
      not contain anything interesting, do not bother saving errno.)
   */
 
+  /* GH issue 24 detector: checked on entry too, so that a violation reported
+     only at the exit check below proves the mark was lost while this thread
+     was inside st_thread_yield. */
+  Caml_mmtk_check_running("thread_yield (entry)");
   save_runtime_state();
   st_thread_yield(m);
+  if (caml_mmtk_check_running_on) caml_mmtk_check_note_yield();
   restore_runtime_state(This_thread);
+  /* GH issue 24 detector: this thread returns to OCaml. If it waited in
+     st_thread_yield, the lock came from whichever thread released it last,
+     possibly one entering a blocking section (which marks the domain
+     STOPPED); nothing on this path marks it RUNNING again. */
+  Caml_mmtk_check_running("thread_yield");
 
   /* Switching threads might have unmasked some signal. */
   if (caml_check_pending_signals())

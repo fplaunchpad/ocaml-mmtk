@@ -117,7 +117,8 @@ void mmtk_ocaml_end_bind(void);
     currently RUNNING OCaml into buf[0..len); returns the count written
     (truncated to len). mmtk_ocaml_is_running reports whether one domain is still
     RUNNING. Used by caml_mmtk_quiesce_running_domains to wait for in-flight
-    lock-free readers to drain. DORMANT: no callers yet. */
+    lock-free readers to drain; mmtk_ocaml_is_running also backs the
+    RUNNING-set check (caml_mmtk_check_running, GH issue 24). */
 size_t mmtk_ocaml_snapshot_running(uintptr_t* buf, size_t len);
 int mmtk_ocaml_is_running(uintptr_t addr);
 

@@ -733,7 +733,10 @@ pub unsafe extern "C" fn mmtk_ocaml_snapshot_running(buf: *mut usize, len: usize
 /// Ragged safepoint — true iff domain `addr` is currently RUNNING OCaml. A
 /// quiescing writer uses this to drop a snapshot domain that has since parked /
 /// blocked / terminated (it left the RUNNING set, so it holds no pre-bump
-/// transient reader pointer). One lock acquisition. DORMANT (see above).
+/// transient reader pointer). One lock acquisition. Also the query behind the
+/// runtime's RUNNING-set check (GH issue 24, `caml_mmtk_check_running` in
+/// runtime/mmtk.c), which calls it holding its domain lock; STW is a leaf
+/// lock, so that adds no lock-order edge.
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_is_running(addr: usize) -> i32 {
     let s = STW.lock().unwrap();

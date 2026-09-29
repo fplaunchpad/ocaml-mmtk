@@ -1456,8 +1456,19 @@ void caml_handle_gc_interrupt(void)
   /* MMTk multi-domain STW: if a collection is in progress, park this domain at
      the safepoint (roots are published) until it finishes. */
   caml_mmtk_stw_poll();
+  /* GH issue 24 detector: past the poll this thread runs OCaml again. */
+  Caml_mmtk_check_running("caml_handle_gc_interrupt");
 
   caml_poll_gc_work();
+}
+
+/* For the RUNNING-set detector (caml_mmtk_check_running): 0 once this domain
+   has left the runtime's STW participant set on its terminate path. Read by a
+   thread holding the domain lock; the terminating thread clears the flag
+   while holding it. */
+int caml_domain_is_stw_participant(void)
+{
+  return domain_self != NULL && domain_self->interruptor.running;
 }
 
 /* Preemptive systhread switching */
