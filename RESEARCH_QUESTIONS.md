@@ -570,6 +570,17 @@ pacing — so the "incremental (bounded slices) or only mostly-concurrent?" sub-
 of 1.009× vanilla; round 28's front-to-front memory/time pareto found vanilla's front still dominates on
 bt/kb/LU/sp. Details and open items: ROADMAP (RQ7 bullet), NOTES 2026-09-29.
 
+**Status 2026-09-30 — RQ7 is unmeasured on the axis that matters, and a decision measurement is
+queued (ROADMAP open item 33).** The 2026-09-30 space-time sweep and quick panel put Bactrian's fronts on
+top of GenImmix's on every bench (binarytrees 101 MiB / 1.74 s vs 94 / 1.64; kb 22 / 0.48 vs 23 / 0.49;
+LU identical; chameneos 3.3 vs 3.0 s), so on throughput the two are the same collector and a second plan
+is not justified. Bactrian's architectural claim is pause time — sliced marking inside nursery pauses and
+an incremental sweep exist to bound pauses, not to speed up the mutator — and no pause-time distribution
+has been measured for any plan. The decision rule: if Bactrian's max/p99 pause at equal RSS is materially
+below GenImmix's, RQ7 is answered *yes* and the plan stays; if not, RQ7 is answered *no* with a number —
+stock's incremental-marking architecture buys nothing on MMTk's generational Immix, a publishable
+negative — and Bactrian is frozen (kept as the record, dropped from the default panel and CI gating).
+
 **An expressiveness observation (not yet a result).** Matching stock's *minor* collector closely enough
 to close the per-promotion cost gap needed a new, opt-in VM-side hook in mmtk-core —
 `Scanning::up_oldify_packet` + `UpOldifyOps` (mmtk-core `32d8057efa`, used by `MMTK_UP_OLDIFY=1`) — which

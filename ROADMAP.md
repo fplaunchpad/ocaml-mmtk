@@ -641,7 +641,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     until item 21 is resolved and they are re-measured. (An earlier version of this item said an explicit `Gc.full_major ()` produces no
     collection under LXR; that was wrong — see item 22.) → NOTES 2026-09-29.
 
-**Items 18-27 (added 2026-09-29), 28-32 (added 2026-09-30).** Items 17, 18, 19 and 20(a) were fixed
+**Items 18-27 (added 2026-09-29), 28-35 (added 2026-09-30).** Items 17, 18, 19 and 20(a) were fixed
 and merged on 2026-09-29, item 27 with the docs of PR 35, item 29 on 2026-09-30, and items 15 (=
 20(b)) and 22 later on 2026-09-30 (ocaml-mmtk PR 41, mmtk-core PRs 4 and 5); item 21's retention
 fixes merged that evening (PR 46, mmtk-core PR 6). The OPEN work, in
@@ -653,7 +653,7 @@ line reuse (together they keep LXR's results provisional); (3) item 26, GH issue
 intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
 rest is open); (4) item 25, GH issue 33, a forked child cannot run a collection (explicit requests
 are now no-ops there; an allocation-triggered collection spins); (5) item 30, one-off multi-domain
-crashes on Linux CI (possibly item 28); (6) the unexplained July growth (20(c)); (7) item 32, an LXR
+crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling decomposition, the two headline gaps after the macOS memset fix, sharing item 33's per-pause instrumentation; (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
 reference-count anomaly in kb; (8) item 23, a possible concurrent-marking infix race; (9) item 24,
 two pre-existing side findings from the store-path audit. Evidence is labelled *verified*
 (reproduced by running), *source reading*, *inferred* or *unknown*.
@@ -1160,6 +1160,52 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     sampled ones are small blocks in blocks promoted in place; output correct. It matters because
     `rc_dead` block freeing and line reuse trust a zero count, so it blocks line reuse with item 31.
     → NOTES 2026-09-30 (later), 2026-09-30 (evening).
+33. **RQ7 decision measurement — pause-time distributions, GenImmix vs Bactrian vs vanilla (open;
+    added 2026-09-30).** Decides whether Bactrian stays. On throughput the 2026-09-30 sweep and panel put
+    Bactrian's fronts on top of GenImmix's on every bench (binarytrees 101 MiB / 1.74 s vs 94 / 1.64; kb
+    22 / 0.48 vs 23 / 0.49; LU identical; chameneos 3.3 vs 3.0 s; par_matmul slightly better at 2–4
+    domains, equal at 8), so throughput does not justify a second plan; but Bactrian's claim is pause
+    time (stock's sliced marking inside nursery pauses, incremental sweep), and pause time has not been
+    measured — the panel and sweep report wall and RSS only, `MMTK_VERBOSE` prints totals. Task:
+    (1) a per-pause start/end log in the binding behind `MMTK_PAUSE_LOG=1` (`BACTRIAN_TRACE` has the
+    hook points) and a `--pauses` mode in `quick/quickbench.py` / `spacetime.py` reporting max, p99,
+    mean, count and the number of Full-heap pauses, with vanilla's per-GC timing alongside
+    (`OCAMLRUNPARAM=v=0x400`); (2) GenImmix vs Bactrian vs vanilla on binarytrees, kb, par_binarytrees
+    d=8 and chameneos_redux at matched heaps (the sweep's front points), 3 reps, M4 and godel;
+    (3) decide: a materially lower max/p99 pause at equal RSS answers RQ7 yes — Bactrian stays and
+    item 26 (issue 36) and its residual bugs get fixed; otherwise RQ7 is answered no with a number (a
+    publishable negative: stock's incremental-marking architecture buys nothing on MMTk's generational
+    Immix) and Bactrian is frozen — code and SHAPE.md kept as the record, dropped from the default
+    panel, CI gating and the README plan table, no further maintenance. Not to be deleted before the
+    measurement exists. → the RQ7 workstream bullet; RESULTS.md; RESEARCH_QUESTIONS RQ7.
+34. **Residual maxRSS gap vs vanilla after the macOS memset fix (open; added 2026-09-30; the first of
+    the two headline gaps).** After mmtk-core `5454281016` the fronts meet vanilla's, but MMTk's front
+    still starts 8–21 MiB above vanilla's on kb, LU, matmul and chameneos (GenImmix/Bactrian; Immix 11–37;
+    binarytrees 26–37, where the gap is collector speed rather than memory — RESULTS.md). Known
+    components (NOTES 2026-09-30 evening): the nursery bound of 16 MiB per domain (vanilla's minor heap is
+    2 MiB per domain, 8× smaller), GC work-packet vectors (~30 MiB on binarytrees, ~0 on kb; vanilla's mark
+    stack is bounded and pruned), one 4 MiB chunk per space, and no page return on macOS (every release
+    path is Linux-only; `MADV_FREE_REUSABLE` is the macOS call). Research question: what is the
+    irreducible footprint tax of a framework collector over a bespoke one — side metadata + nursery + work
+    queues — and can it be brought under ~10 % at equal time? Task: (1) a vmmap budget at each bench's
+    front point on the fixed build; (2) three levers, each plotted as a space-time front rather than
+    adopted as a default: nursery bound 16→8→4→2 MiB per domain, bounded/reused work packets, page return;
+    (3) the matmul drop (GenImmix 48–71 MiB, 0.62–0.66 s everywhere except a 32 MiB nursery with heap
+    ≥96 MiB: 27 MiB / 0.58 s) explained. Godel with reps for the Linux cross-check.
+35. **Multi-domain scaling decomposition (open; added 2026-09-30; the second headline gap).** The
+    2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs vanilla 4.4×; par_spectralnorm 3.4×
+    vs 5.2×; par_matmul 5.2× vs 6.1×; chameneos_redux anti-scales, 3.0 s at 1 domain → 13.4 s at 8 (vanilla
+    1.4 → 0.4 s). NOTES calls it STW-bound rather than thread-pool-bound, but the per-pause cost has never
+    been decomposed. Research question: as domains grow, where does the cost go — the all-domain
+    rendezvous (park/wake of every domain per nursery pause), a serial phase inside the pause (root
+    scanning, per-mutator buffer flushes, promotion), or mutator-side contention (region barrier, mutator
+    registry / domain locks, fiber-stack allocation under MMTk)? chameneos is the sharpest probe
+    (effects-heavy; continuation stacks are the prime suspect). Task: (1) the per-pause log of item 33
+    (`MMTK_PAUSE_LOG=1`) so wall splits into mutator time and pause time = count × mean pause, GenImmix
+    vs vanilla (`OCAMLRUNPARAM=v=0x400`), d = 1..8, M4; (2) `perf` / lock profiling of the dominant term
+    on godel (56 cores; `rr -c` if it is a scheduling effect); (3) one lever per finding, measured as a
+    domain-sweep speedup curve with RSS. → SCALABILITY.md; NOTES 2026-07-01 (MMTk↔OCaml integration
+    bottleneck); RESULTS.md parallel table.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
@@ -1368,6 +1414,26 @@ The active research/measurement threads behind the M8 milestone — the index; d
   multi-line objects and names a pool-class fast allocator, not policy, as the cure).
   → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02, 2026-08-09/10/12/13/14, 2026-09-29; SHAPE.md
   rounds 23–32.
+  - **RQ7 DECISION MEASUREMENT — pause-time distributions (OPEN, decides whether Bactrian stays; added
+    2026-09-30).** On throughput the 2026-09-30 sweep and panel put Bactrian's fronts on top of GenImmix's
+    on every bench (binarytrees 101 MiB / 1.74 s vs 94 / 1.64; kb 22 / 0.48 vs 23 / 0.49; LU identical;
+    chameneos 3.3 vs 3.0 s; par_matmul slightly better at 2–4 domains, equal at 8), so throughput does not
+    justify a second plan. Bactrian's claim was never throughput: stock's architecture (sliced marking inside
+    nursery pauses, incremental sweep) is meant to buy **pause time**, and pause time has not been measured
+    — the panel and the sweep report wall and RSS only; `MMTK_VERBOSE` prints totals. Task: (1) add a
+    `--pauses` mode to `quick/spacetime.py` / `quickbench.py` that records every pause's duration (max,
+    p99, mean, count, and the count of Full-heap pauses) from a per-pause start/end line emitted by the
+    binding (behind `MMTK_PAUSE_LOG=1`; `BACTRIAN_TRACE` already has the hook points), with vanilla's
+    per-GC timing alongside (`OCAMLRUNPARAM=v=0x400`); (2) run GenImmix vs Bactrian vs vanilla on
+    binarytrees, kb, par_binarytrees d=8 and chameneos_redux at matched heaps (the sweep's front points),
+    3 reps, on the M4 and on godel; (3) decide: if Bactrian's max/p99 pause is materially lower at equal
+    RSS, RQ7 is answered yes — it stays and issue 36 and its residual bugs get fixed; if not, RQ7 is
+    answered no with a number (a publishable negative: stock's incremental-marking architecture buys
+    nothing on MMTk's generational Immix) and Bactrian is frozen — code and SHAPE.md kept as the record,
+    dropped from the default panel, CI gating and the README plan table, no further maintenance. Do not
+    delete it before this measurement exists. Cost to keep meanwhile: the plan with the most open bugs
+    (issue 36; the extra small-heap segfaults in the sweep were issue 49, fixed) and a doubled CI /
+    benchmark budget.
 - **LXR integration — RQ1's read-barrier-free, low-latency vehicle (planned 2026-06-25; P3–P5 since LANDED
   on mainline by 2026-07-02 — `MMTK_PLAN=LXR` is wired, single- and multi-domain validated at the time
   (now provisional: the wrong-results fix merged 2026-09-29, item 17, exposed a capacity problem, item 21 —
