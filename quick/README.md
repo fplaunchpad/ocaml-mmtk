@@ -154,6 +154,7 @@ uv run quick/quickbench.py [seq|par|all] [options]
 | `--bytecode` | use `*.byte` via `ocamlrun` (default: native `*.native`) |
 | `--cores LIST` / `--no-pin` / `--no-setarch` | `taskset` / `setarch` controls (skip on macOS) |
 | `--chart` | print a per-bench ASCII bar chart after the seq table |
+| `--pauses` | per-pause statistics: `MMTK_PAUSE_LOG=1` for MMTk runs (one `[mmtk-pause]` stderr line per stop-the-world pause; needs a runtime with the pause log), `OCAMLRUNPARAM=v=0x400` for vanilla. NDJSON rows gain `pauses` (count, full, total_ms, mean/p50/p95/p99/max_us, ttsp_ms, kinds) and `mutator_ms` = wall − total pause, from the median-wall rep; a `## pauses` table (wall = mutator + pause) follows. Vanilla's `v=0x400` gives counts only (minor/major collections), no durations. |
 | `--json FILE` | NDJSON results path (default `quick/results.ndjson`) |
 | `--graphs DIR` / `--no-plot` | PNG output dir (default `quick/graphs/`) / skip plotting |
 
@@ -243,6 +244,9 @@ MMTk variant, the front point nearest in RSS to vanilla's default, its time
 ratio, and whether the MMTk front **dominates / is dominated by / crosses**
 vanilla's (step-function comparison over the overlapping RSS range, ties within
 2%).
+
+`--pauses` adds the same per-pause statistics as `quickbench.py --pauses` to each
+row (from the min-wall rep); the pause-log variables are not recorded in `env`.
 
 ```sh
 # full M4 sweep (5 benches x (16 vanilla + 3 plans x 24) = 440 runs), on a quiet machine:
