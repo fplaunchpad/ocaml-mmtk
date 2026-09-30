@@ -33,7 +33,7 @@ per copied object on chameneos (≥ 2× stock; one `malloc` per copy from narrow
 0.63 µs on binarytrees (wide packets; the per-copy writes), plus the E1 barrier-study counters contending
 across domains (removed by PR 58, merged `ee744db495`: chameneos d=8 21.8 → 10.3 s). **First lever landed,
 opt-in (2026-09-30 late):** a worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix) cuts
-chameneos nursery pause time 29 % (d=1) and binarytrees' 4 %; full testsuite run pending. **Open:** LXR capacity and failures (items 21, 31 =
+chameneos nursery pause time 29 % (d=1) and binarytrees' 4 %; full GenImmix testsuite with it on (godel, spill 64): 1444 passed, 53 skipped, 5 timeouts at the 120 s limit that are host speed, not the closure (`lazy3/5/7` bytecode take 143-144 s with it on and off, output correct; `weaklifetime` 147 s; `forbidden` under the parallel load). **Open:** LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
 issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28), and item 28's
 process-exit residual. Order: items 21/31, 26, 25, 30, 20(c), 32, 23, 24.
@@ -1257,7 +1257,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     4.0 s (−8 %, noisier); kb 50 3.49 → 3.17 s (−9 %). An independent review (one worker, same-binary
     off/on): chameneos 200000 total pause −31 %, mallocs 7.86 M → 27.7 k. `sanity`-clean on five
     benches at small heaps (1–4 workers, spill 16 to force spilling), 12/12 goldens at 4 domains, six
-    focused fiber/ephemeron/finaliser/barrier tests; **full testsuite run pending**. Open:
+    focused fiber/ephemeron/finaliser/barrier tests; **full GenImmix testsuite with it on (godel, spill 64): 1444 passed, 53 skipped, 5 timeouts at the 120 s limit that are host speed, not the closure (`lazy3/5/7` bytecode take 143-144 s with it on and off, output correct; `weaklifetime` 147 s; `forbidden` under the parallel load)**. Open:
     - (i) *Research question:* when should tracing stay local versus publish work, given the frontier
       width? The spill threshold is the local-vs-parallel knob, set by hand; chameneos (narrow) and
       binarytrees (wide) bracket it.

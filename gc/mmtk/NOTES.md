@@ -120,7 +120,7 @@ writes of section 2, not in packets.
 - Six focused tests from the review (resume_counts, nested_fiber,
   ephe_infix, weaklifetime2, finaliser, old_to_young_bulk_stores) with
   `sanity` at 32 MiB, one and two workers.
-- Full GenImmix testsuite with it on: **full testsuite run pending.**
+- Full GenImmix testsuite with it on (godel, spill 64): 1444 passed, 53 skipped, 5 timeouts at the 120 s limit that are host speed, not the closure (`lazy3/5/7` bytecode take 143-144 s with it on and off, output correct; `weaklifetime` 147 s; `forbidden` under the parallel load).
 
 ### 7. Open
 

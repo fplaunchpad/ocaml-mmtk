@@ -24,8 +24,9 @@
 > - **First lever, landed opt-in (late):** a worker-local nursery closure in the mmtk-core fork
 >   (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix; `MMTK_LOCAL_NURSERY_SPILL` = the parallelism knob, default
 >   4096). godel, 3 reps: chameneos_redux 500000 GC 27.8 → 19.6 s at d=1 (−29 %), 8.6 → 7.5 s at d=8
->   (−12 %); par_binarytrees 20 d=8 4.35 → 4.0 s (−8 %); binarytrees 20 −4 %. Full testsuite run
->   pending. Next lever: the per-copy writes (binarytrees).
+>   (−12 %); par_binarytrees 20 d=8 4.35 → 4.0 s (−8 %); binarytrees 20 −4 %. Full GenImmix
+>   testsuite with it on: 1444 passed, 5 host-speed timeouts (godel). Next lever: the per-copy
+>   writes (binarytrees).
 
 > ## ⚠️ UPDATE (2026-06-25) — the anti-scaling headline below is SUBSTANTIALLY REVISED
 >
