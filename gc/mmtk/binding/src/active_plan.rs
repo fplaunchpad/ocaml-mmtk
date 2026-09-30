@@ -129,8 +129,13 @@ pub fn deregister_by_addr(domain_state_addr: usize) {
     if let Some(m) = removed {
         // SAFETY: the mutator pointer is valid (the allocation is deliberately
         // leaked at termination) and this runs on the dying domain's own thread
-        // before any further mutator activity; no GC can be mid-flight on this
-        // mutator because it already left the RUNNING set's mutating states.
+        // before any further mutator activity. No pause may flush this mutator
+        // concurrently: ScanMutatorRoots flushes every mutator of the pause's
+        // frozen set on a GC worker, so the terminate path
+        // (caml_mmtk_domain_terminate) calls this holding a binding slot, which
+        // excludes an active collection (GH issue 39: two concurrent flushes
+        // took the same buffer and the packets freed it twice). The
+        // stop_all_domains path (caml_mmtk_deregister_domain) holds no slot.
         unsafe { (*m.0).flush() };
     }
     update_nursery_scale(DOMAIN_REGISTRY.read().unwrap().len());

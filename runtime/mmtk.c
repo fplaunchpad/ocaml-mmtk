@@ -2068,8 +2068,24 @@ void caml_mmtk_domain_terminate(caml_domain_state *dom)
      (so an in-progress stop_all_mutators that is waiting for all running
      domains to stop no longer waits for this one -- it has left OCaml STW too
      and sits in C teardown with no safepoint, exactly the un-stoppable case bug
-     #3b is about). */
+     #3b is about).
+
+     Deregistration also flushes the mutator's barrier buffers (remembered
+     sets), and that must not overlap a pause. The domain is STOPPED but still
+     registered here, so a pause that froze the mutator set before this point
+     has a ScanMutatorRoots packet for it, and that packet flushes the same
+     buffers on a GC worker. Two unsynchronised flushes can both take the same
+     buffer; each wraps it in a work packet, and dropping the second packet
+     frees it again (GH issue 39: "double free or corruption" / "pointer being
+     freed was not allocated" in a GC worker dropping a work packet). Hold a
+     binding slot across the deregistration: it is granted only while no
+     collection is active, and stop_all_mutators waits for held slots before
+     it freezes the mutator set, so no pause flushes this mutator
+     concurrently, and the next pause no longer sees it. */
+  while (!caml_mmtk_try_begin_bind())
+    mmtk_ocaml_wait_collection_done();
   mmtk_ocaml_deregister_domain((uintptr_t) dom);
+  caml_mmtk_end_bind();
   /* Then, if a collection is in progress, wait for it to finish before
      returning to caml_domain_terminate, which tears this domain's stack/roots
      down. A collection that snapshotted the registry just BEFORE the deregister
