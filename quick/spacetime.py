@@ -22,7 +22,7 @@ USAGE
       [--vanilla-o "40 80 120 200 320"] [--vanilla-s "256k 1M 4M"]
       [--heaps "32 48 64 96 128 192 256 dynamic"]
       [--nurseries "default Fixed:4194304 Fixed:33554432"]
-      [--plot-only]
+      [--plot-only] [--pauses]
 
 GRIDS
   vanilla   OCAMLRUNPARAM=o=<O>,s=<S> over O x S, plus one extra `default` point
@@ -41,6 +41,13 @@ MEASUREMENT (same as quickbench.py)
   the point keeps the MIN wall and the MAX RSS over the reps. A non-zero exit
   (e.g. Out_of_memory at a too-small pinned heap) or a timeout is recorded as a
   failed point (exit code + last stderr line) — never dropped. All points run.
+
+PAUSES (--pauses)
+  Adds MMTK_PAUSE_LOG=1 to MMTk points and v=0x400 to vanilla's OCAMLRUNPARAM
+  (measurement only: not recorded in `env`, which stays the GC configuration).
+  Each row gains `pauses` (quickbench.parse_pauses: count, full, total_ms,
+  mean/p50/p95/p99/max_us, ttsp_ms, kinds) and `mutator_ms` = wall - total
+  pause, both from the min-wall rep. Vanilla's v=0x400 has counts only.
 
 OUTPUT
   NDJSON (append; --resume skips points already in the file), one PNG per bench,
@@ -63,7 +70,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from quickbench import PERF, CI, STDLIB, COLORS as QB_COLORS, _maxrss_kib, have  # noqa: E402
+from quickbench import PERF, CI, STDLIB, COLORS as QB_COLORS, _maxrss_kib, have, parse_pauses  # noqa: E402
 
 DEFAULT_BENCHES = "binarytrees kb matrix_multiplication LU_decomposition chameneos_redux"
 DEFAULT_O = "40 80 120 200 320"
@@ -108,6 +115,8 @@ def parse_args(argv):
     p.add_argument("--vanilla-s", dest="vanilla_s", default=DEFAULT_S)
     p.add_argument("--heaps", default=DEFAULT_HEAPS)
     p.add_argument("--nurseries", default=DEFAULT_NURSERIES)
+    p.add_argument("--pauses", action="store_true",
+                   help="per-pause stats (MMTK_PAUSE_LOG=1 / vanilla v=0x400) in each row")
     a = p.parse_args(argv)
     a.plans = split_list(a.plans)
     a.benches = split_list(a.benches)
@@ -218,13 +227,16 @@ def run_once(cmd, env, timeout):
         wall = (time.perf_counter() - t0) * 1000.0
         p.returncode = rc
         errf.seek(0)
-        lines = [l for l in errf.read().decode("utf-8", "replace").splitlines() if l.strip()]
+        text = errf.read().decode("utf-8", "replace")
+        lines = [l for l in text.splitlines()
+                 if l.strip() and not l.startswith("[mmtk-pause")]
         tail = lines[-1][:300] if lines else ""
     if fired["v"]:
         return dict(wall_ms=None, rss_kib=None, exit=rc, status="timeout",
                     stderr_tail=tail or f"killed after {timeout:.0f}s")
     return dict(wall_ms=wall, rss_kib=_maxrss_kib(rusage), exit=rc,
-                status="ok" if rc == 0 else "err", stderr_tail=tail)
+                status="ok" if rc == 0 else "err", stderr_tail=tail,
+                pauses=parse_pauses(text) if rc == 0 else None)
 
 
 def run_point(a, bench, argv, variant, bindir, knobs, env_over):
@@ -238,7 +250,13 @@ def run_point(a, bench, argv, variant, bindir, knobs, env_over):
                     status="missing", stderr_tail=f"no such binary {exe}")
     cmd = prefix(a) + [os.path.abspath(exe)] + argv
     env = child_env(env_over)
-    walls, rsss = [], []
+    if a.pauses:
+        if variant == "vanilla":
+            prev = env.get("OCAMLRUNPARAM", "")
+            env["OCAMLRUNPARAM"] = (prev + "," if prev else "") + "v=0x400"
+        else:
+            env["MMTK_PAUSE_LOG"] = "1"
+    walls, rsss, reps = [], [], []
     for _ in range(max(1, a.reps)):
         r = run_once(cmd, env, a.timeout)
         if r["status"] != "ok":
@@ -246,9 +264,17 @@ def run_point(a, bench, argv, variant, bindir, knobs, env_over):
                         status=r["status"], stderr_tail=r["stderr_tail"],
                         cmd=cmd)
         walls.append(r["wall_ms"])
+        reps.append(r)
         if r["rss_kib"] is not None:
             rsss.append(r["rss_kib"])
-    return dict(base, wall_ms=min(walls),
+    extra = {}
+    if a.pauses:
+        best = min(reps, key=lambda r: r["wall_ms"])
+        ps = best["pauses"]
+        extra = dict(pauses=ps,
+                     mutator_ms=(round(best["wall_ms"] - ps["total_ms"], 3)
+                                 if ps and ps.get("total_ms") is not None else None))
+    return dict(base, **extra, wall_ms=min(walls),
                 max_rss_mib=(round(max(rsss) / 1024.0, 1) if rsss else None),
                 exit=0, ok=True, status="ok", stderr_tail="", cmd=cmd)
 
@@ -293,6 +319,12 @@ def sweep(a, sizes):
                 out.flush()
                 if row["ok"]:
                     msg = f"{row['wall_ms']:.0f} ms  {row['max_rss_mib']} MiB"
+                    ps = row.get("pauses")
+                    if ps:
+                        msg += (f"  pauses n={ps['count']} full={ps['full']}"
+                                + (f" total={ps['total_ms']:.1f}ms max={ps['max_us']:.0f}us"
+                                   if ps.get("total_ms") is not None and ps.get("max_us") is not None
+                                   else ""))
                 else:
                     msg = f"FAIL {row['status']} exit={row['exit']}  {row['stderr_tail']}"
                 el = time.monotonic() - t_start

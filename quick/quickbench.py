@@ -57,6 +57,16 @@ USAGE
     --no-pin / --no-setarch   skip taskset / setarch wrappers (e.g. macOS).
     --cores LIST           taskset core base list (Linux).
     --gc                   add GC count / STW-ms columns (MMTK_VERBOSE; seq only).
+    --pauses               per-pause statistics: MMTk runs get MMTK_PAUSE_LOG=1
+                           (one [mmtk-pause] stderr line per stop-the-world pause),
+                           vanilla runs OCAMLRUNPARAM=v=0x400 (exit GC counters).
+                           Each NDJSON row gains `pauses` (count, full, total_ms,
+                           mean/p50/p95/p99/max_us, ttsp_ms, kinds) and
+                           `mutator_ms` = wall - total pause, taken from the
+                           median-wall rep; a "## pauses" table follows the runs.
+                           Vanilla's v=0x400 gives COUNTS only (minor_collections,
+                           major_collections), no per-collection durations, so its
+                           pause/mutator columns are "-" (see parse_pauses).
     --chart                print a per-bench ASCII bar chart after the seq table.
     --json FILE            write NDJSON results to FILE (default: results.ndjson
                            next to this script). One record per measured cell.
@@ -178,6 +188,7 @@ def parse_args(argv):
     p.add_argument("--no-setarch", dest="no_setarch", action="store_true")
     p.add_argument("--cores", default="")
     p.add_argument("--gc", action="store_true")
+    p.add_argument("--pauses", action="store_true")
     p.add_argument("--chart", action="store_true")
     p.add_argument("--json", dest="json_path",
                    default=os.path.join(HERE, "results.ndjson"))
@@ -292,7 +303,92 @@ def cell_env(a, plan, dom, bench=None):
             e["MMTK_THREADS"] = str(t)
     if dom is not None:
         e["DOMAINS"] = str(dom)
+    if getattr(a, "pauses", False):
+        if plan:
+            e["MMTK_PAUSE_LOG"] = "1"
+        else:
+            prev = e.get("OCAMLRUNPARAM", "")
+            e["OCAMLRUNPARAM"] = (prev + "," if prev else "") + "v=0x400"
     return e
+
+
+# ---- pause statistics (--pauses) -------------------------------------------
+_MMTK_PAUSE = re.compile(r"^\[mmtk-pause\] (.*)$")
+_MMTK_SUMMARY = re.compile(r"^\[mmtk-pause-summary\] (.*)$")
+_KV = re.compile(r"(\w+)=(\S+)")
+_VANILLA_STAT = re.compile(r"^(minor_collections|major_collections|forced_major_collections):\s*(\d+)\s*$")
+
+
+def _pct(sorted_vals, p):
+    """Nearest-rank percentile (same rule as the binding's summary line)."""
+    if not sorted_vals:
+        return None
+    import math
+    k = max(1, min(len(sorted_vals), math.ceil(p / 100.0 * len(sorted_vals))))
+    return sorted_vals[k - 1]
+
+
+def parse_pauses(text):
+    """Pause statistics from a run's stderr, or None if it carries none.
+
+    MMTk (MMTK_PAUSE_LOG=1): one line per stop-the-world pause,
+      [mmtk-pause] n= kind= stw_us= ttsp_us= gc_us= domains= epoch=
+    stw_us = GC worker entering stop_all_mutators -> mutators woken (the span
+    MMTK_VERBOSE's "GC time" sums; the rendezvous, ttsp_us, is inside it).
+    `full` counts whole-heap pauses (kind full / final / gc) — the binding's
+    summary line's `full=` (it uses the same rule) wins when present.
+
+    Vanilla 5.5 (OCAMLRUNPARAM=v=0x400): only the exit counters
+      minor_collections: N / major_collections: M / forced_major_collections: F
+    Every stock minor collection is a stop-the-world pause of all domains (and
+    runs a major slice); a major *collection* is a completed incremental cycle,
+    not a pause. So count = minor_collections, full = major_collections, and
+    there are NO durations: total/mean/percentiles are None and durations=False.
+    (Stock per-pause durations need runtime_events — not wired here.)"""
+    durs, ttsp, kinds, summary = [], 0.0, {}, None
+    vstat = {}
+    for ln in text.splitlines():
+        m = _MMTK_PAUSE.match(ln)
+        if m:
+            kv = dict(_KV.findall(m.group(1)))
+            try:
+                durs.append(float(kv["stw_us"]))
+                ttsp += float(kv.get("ttsp_us", 0.0))
+            except (KeyError, ValueError):
+                continue
+            k = kv.get("kind", "?")
+            kinds[k] = kinds.get(k, 0) + 1
+            continue
+        m = _MMTK_SUMMARY.match(ln)
+        if m:
+            summary = dict(_KV.findall(m.group(1)))
+            continue
+        m = _VANILLA_STAT.match(ln.strip())
+        if m:
+            vstat[m.group(1)] = int(m.group(2))
+    if durs or summary:
+        sd = sorted(durs)
+        full = sum(v for k, v in kinds.items() if k in ("full", "final", "gc"))
+        if summary and "full" in summary:
+            full = int(summary["full"])
+        total_us = sum(durs)
+        return dict(source="mmtk-pause-log", durations=True,
+                    count=len(durs), full=full,
+                    total_ms=round(total_us / 1000.0, 3),
+                    mean_us=round(total_us / len(durs), 1) if durs else None,
+                    p50_us=_pct(sd, 50), p95_us=_pct(sd, 95), p99_us=_pct(sd, 99),
+                    max_us=sd[-1] if sd else None,
+                    ttsp_ms=round(ttsp / 1000.0, 3), kinds=kinds,
+                    summary_count=int(summary["count"]) if summary else None,
+                    capped=(summary.get("capped") == "1") if summary else None)
+    if "minor_collections" in vstat:
+        return dict(source="vanilla-v0x400", durations=False,
+                    count=vstat["minor_collections"],
+                    full=vstat.get("major_collections"),
+                    forced_full=vstat.get("forced_major_collections"),
+                    total_ms=None, mean_us=None, p50_us=None, p95_us=None,
+                    p99_us=None, max_us=None, ttsp_ms=None, kinds=None)
+    return None
 
 
 def _maxrss_kib(rusage):
@@ -309,15 +405,17 @@ def _maxrss_kib(rusage):
     return (rss // 1024) if sys.platform == "darwin" else rss
 
 
-def run_once(cmd, env, timeout):
+def run_once(cmd, env, timeout, errf=None):
     """Run cmd; return (elapsed_ms, rss_kib, status). status: 'ok'|'hang'|'err'.
     Kills the whole process group on timeout (hung GC workers included).
     RSS (peak, KiB) comes from os.wait4's rusage on the success path; it is
-    None if the child couldn't run or was killed on timeout."""
+    None if the child couldn't run or was killed on timeout. `errf` (a file
+    object) captures the child's stderr (--pauses); default discards it."""
     t0 = time.monotonic()
     try:
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+                             stderr=(errf if errf is not None else subprocess.DEVNULL),
+                             start_new_session=True)
     except FileNotFoundError:
         return None, None, "err"
 
@@ -361,10 +459,22 @@ def run_once(cmd, env, timeout):
     return (ms, rss_kib, "ok" if rc == 0 else "err")
 
 
-def cell_median(a, variant, bench, args, dom):
+def run_once_pauses(cmd, env, timeout):
+    """run_once, capturing stderr: -> (ms, rss_kib, status, pauses|None)."""
+    import tempfile
+    with tempfile.TemporaryFile() as errf:
+        ms, rss, st = run_once(cmd, env, timeout, errf)
+        errf.seek(0)
+        text = errf.read().decode("utf-8", "replace")
+    return ms, rss, st, (parse_pauses(text) if st == "ok" else None)
+
+
+def cell_median(a, variant, bench, args, dom, pauses_out=None):
     """One cell: return (median_wall_ms, max_rss_kib, status).
     RSS is the PEAK across the measured reps; None if unavailable.
-    status: 'ok'|'hang'|'err'|'missing'."""
+    status: 'ok'|'hang'|'err'|'missing'.
+    With --pauses, `pauses_out` (a dict) receives `pauses` and `mutator_ms`
+    from the median-wall rep, so wall = mutator + pauses holds within one run."""
     exe = os.path.join(variant["dir"], f"{bench}." + ("byte" if a.bytecode else "native"))
     if not os.path.exists(exe):
         return None, None, "missing"
@@ -379,17 +489,32 @@ def cell_median(a, variant, bench, args, dom):
             return None, None, "hang"
     times = []
     rss_vals = []
+    per_rep = []   # (ms, pauses) for --pauses
     for _ in range(a.reps):
-        ms, rss, st = run_once(cmd, env, a.timeout)
+        if a.pauses:
+            ms, rss, st, ps = run_once_pauses(cmd, env, a.timeout)
+        else:
+            ms, rss, st = run_once(cmd, env, a.timeout)
+            ps = None
         if st == "hang":
             return None, None, "hang"
         if ms is not None:
             times.append(ms)
+            per_rep.append((ms, ps))
         if rss is not None:
             rss_vals.append(rss)
     if not times:
         return None, None, "err"
     max_rss = max(rss_vals) if rss_vals else None
+    if a.pauses and pauses_out is not None:
+        # The median-wall rep (lower middle for an even count) — its own pauses,
+        # so mutator = wall - pauses is one run's decomposition, not a mix.
+        srt = sorted(per_rep, key=lambda t: t[0])
+        ms_m, ps_m = srt[(len(srt) - 1) // 2]
+        pauses_out["pauses"] = ps_m
+        pauses_out["pause_rep_ms"] = ms_m
+        pauses_out["mutator_ms"] = (round(ms_m - ps_m["total_ms"], 3)
+                                    if ps_m and ps_m.get("total_ms") is not None else None)
     return statistics.median(times), max_rss, "ok"
 
 
@@ -429,7 +554,8 @@ def run_seq(a, variants, sizes, records):
         seq_med[b] = {}
         seq_rss[b] = {}
         for v in variants:
-            med, rss_kib, st = cell_median(a, v, b, sizes[b], None)
+            px = {}
+            med, rss_kib, st = cell_median(a, v, b, sizes[b], None, px)
             rss_mib = round(rss_kib / 1024) if (st == "ok" and rss_kib is not None) else None
             seq_med[b][v["label"]] = med if st == "ok" else None
             seq_rss[b][v["label"]] = rss_mib
@@ -437,7 +563,8 @@ def run_seq(a, variants, sizes, records):
                  plan=v["plan"] or "vanilla", domains=1, threads=threads_label(a),
                  median_ms=med if st == "ok" else None,
                  rss_mib=rss_mib,
-                 status=("ok" if st == "ok" else "hang" if st == "hang" else st))
+                 status=("ok" if st == "ok" else "hang" if st == "hang" else st),
+                 **px)
             if st == "missing":
                 row += f"{'n/a':<{colw}}"; continue
             if st == "hang":
@@ -464,13 +591,15 @@ def run_par(a, variants, sizes, records):
             row = f"{v['label']:<{lw}}"
             t1 = None
             for d in a.domains:
-                med, rss_kib, st = cell_median(a, v, b, sizes[b], d)
+                px = {}
+                med, rss_kib, st = cell_median(a, v, b, sizes[b], d, px)
                 rss_mib = round(rss_kib / 1024) if (st == "ok" and rss_kib is not None) else None
                 emit(records, mode="par", bench=b, variant=v["label"],
                      plan=v["plan"] or "vanilla", domains=d, threads=threads_label(a),
                      median_ms=med if st == "ok" else None,
                      rss_mib=rss_mib,
-                     status=("ok" if st == "ok" else "hang" if st == "hang" else st))
+                     status=("ok" if st == "ok" else "hang" if st == "hang" else st),
+                     **px)
                 if st == "missing":
                     row += f"{'n/a':<18}"; continue
                 if st == "hang":
@@ -482,6 +611,49 @@ def run_par(a, variants, sizes, records):
             print(row)
         print(f"(spd = T(first domains)/T(N); ideal ~ linear. "
               f"MMTk GC workers = {threads_label(a)} per cell.)")
+
+
+def print_pauses(records):
+    """The --pauses table: wall = mutator + pauses, per bench / variant
+    (/ domain count for the parallel sweep). All numbers from one run per cell
+    (the median-wall rep). Vanilla rows carry counts only (v=0x400 has no
+    durations), so their pause and mutator columns are '-'."""
+    rows = [r for r in records if "pauses" in r]
+    if not rows:
+        return
+    print("\n## pauses   (wall = mutator + pause; one run per cell, the median-wall rep;"
+          " times ms, pause percentiles us)")
+    hdr = (f"{'bench':22s} {'variant':18s} {'d':>2s} {'wall':>8s} {'mutator':>8s} {'pause':>8s}"
+           f" {'pause%':>6s} {'n':>6s} {'full':>5s} {'mean':>8s} {'p50':>8s} {'p95':>8s}"
+           f" {'p99':>8s} {'max':>8s} {'ttsp':>7s}")
+    print(hdr)
+    print("-" * len(hdr))
+
+    def f(v, nd=1):
+        return "-" if v is None else (f"{v:.{nd}f}" if isinstance(v, float) else str(v))
+    last = None
+    for r in rows:
+        ps = r.get("pauses")
+        key = (r["mode"], r["bench"])
+        if last is not None and key != last:
+            print()
+        last = key
+        wall = r.get("pause_rep_ms")
+        if ps is None:
+            print(f"{r['bench']:22s} {r['variant']:18s} {r['domains']:>2d} {f(wall):>8s}"
+                  f"  (no pause data: {r.get('status')})")
+            continue
+        tot = ps.get("total_ms")
+        pct = (100.0 * tot / wall) if (tot is not None and wall) else None
+        print(f"{r['bench']:22s} {r['variant']:18s} {r['domains']:>2d} {f(wall):>8s}"
+              f" {f(r.get('mutator_ms')):>8s} {f(tot):>8s} {f(pct):>6s}"
+              f" {f(ps.get('count')):>6s} {f(ps.get('full')):>5s} {f(ps.get('mean_us')):>8s}"
+              f" {f(ps.get('p50_us')):>8s} {f(ps.get('p95_us')):>8s} {f(ps.get('p99_us')):>8s}"
+              f" {f(ps.get('max_us')):>8s} {f(ps.get('ttsp_ms'), 2):>7s}")
+    print("(MMTk: n = stop-the-world pauses, full = whole-heap ones, pause = sum of stw_us"
+          " [stop_all_mutators entry -> mutators woken], ttsp = rendezvous part of it, ms.\n"
+          " vanilla: n = minor_collections (each an all-domain STW pause), full ="
+          " major_collections (completed incremental cycles); v=0x400 gives no durations.)")
 
 
 def print_chart(a, variants, seq_med):
@@ -640,7 +812,7 @@ def main():
     print(f"quick GC panel  —  mode={a.mode}  link={'bytecode' if a.bytecode else 'native'}"
           f"  sizes={'ci' if a.ci else 'perf'}")
     print(f"plans={' '.join(a.plans)}  heap={a.heap}  reps={a.reps}  warmup={a.warmup}"
-          f"  gc-workers={threads_label(a)}")
+          f"  gc-workers={threads_label(a)}" + ("  pauses=on" if a.pauses else ""))
     if a.vanilla:
         print(f"vanilla={a.vanilla}")
     if a.bin_a or a.bin_b:
@@ -657,6 +829,8 @@ def main():
         run_par(a, variants, sizes, records)
     if a.chart and a.mode != "par":
         print_chart(a, variants, seq_med)
+    if a.pauses:
+        print_pauses(records)
 
     write_json(a.json_path, records)
     print(f"\nwrote results JSON: {a.json_path}", file=sys.stderr)
