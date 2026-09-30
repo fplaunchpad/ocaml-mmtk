@@ -285,16 +285,20 @@ slot handling, so the barrier-cost finding (near-free on OCaml's init-write-domi
 re-checked with the rest: every LXR time and RSS number, including the binarytrees and
 `chameneos_redux` figures, must be re-measured before it is used.
 
-**LXR status (2026-09-30): capacity diagnosed, fixes not landed.** The capacity problem (ROADMAP item 21)
+**LXR status (2026-09-30): capacity diagnosed; the retention fixes (sweep guard off, resume
+decrements, 4-bit counts) merged the same evening (ocaml-mmtk PR 46, mmtk-core PR 6); block-granularity
+retention remains.** The capacity problem (ROADMAP item 21)
 has four separate causes on `chameneos_redux` and one structural cause on the small-live-set probe: the
 port neither reuses lines under RC nor evacuates the nursery, so held memory is 62x live on the probe
 (42x of it from block granularity), and the port dropped the reference LXR's line reuse, nursery
 evacuation, mature defragmentation and Full-on-emergency (source reading of `lxr/lxr-v0.32.0`). LXR also
-carries an RSS tax of 50-100 MiB over Immix at the same pinned heap. Candidate fixes are on the unmerged
-`research/lxr-capacity` branches. **Consequence for RQ1:** "the field barrier is ~free" survives (it is a
+carries an RSS tax of 50-100 MiB over Immix at the same pinned heap (measured on macOS, where
+mmtk-core zero-fills every mapped metadata chunk; likely partly that artefact, to be re-measured on
+Linux). Weak references (ROADMAP item 31, GH issue 44) and a zero-count anomaly (item 32, GH issue 45)
+block line reuse. **Consequence for RQ1:** "the field barrier is ~free" survives (it is a
 mutator-side measurement); "in-place RC wins at memory parity" is **unproven** — the earlier parity was
 heap-size parity, not RSS parity, and every effects/queue workload was invalid before the GH issue 26
-fix. The re-measurement must be at RSS parity with the candidate fixes applied (4-bit counts, sweep
+fix. The re-measurement must be at RSS parity with the (now merged) fixes applied (4-bit counts, sweep
 guard off, resume decrements, the pending-request wait, line reuse off, since line reuse is unsafe while
 weak references are unsound, ROADMAP item 31).
 

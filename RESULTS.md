@@ -11,9 +11,12 @@ dominated: its lowest RSS sits 60–90 MiB above vanilla's, and at that RSS
 vanilla is at least as fast. Where MMTk is faster (`matrix_multiplication`,
 and Immix on single-domain `chameneos_redux`), it is faster only at 2–5× the
 memory, in a region vanilla's knobs never reach. The gap is a memory floor, not
-collector speed. The generational plans (GenImmix, Bactrian) take 2.6–3.1× the
+collector speed, and on macOS about 55 MiB of it per point is an artefact of
+mmtk-core zero-filling its mappings (see "What the curves say", item 1); a
+re-sweep without it is pending. The generational plans (GenImmix, Bactrian) take 2.6–3.1× the
 time of plain Immix on the effects-heavy `chameneos_redux`, and at too-small
-pinned heaps they segfault instead of raising `Out_of_memory` (GH issue 49).
+pinned heaps they segfault instead of raising `Out_of_memory` (GH issue 49,
+root-caused; fix on PR 51, pending merge).
 
 ## Space-time fronts (2026-09-30, M4 Pro)
 
@@ -22,10 +25,14 @@ pinned heaps they segfault instead of raising `Out_of_memory` (GH issue 49).
 x = max RSS (MiB), y = wall (s); lower-left is better. Markers are all grid
 points, the solid line is each configuration's lower-left front, the hollow
 ring is its default configuration, and the dashed curve is a
-`t = a + b/(H - c)` fit (a visual aid only). One run per point, 440 points.
-Classes are from the sweep's `SUMMARY.md`: *dominated* = vanilla's front is at
-least as good over the overlapping RSS range; *faster only at higher RSS* =
-the fronts do not overlap and MMTk is faster but further right.
+`t = a + b/(H - c)` fit (a descriptive overlay, not a validated model). One
+run per point, 440 points, one GC worker, no dispersion: these are observed
+fronts over this grid. Classes are from the sweep's `SUMMARY.md`:
+*dominated* = vanilla's front is at least as good over the common memory
+budgets (each front's best point extended rightwards; only `binarytrees` has
+overlapping measured RSS); *faster only at higher RSS* = the fronts do not
+overlap and MMTk is faster but further right. The driver has no symmetric
+"smaller but slower" class; no point of this dataset needs it.
 
 ### binarytrees (depth 20)
 
@@ -37,8 +44,9 @@ Vanilla's front runs from 64 MiB / 2.39 s to 162 MiB / 0.89 s (default:
 159 MiB / 1.86 s; Immix at 132 MiB / 2.58 s. At ~160 MiB GenImmix takes 1.79 s
 against vanilla's 0.89 s, about 2×. All three plans are dominated. Six GenImmix
 points (32 and 48 MiB heaps) and eight Bactrian points (32 and 48 MiB, plus 64
-and 96 MiB with a 32 MiB nursery) segfaulted (GH issue 49); the six failed Immix
-points (32 and 48 MiB) raised `Out_of_memory` cleanly.
+and 96 MiB with a 32 MiB nursery) segfaulted (GH issue 49; root-caused, fix on
+PR 51 pending merge, after which these points raise `Out_of_memory`); the six
+failed Immix points (32 and 48 MiB) raised `Out_of_memory` cleanly.
 
 **Takeaway: the allocation-heavy flagship loses by a full memory floor; the
 panel's "0.78×" is a point at 238 MiB that vanilla beats at 116 MiB.**
@@ -157,11 +165,20 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
    heap gives 156–181 MiB RSS on `binarytrees`; a 32 MiB heap gives 82 MiB on
    `kb`. MMTk's lowest RSS is 60–90 MiB above vanilla's on `binarytrees`, `kb`,
    LU and `chameneos_redux`, and that offset, not collection speed, is what places each MMTk front to the
-   right of vanilla's. *Open:* decompose the floor. Candidates to measure: side
-   metadata, the nursery accounted outside the pinned heap, chunk-granularity
-   mapping, the ~26 MiB startup floor, Immix block fragmentation. The
+   right of vanilla's. **Decomposed (2026-09-30), mostly a macOS artefact:**
+   off Linux, mmtk-core zero-fills every heap and side-metadata chunk it maps
+   (4 MiB each), so each chunk is fully resident, and no page is returned to
+   the OS. Measured with `vmmap`: `kb` at a 32 MiB heap is 60 MiB metadata +
+   12 mature + 8 nursery + 2.5 malloc = 82.6 MiB, where 1.4 MiB of metadata is
+   needed; `binarytrees` at 64 MiB is 60 mature + 16 nursery + 60 metadata
+   (5.7 needed) + 29–36 GC work-packet memory. So the RSS coordinate on
+   macOS includes ~55 MiB per point of this artefact, and roughly 73 % of
+   `kb`'s RSS is zero-filled metadata, not fragmentation. Godel's GenImmix
+   `kb`, 29 MiB, agrees. *Open:* remove the zero-fill on macOS and re-sweep
+   (pending); then the GC work-packet memory and the nursery's share. The
    `matrix_multiplication` GenImmix drop from ~120 to 41 MiB with a 32 MiB
-   nursery says the floor is not static.
+   nursery says the floor is not static. Details: `gc/mmtk/NOTES.md`
+   2026-09-30 (evening).
 2. **Generational plans lose 2.6–3.1× to Immix on effects-heavy code**
    (`chameneos_redux`, 1 domain, in both the sweep and the panel), and every
    plan anti-scales with domains there. *Open:* is it continuation stacks
@@ -170,17 +187,21 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
 3. **The generational plans segfault instead of raising `Out_of_memory` at
    too-small heaps** (GH issue 49; Immix fails cleanly at the 32 and 48 MiB heaps).
    The same signature was first recorded in August, near the true OOM point.
-   *Open:* why the GC worker's root scan (`caml_scan_stack`) faults instead
-   of the plan reporting exhaustion; a correctness bug, independent of the
-   performance question.
+   **Root-caused:** raising `Out_of_memory` from inside `caml_call_gc` left
+   the saved-register pointer NULL, and a collection started by the raise
+   scanned that frame through it. Every plan is exposed; Immix rarely
+   collects on the retry. Fix on PR 51, pending merge; a correctness bug,
+   independent of the performance question.
 4. **Compute-bound controls are flat** (0.99–1.01× time in the panel), so the
    MMTk mutator path costs nothing measurable on allocation-light code.
    *Open:* none for time; their RSS is still the startup floor.
-5. **Host caveats bound all of the above.** macOS accounts RSS differently from
-   Linux (GenImmix `kb`: 91 MiB on the M4, 29 MiB on godel); one run per sweep
-   point and no dispersion; cores were not pinned, so the M4's efficiency cores
-   can take a run. *Open:* repeat the sweep on godel with reps before quoting
-   any front crossing.
+5. **Host caveats bound all of the above.** MMTk's RSS on macOS includes
+   ~55 MiB of mmtk-core zero-fill artefact per point (item 1; GenImmix `kb`:
+   91 MiB on the M4, 29 MiB on godel), so the M4 fronts overstate MMTk's
+   memory; a re-sweep is pending. One run per sweep point and no dispersion;
+   cores were not pinned, so the M4's efficiency cores can take a run.
+   *Open:* repeat the sweep on godel with reps before quoting any front
+   crossing.
 
 ## Configuration and raw data
 

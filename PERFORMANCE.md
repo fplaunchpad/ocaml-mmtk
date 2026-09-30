@@ -164,6 +164,13 @@ GC introduces run-to-run nondeterminism (collection timing depends on allocation
   - `MMTK_RELEASE_LOS_PAGES` (return freed large-object pages of 2 MiB or more to the OS) is compiled
     only on Linux (`gc/mmtk-core/src/util/heap/freelistpageresource.rs`). On macOS large-object memory
     is not returned to the OS, so RSS comparisons on the M4 are affected.
+  - **macOS zero-fill (diagnosed 2026-09-30):** `dzmmap`/`dzmmap_noreplace`
+    (`gc/mmtk-core/src/util/memory.rs`) call `zero()` off Linux, and chunks are mapped 4 MiB at a
+    time, so every heap and side-metadata chunk is fully resident once mapped (~55 MiB per point on
+    the M4 space-time sweep; `kb` 91 MiB on the M4 vs 29 on godel). Every page-return path is
+    Linux-only. Until it is removed, do not compare MMTk RSS measured on macOS with Linux figures,
+    and read M4 fronts as overstating MMTk's memory. → ROADMAP workstreams, "Space-time curves";
+    `gc/mmtk/NOTES.md` 2026-09-30 (evening).
   - `MMTK_TRANSPARENT_HUGEPAGES` defaults to on under Linux only (`gc/mmtk/binding/src/api.rs`).
   - The bump-allocation granule `MMTK_BUMP_BLOCK_KB` defaults to 512 KiB, though the doc comment in
     `gc/mmtk-core/src/util/alloc/bumpallocator.rs` still says 32 KiB.

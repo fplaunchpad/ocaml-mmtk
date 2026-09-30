@@ -5,6 +5,199 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused (item 13, fix on PR 51); GH issue 39 root-caused with rr (item 28, fix on PR 52); macOS RSS floor diagnosed; space-time driver review (KNOWN FAILURES)
+
+Evidence labels as in the entries below. Local runs are macOS arm64.
+
+### LXR retention fixes - MERGED (ROADMAP item 21)
+
+ocaml-mmtk PR 46 (merge `6bb7a1be36`; runtime `58c4cde885`, pin `adffc6a23a`)
+and mmtk-core PR 6 (merge `b566d1f5b7` on `0.32-ocaml`, pinned at
+`7a36bbb0b5`). The safe half of the research-branch diagnosis (entry
+2026-09-30 (later)) is now on mainline:
+- *Sweep refusal dropped.* The RC sweeps no longer refuse dead mature blocks
+  as "being reused by a mutator". The epoch-timed check misfired on blocks
+  promoted in place during the pause. Safe because this port has no mutator
+  block reuse and every decrement and sweep runs stop-the-world; a comment in
+  mmtk-core's `block.rs` records that a lazy or concurrent path (or line
+  reuse) must restore a real ownership guard.
+- *Resumed continuations.* `caml_mmtk_cont_resumed` (`runtime/fiber.c`) gives
+  a promoted continuation's stack referents their deferred decrements when it
+  is resumed (`mmtk_ocaml_lxr_continuation_resumed`, 256-entry batches), gated
+  by a plan flag (a 10M perform/continue loop on GenImmix: within 2 %).
+  `caml_continuation_borrow` lets `Effect.*.get_callstack` take the stack
+  without the hook; with the hook on that path a promoted continuation's
+  referents were decremented twice and the resume crashed (SIGBUS) under LXR,
+  found while landing.
+- *4-bit reference counts by default* (`LOG_REF_COUNT_BITS` 2; the
+  `lxr_rc_bits_2` / `lxr_rc_bits_8` features remain). The RC table is 1/16 of
+  the heap instead of 1/32.
+- *`MMTK_RC_RETAIN`* accounting, off by default: `cont_resume_decs`, a
+  `cycle_dead_rc` histogram, and `marked_rc0` with `[RC-SANITY]` lines.
+- New test `testsuite/tests/effects/resume_counts.ml`.
+
+*Verified* (LXR, pinned heap): `chameneos_redux 500000` at 64/128/256 MiB: 0
+Full pauses (was 20/2/0), max used after a pause 0.73 MiB (was
+62.9/125.8/0.9); qchurn holds 0.16 MiB instead of 31. 2-bit vs 4-bit in
+isolation: 11/4/0 Full pauses with 2-bit counts. Cost under LXR: 5-10 % wall
+(binarytrees 18 at 32 MiB 0.33 -> 0.36 s, kb 50 at 32 MiB 1.13 -> 1.21 s,
+chameneos at 64 MiB 5.46 -> 5.72 s); RSS unchanged; GenImmix unchanged. CI on
+PR 46, LXR job vs mainline: fixed `gh24_running_set_stress` and
+`old_to_young_bulk_stores`; `intext_par` failed in that run (the known flaky
+multi-domain set); the other LXR failures (`forbidden`,
+`gc_mark_stack_overflow`, `publish`, `test_parallel`, `weak_array_par`,
+`weaklifetime`, `weaktest`) are pre-existing.
+
+*Still open under item 21:* the h probe (item-17 probe) still runs out of
+memory at 32 MiB (block-granularity retention; needs line reuse or nursery
+evacuation, and line reuse is blocked on GH issues 44 and 45); every LXR time
+and RSS number is still to be re-measured.
+
+KNOWN FAILURE, now **GH issue 44** (ROADMAP item 31): LXR never counts or
+clears weak references and ephemerons, so `Weak.get` can return freed memory.
+`weak_array_par` fails 5/20 with the merged fixes (native, 512 MiB), 0/20
+with `MMTK_WEAK_REFS=0`. LXR is unsafe for programs that use `Weak` or
+`Ephemeron`.
+
+KNOWN FAILURE, now **GH issue 45** (ROADMAP item 32): in `kb 20` at 32 MiB
+with every pause forced Full, 558 objects reached by the Full backup trace
+have rc=0, in 6 of 41 Full pauses, deterministically (3 runs); the 30 sampled
+are small blocks (wosize 2 or 4) in blocks promoted in place. Output correct.
+It matters because the `rc_dead` block freeing and line reuse trust a zero
+count.
+
+### GH issue 49 (ROADMAP item 13, "Near-OOM SEGV") - ROOT-CAUSED; fix on PR 51, pending merge
+
+*Verified* (lldb on the shipped binary; fault in `scan_stack_frames` at
+`fiber.c:305` with `regs == 0`, frame `camlBinarytrees$make_277+144`, a
+`caml_call_gc` return address with register-live roots). The fix for bug 4
+(`caml_mmtk_recycle_gc_regs_bucket`) set `Caml_state->gc_regs = NULL` before
+`caml_raise_out_of_memory` inside `caml_call_gc`'s saved-registers window.
+Upstream `caml_raise` runs pending actions before unwinding; the GC poll
+re-attempts the TLAB refill; under the generational plans that starts a
+collection while the `caml_call_gc` frame is still the top of the stack, and
+the GC worker's root scan reads that frame's register roots through
+`gc_regs == NULL`. Every plan is exposed: a catch-and-retry OOM loop crashed
+on GenImmix, Bactrian, Immix, StickyImmix and GenCopy (Immix rarely triggers
+a collection on the retry, which is why it looked immune in the sweep).
+Recycling the live bucket was also unsound on its own: a callback in the
+window could pop it, and on arm64 `gc_regs` points 16 bytes into the bucket,
+so re-pushing it made the next `SAVE_ALL_REGS` write past it.
+
+*Fix (PR 51):* `caml_mmtk_ensure_free_gc_regs_bucket` pushes a fresh bucket
+and leaves `gc_regs` alone, which is stock's semantics for an asynchronous
+raise from `caml_call_gc`. One `Wosize_gc_regs` block is abandoned per caught
+`Out_of_memory`, the same leak as stock (~460 B per raise, measured on
+vanilla 5.5.0). New test `gc-roots/oom_in_call_gc.ml` (`MMTK_HEAP_SIZE_MB=32`,
+20 catch rounds): exit 139 before, passes on 5 plans (native + bytecode).
+`binarytrees 20` at 32 MiB is now a clean `Out_of_memory` on GenImmix and
+Bactrian. The Bactrian tight-heap crash of GH issue 36 (fault 0x18, entry
+2026-09-30 (later)) is the same bug.
+
+KNOWN FAILURE repro (until PR 51 merges; deterministic, 3/3):
+`MMTK_PLAN=GenImmix MMTK_HEAP_SIZE_MB=32 MMTK_THREADS=1 ./binarytrees.native 20`
+(exit 139; `quick/src/binarytrees.ml` on the `benchmarks` branch).
+
+### GH issue 39 (ROADMAP item 28) - ROOT-CAUSED with rr; fix on PR 52, pending merge
+
+*Verified* with `rr` on godel, in a build that widens the window with a
+`yield_now()` inside `VectorQueue::take`. A terminating domain leaves RUNNING
+in `caml_domain_terminate` but stays in the mutator registry until
+`caml_mmtk_domain_terminate` deregisters it, and deregistration flushes the
+mutator's barrier buffers (the remembered-set flush of bug 3). A pause that
+froze the mutator set in that window has a `ScanMutatorRoots` packet for the
+same mutator, which flushes the same buffers on a GC worker. The two `take`s
+are unsynchronised: both read the same `region_modbuf` buffer (replay: same
+pointer, len 1), each wraps it in a `ProcessRegionModBuf` packet, and dropping
+the second packet frees it again (the `drop_in_place<Box<dyn GCWork>>`
+abort); the SIGSEGV variant is a worker processing a packet whose buffer was
+already freed (`ProcessModBuf::do_work`). rr traces: godel
+`~/i39w/rrtraces/w_natd_c10000/run1` and `~/i39w/rrtraces/w_natd_c10000/run2`.
+
+*Fix (PR 52):* `caml_mmtk_domain_terminate` holds a binding slot
+(`caml_mmtk_try_begin_bind` ... `caml_mmtk_end_bind`) across
+`mmtk_ocaml_deregister_domain`. A slot is granted only while no collection is
+active, and `stop_all_mutators` waits for held slots before freezing the
+mutator set, so no pause flushes this mutator concurrently and the next pause
+no longer includes it. It also closes the window where a pause frozen between
+the registry removal and the flush missed those remembered-set entries. No
+new lock order. *Verified:* godel (GenImmix, stress `200 6`, interleaved on
+one host) native release 6/200 -> 0/200, native debug 10/200 -> 0/200,
+widened build 50/50 -> 0/100; macOS 0/65 (stress native 0/40, bytecode debug
+0/25); godel full testsuite on the fix 1446 passed, 1 failed
+(`weaklifetime.ml` at the 120 s timeout; 147 s before and 148 s after when run
+alone, so host speed). Bytecode did not fail on Linux (0/190).
+*Residual:* `caml_mmtk_deregister_domain`, used when the main domain
+force-cancels peers at process exit, still flushes without a slot (making it
+wait could deadlock with a running main domain).
+
+Item 30 (one-off Linux CI crashes): the GenCopy `tak` SIGSEGV is plausibly
+the same bug (GenCopy 2/100 on the stress before the fix; *inferred*, `tak`
+not reproduced); the ConcurrentImmix `prodcons_domains` double free is the
+same class by source reading (`flush_satb` at deregistration), 0/100 on
+godel, so the fix is untested there.
+
+### macOS RSS floor - DIAGNOSED (measurement; no code change yet)
+
+*Source reading:* `gc/mmtk-core/src/util/memory.rs` `dzmmap` and
+`dzmmap_noreplace` call `zero()` under `#[cfg(not(target_os = "linux"))]`,
+and the chunk mmapper maps whole 4 MiB chunks, so on macOS every heap and
+side-metadata chunk is fully resident as soon as it is mapped. Every
+page-return path (`blockpageresource.rs`, `freelistpageresource.rs`,
+`memory.rs`) is Linux-only.
+
+*Verified* (paused `vmmap`, GenImmix, `MMTK_THREADS=1`; every MMTk region
+4096K resident and dirty, CHUNK_MARK included):
+- Startup floor 27 MiB = 12 metadata + 4 nursery chunk + 2.4 malloc + ~7
+  clean text (Immix 44: 24 MiB of local specs).
+- `binarytrees 20` at heap 64: mature data 60 (live ~48), nursery 16,
+  metadata 60 (15 chunks: CHUNK_MARK, LOG_BIT x3, LINE_MARK x2, BLOCK_DEFRAG,
+  BLOCK_MARK, FWD_BITS x3, MARK x2, PIN x2; 20 MiB of it is the Immix data
+  base straddling a 256 MiB metadata boundary), malloc 29-36 (GC work-packet
+  vectors, `PlanScanObjects` ~112 KiB each); total 174 vs max RSS 172.
+- `kb 50` at heap 32: metadata 60, mature 12, nursery 8, malloc 2.5 = 82.6
+  (vanilla 8).
+- Metadata actually needed: 5.7 MiB (binarytrees), 1.4 MiB (kb).
+- binarytrees RSS ~ 0.79 x heap + 122 MiB (heap 64-192).
+- The nursery is counted twice in the heap budget (`get_used_pages` and
+  `get_collection_reserved_pages`); the trigger estimates metadata at ~8 %
+  while RSS pays 60 MiB. `MMTK_MIN_HEAP_MB` is not the culprit (heap 16 saves
+  8 MiB).
+- Linux cross-check (already in hand): godel kb GenImmix 29 MiB vs 91 on the
+  M4 (predicted 20-25 without the artefact).
+
+*Consequences.* The M4 space-time fronts (entry below, `RESULTS.md`) carry a
+~55 MiB-per-point OS artefact in the RSS coordinate; a re-sweep is pending.
+**Correction:** on macOS, the RSS-over-live gap is mostly zero-filled side
+metadata, not Immix fragmentation: about 73 % of kb's RSS is metadata, and
+the binarytrees "RSS ~ 4x live is fragmentation" reading (entry
+"Space-overhead heap trigger", 2026-06-24) is superseded. The LXR "RC
+metadata tax ~48 MB" (entries 2026-06-30 and 2026-07-01) and its "50-100 MiB RSS tax over Immix" (entry 2026-09-30
+(later)) were measured on macOS and are likely partly this artefact; to be
+re-measured on Linux.
+
+*Next steps (open, ranked):* (1) drop the explicit `zero()` on macOS in
+mmtk-core and re-run the sweep; (2) `MADV_FREE_REUSABLE` page return on
+macOS; (3) GC work-packet memory (bounded or reused packet vectors; vanilla's
+mark stack is bounded and pruned); (4) the nursery `Bounded` maximum as a
+front, not a default; (5) re-measure LXR metadata on Linux.
+
+*Research angle (RQ4-adjacent, claimable only after the OS effect is
+removed):* side-metadata RSS scales with spaces x specs x mmap granularity
+wherever the OS does not demand-zero - a framework-versus-bespoke tax.
+
+### Space-time driver review (`quick/spacetime.py`, `benchmarks` branch)
+
+Pending driver fixes (not made here): `classify` lacks the symmetric
+"smaller but slower" (lower-memory trade-off) case (no effect on this
+dataset). The front comparison is over common memory budgets (each best point
+extended rightwards), not matched measured RSS; only binarytrees has raw RSS
+overlap. Results are observed fronts over this grid, one run per point, one
+GC worker, no dispersion. The `t = a + b/(H - c)` fit is a descriptive
+overlay, not a validated model.
+
+---
+
 ## 2026-09-30 (M4) - M4 re-baseline (quick panel, dynamic heap); space-time curves as the method of record
 
 Evidence labels as in the entries below. This supersedes the 2026-07-02 M4
@@ -127,7 +320,9 @@ all 16 vanilla points sit at 19 MiB / 0.744 s, MMTk 0.59-0.67 s from 41 MiB
 (GenImmix, 32 MiB nursery; 112-134 MiB otherwise), so it is a floor
 comparison. chameneos: Immix 1.05 s at 117 MiB vs vanilla 1.37 s at 37;
 GenImmix/Bactrian 2.6x/2.9x Immix's time at their defaults. 14 binarytrees points segfaulted
-(6 GenImmix, 8 Bactrian; GH issue 49); 6 Immix points raised `Out_of_memory`.
+(6 GenImmix, 8 Bactrian; GH issue 49, root-caused later that day, fix on PR 51 pending merge); 6
+Immix points raised `Out_of_memory`. **Caveat (evening entry above):** on macOS the RSS
+coordinate includes ~55 MiB per point of mmtk-core zero-fill artefact; a re-sweep is pending.
 Open questions (RSS floor decomposition, generational cost on effects, issue
 49, bracketing compute benches, a godel repeat with reps): ROADMAP
 workstreams, "Space-time curves".
@@ -240,6 +435,10 @@ allocator only when the GC is not a nursery GC.
 
 ### LXR capacity diagnosed (ROADMAP items 21, 31, 32)
 
+**UPDATE (2026-09-30, evening):** the sweep-guard fix, the resume decrements
+and the 4-bit default are MERGED (ocaml-mmtk PR 46, mmtk-core PR 6); items 31
+and 32 are filed as GH issues 44 and 45. See the evening entry.
+
 Research branches `research/lxr-capacity` in both repositories, pushed, not
 merged: superproject `744053f961` (on `0154bbf775`: resume-decrement hook,
 `MMTK_PARK_WAIT_REQUESTED` experiment), mmtk-core `392e41fb28` (on
@@ -296,7 +495,9 @@ under RC (`rc_get_next_available_lines`), evacuates the nursery by default
 user requests to Full. The port dropped all of these in the "minimal in-place
 cut" (entries 2026-06-29/30).
 
-RSS tax: LXR is 50-100 MiB above Immix at the same pinned heap (h at 32 MiB:
+RSS tax (measured on macOS; likely partly the mmtk-core zero-fill artefact,
+see the 2026-09-30 (evening) entry; to be re-measured on Linux): LXR is
+50-100 MiB above Immix at the same pinned heap (h at 32 MiB:
 142-146 MiB vs 89 MiB; chameneos at 64 MiB: 250 vs 145).
 
 Testsuite under LXR before and after the prototype: `mutation_old_value`,
@@ -418,6 +619,11 @@ known set (item 21).
   locally (0/40 per tree).
 
 ### KNOWN FAILURE: GH issue 39 (ROADMAP item 28): GC worker aborts freeing a work packet
+
+**UPDATE (2026-09-30, evening):** root-caused with `rr` on godel (traces
+`~/i39w/rrtraces/w_natd_c10000/run1`, `run2`): a terminating domain's
+deregistration flush races a pause's `ScanMutatorRoots` flush of the same
+mutator. Fix on PR 52, pending merge. See the evening entry.
 
 - *Symptom:* SIGABRT (exit 134), no output, under the same spawn/join stress
   as above (debug runtime, bytecode, default plan, macOS arm64). Stack of
@@ -2125,6 +2331,13 @@ to a subtly wrong binary. Not investigated.
 
 ## Near-OOM SEGV: root scanning crashes instead of raising Out_of_memory (single-domain, 2026-08-06)
 
+**UPDATE (2026-09-30, evening): ROOT-CAUSED** (GH issue 49): `gc_regs` set to
+NULL by the bug-4 fix before raising `Out_of_memory` inside `caml_call_gc`;
+the raise's pending-action poll starts a collection that scans that frame's
+register roots through NULL. Fix on PR 51, pending merge. Repro:
+`binarytrees 20` at `MMTK_HEAP_SIZE_MB=32` (GenImmix, deterministic). See the
+evening entry.
+
 **UPDATE (2026-09-30):** the same signature (`caml_scan_stack <-
 caml_do_roots <- ScanMutatorRoots::do_work`, invalid address 0x18) appeared
 in a tight-heap Bactrian compile of `tformat.ml` while investigating GH issue
@@ -2624,7 +2837,8 @@ RC does not escape it. Publishable framing: the parallel-scaling gap is structur
 
 **Two traps hit + documented (don't rediscover):**
 1. **RSS-parity heap starves LXR's GC.** Pinning LXR at a tracing plan's RSS footprint is UNFAIR: LXR's
-   ~48 MiB RC_TABLE counts in RSS but is not usable heap. par_binarytrees at 448 MiB (GenImmix's d8
+   ~48 MiB RC_TABLE counts in RSS but is not usable heap (macOS figure; partly zero-filled metadata, see
+   the 2026-09-30 (evening) entry; to be re-measured on Linux). par_binarytrees at 448 MiB (GenImmix's d8
    footprint) → LXR **thrashes** to 0.28× (54 GCs at d8); 768 MiB → 1.26× (`PARITY_HEAPS` keeps 448 for
    the caveat; the panel uses the adequate 768). Measure RC scalability at an adequate heap, report the
    (higher) RSS separately — pinning to equal RSS measures heap-starvation, not scalability.
@@ -2653,7 +2867,8 @@ quick-panel benches do ≤2497 pointer mutations over the whole run (4 do litera
 mutation-heavy bench (matmul, 1.18M fires) costs 1.02×; confirms OCaml is init-write-dominated (why
 `caml_modify` is out-of-line in C). (2) In-place RC wins on acyclic high-churn alloc and is memory-robust:
 binarytrees fastest at every heap, 5.7× faster than Immix at iso-RSS (0 copies vs GenImmix's 6.09M
-nursery-survivor copies; RC pause 681ms vs Immix full-mark 2902ms). (3) RC's fixed metadata tax ≈48 MB
+nursery-survivor copies; RC pause 681ms vs Immix full-mark 2902ms). (3) RC's fixed metadata tax ≈48 MB (macOS; partly the zero-fill artefact of the 2026-09-30 (evening)
+entry, to be re-measured on Linux)
 (RC_TABLE whole-heap). Knobs: `MMTK_RC_DEBUG`, `MMTK_RC_NO_CM`/`NO_BACKUP_TRACE`, `MMTK_RC_BACKUP_LO_PCT`,
 `MMTK_BARRIER_COUNT`. Harness + data: scratch `rq1-design.md`.
 
@@ -4659,7 +4874,9 @@ proportional to the (now larger) heap.
 
 **Result (binarytrees-20, 1 GC thread, M4 Pro):** **1.27× slower than stock** (was 3.5×); 640 GCs / 1353 ms
 GC; panel goldens byte-identical; CLI tools stay ~26 MB RSS. The residual 1.27× is the per-collection copy
-cost (#G1 territory), heap-policy-independent. RSS ≈ 4× live (197 MB) is **Immix mature-space fragmentation**
+cost (#G1 territory), heap-policy-independent. RSS ≈ 4× live (197 MB) is **Immix mature-space fragmentation** [**CORRECTED 2026-09-30:** on macOS most of
+the RSS-over-live gap is mmtk-core's zero-filled side metadata, not fragmentation — see the 2026-09-30
+(evening) entry]
 × the 1.2 overhead (lowering overhead to 60% barely helped RSS but cost throughput — 1.73×), so 120% is the
 right default; the RSS floor is a separate Immix-defrag lever. Overridable via `MMTK_GC_TRIGGER`/`MMTK_NURSERY`.
 
