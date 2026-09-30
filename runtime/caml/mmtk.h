@@ -254,6 +254,15 @@ extern void caml_mmtk_cont_unlock(value cont);
  * deleted, so the stack's snapshot roots are greyed into the SATB buffer and
  * survive the cycle. Self-gated; a no-op off the concurrent marking window. */
 extern void caml_mmtk_cont_snapshot(value cont);
+
+/* LXR: continuation `cont` has just been resumed; `stk` is the stack taken
+ * out of it (Val_ptr). If `cont` was promoted, the stack's referents were
+ * incremented as its fields, so they get one deferred decrement each. Call
+ * only for a real resume, not for a take that puts the stack back. Self-gated;
+ * a no-op unless the plan is LXR. */
+extern void caml_mmtk_cont_resumed(value cont, value stk);
+/* Non-zero iff caml_mmtk_cont_resumed has work to do (the plan is LXR). */
+extern int caml_mmtk_cont_resume_hook;
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 

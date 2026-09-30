@@ -125,6 +125,10 @@ static int caml_mmtk_concurrent = 0;
    LXR) via mmtk_ocaml_satb_barrier, which logs the field + buffers the RC
    inc/dec. */
 static int caml_mmtk_field_log = 0;
+/* Whether continuation resumes need caml_mmtk_cont_resumed (LXR). Read by
+   caml_continuation_use_noexc on every resume, so the other plans pay one
+   load and no call. */
+int caml_mmtk_cont_resume_hook = 0;
 static int caml_mmtk_collection_started = 0;
 
 /* Set in the child of a fork() (any fork: Unix.fork, the AFL fork server,
@@ -427,6 +431,7 @@ void caml_mmtk_init(void)
   caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0
                           || strcmp(plan, "Bactrian") == 0);
   caml_mmtk_field_log = (strcmp(plan, "LXR") == 0);
+  caml_mmtk_cont_resume_hook = caml_mmtk_field_log;
 
   /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
      plan including ConcurrentImmix. OCaml fully initializes every block before
@@ -1325,6 +1330,52 @@ void caml_mmtk_keep_alive(value v)
 {
   if (caml_mmtk_collects && Is_block(v))
     mmtk_ocaml_lxr_keep_alive((const void *) v);
+}
+
+/* LXR: a continuation has just been resumed (its stack was taken out of it,
+   field 0 := NULL, without a write barrier). If the continuation was
+   promoted, promotion scanned the suspended stack as the continuation's
+   fields and incremented every referent; without matching decrements those
+   referents stay counted until a Full (backup-trace) pause. Collect the
+   stack's current values (unchanged since the suspension) and hand them to
+   the binding, which defers one decrement per referent to the next pause.
+   The first, empty call asks whether the continuation is counted at all, so
+   an unpromoted continuation costs one call and no stack walk. Called from
+   caml_continuation_use_noexc after a successful take (only when
+   caml_mmtk_cont_resume_hook is set), so once per resume. Not for
+   caml_continuation_borrow, which puts the stack back. Self-gated too: a
+   no-op unless the plan is LXR, and in a forked child (no collection can
+   run there; GH issue 33). No OCaml allocation. */
+#define CAML_MMTK_RESUME_BUF 256
+struct caml_mmtk_resume_buf {
+  const void *cont;
+  size_t n;
+  uintptr_t v[CAML_MMTK_RESUME_BUF];
+};
+
+static void caml_mmtk_resume_collect(void *data, value v, volatile value *p)
+{
+  struct caml_mmtk_resume_buf *b = data;
+  (void) p;
+  if (!Is_block(v)) return;
+  b->v[b->n++] = (uintptr_t) v;
+  if (b->n == CAML_MMTK_RESUME_BUF) {
+    mmtk_ocaml_lxr_continuation_resumed(b->cont, b->v, b->n);
+    b->n = 0;
+  }
+}
+
+void caml_mmtk_cont_resumed(value cont, value stk)
+{
+  struct caml_mmtk_resume_buf b;
+  if (!caml_mmtk_field_log || caml_mmtk_in_forked_child()) return;
+  if (Ptr_val(stk) == NULL) return;
+  if (!mmtk_ocaml_lxr_continuation_resumed((const void *) cont, b.v, 0))
+    return;
+  b.cont = (const void *) cont;
+  b.n = 0;
+  caml_scan_stack(caml_mmtk_resume_collect, 0, &b, Ptr_val(stk), NULL);
+  if (b.n > 0) mmtk_ocaml_lxr_continuation_resumed(b.cont, b.v, b.n);
 }
 
 /* Generational write barrier. Records that `count` value-sized slots starting

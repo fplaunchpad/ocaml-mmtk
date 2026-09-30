@@ -251,7 +251,7 @@ CAMLprim value caml_get_continuation_callstack (value cont, value max_frames)
   size_t slots;
   struct stack_info* stack;
 
-  stack = Ptr_val(caml_continuation_use(cont));
+  stack = Ptr_val(caml_continuation_borrow(cont));
   {
     CAMLnoalloc;
     slots = get_callstack(stack, max_frames, -1,
