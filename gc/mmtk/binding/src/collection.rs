@@ -672,7 +672,10 @@ fn park_until_resumed(addr: usize) {
     let mut s = STW.lock().unwrap();
     s.running.remove(&addr);
     STW_COND.notify_all();
-    while s.gc_active {
+    // Experiment (research/lxr-capacity): also wait while a collection is requested but not yet
+    // started, as in the unmerged item-22 fix (6fc57da0f8). Off unless MMTK_PARK_WAIT_REQUESTED.
+    let wait_req = std::env::var_os("MMTK_PARK_WAIT_REQUESTED").is_some();
+    while s.gc_active || (wait_req && crate::mmtk().is_collection_requested()) {
         s = STW_COND.wait(s).unwrap();
     }
 }
