@@ -202,6 +202,10 @@ And the same run renders two PNGs into `quick/graphs/` (unless `--no-plot`):
 ideal-linear reference; red × marks a hung/crashed cell). Plotting is built into
 `quickbench.py` — no separate step.
 
+Recorded runs beyond the committed panel: [`RESULTS-godel-2026-09-30.md`](RESULTS-godel-2026-09-30.md)
+— a cross-check re-baseline on godel (Linux Xeon) against vanilla 5.5.0, with
+its configuration and caveats (raw: `godel-2026-09-30-dynamic.ndjson`).
+
 ## Deciding on the no-zero allocation change
 
 The no-zero change (skip zero-fill on fresh allocation) is a **compile-time**
