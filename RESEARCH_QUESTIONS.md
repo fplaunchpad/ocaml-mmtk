@@ -589,26 +589,34 @@ default-off and its measured effect is only in SHAPE.md round 30. Whether this i
 framework *resists* expressing the host collector (payoff 1 above), or simply a missing extension point,
 is an open question for the RQ4/RQ7 write-up.
 
-**The framework tax, located (2026-09-30 night; verified on godel, mechanism partly inferred).** The
-work-packet model's granularity collapses on OCaml nursery graphs. A GenImmix nursery pause performs
-**one `malloc` per copied object** (an `LD_PRELOAD` counter: `chameneos_redux 200000` copies 7,837,307
-objects and makes 7,861,077 mallocs; vanilla makes 110 in the whole run). mmtk-core allocates a fresh
-`VectorQueue` buffer per work packet, and on OCaml's nursery (tiny objects, low fan-out, most edges
-pointing at old objects) the ProcessEdges → ScanObjects → ProcessEdges pipeline never accumulates
-breadth, so each stage hands about one item to the next through a `Vec`, a `Box<dyn GCWork>` and a
-scheduler-bucket transaction. The copied volume is the same as stock's (20.2 M objects vs ≈ 20–22 M from
-vanilla's 87.7 M promoted words), but the pause costs ≈ 1.36 µs per copied object (binarytrees 0.63 µs)
-against at most ≈ 0.6 µs for vanilla's whole run including its mutator; the profile splits it into
-≈ 0.5 µs of packet plumbing and ≈ 0.8 µs of trace + copy + side-metadata traffic. A bespoke collector does
-the opposite: stock's minor GC threads its `oldify_todo` list through the promoted objects themselves
-and allocates nothing, and a Cheney-style worker-local loop (trace a slot; if copied, scan it into the
-same buffer; spill to a shared packet only above a threshold) keeps parallelism as a knob instead of a
-per-object cost. UP-oldify (above) was built to narrow this gap for single-worker Bactrian pauses (GC
-time 2981 → 2574 ms on a binarytrees configuration, SHAPE.md round 30); the malloc count makes it read
-as a framework-granularity finding rather than a missing hook: the framework's unit of parallel work is
-too coarse to amortise on a workload whose nursery closure has no breadth. It also retires the
-"STW-bound" reading of the multi-domain gap (RQ10): the rendezvous is 26 of 674 ms of pause at 8 domains
-on the M4. ROADMAP item 35; NOTES 2026-09-30 (night).
+**The framework tax, located (2026-09-30 night, mechanism corrected 2026-09-30 late; verified on godel).**
+The copied volume is the same as stock's (20.2 M objects on chameneos vs ≈ 20–22 M from vanilla's 87.7 M
+promoted words), but a GenImmix nursery pause costs ≈ 1.36 µs per copied object on chameneos and 0.63 µs
+on binarytrees, against at most ≈ 0.6 µs for vanilla's whole chameneos run including its mutator. The
+two benches locate the tax in different places. **chameneos — packet granularity.** An `LD_PRELOAD`
+counter shows one `malloc` per copied object (`chameneos_redux 200000`: 7,837,308 copies, 7,861,282
+mallocs; vanilla 110 in the whole run). A packet census by an independent review shows the packets are
+narrow, not single-object: nursery scan packets average 3.001 objects (99.95 % of width 2–4), and each
+small packet pays several allocations (node vector, slot vector, boxed edge work) plus a scheduler-bucket
+transaction; the profile puts ≈ 0.5 µs of the 1.36 µs in packet plumbing. **binarytrees — per-copy
+writes.** Its scan packets carry 2,759 objects and it makes 0.0027 malloc per copy, so its 0.63 µs is
+not packet overhead but the copy and side-metadata path: per promoted object a header+payload copy, the
+allocator cursor, a mark bit, a whole unlog byte (whose need, given OCaml's region barrier, is in
+question), the forwarding pointer, and a line-mark byte per spanned line. A bespoke collector pays neither in this
+form: stock's minor GC threads its `oldify_todo` list through the promoted objects and allocates
+nothing, and keeps no side metadata for plans or barriers it does not run. **First lever (opt-in):** a worker-local
+nursery closure in the mmtk-core fork (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix: scan each copied object
+into the same worker-local buffer, spill half the frontier to a shared packet above a threshold) cuts
+chameneos nursery pause time 29–31 % (mallocs 7.86 M → 27.7 k) and binarytrees' only 4 %, as the census
+predicts. UP-oldify (above) was the single-worker Bactrian precedent (GC time 2981 → 2574 ms on a
+binarytrees configuration, SHAPE.md round 30). *Open research question:* when should tracing stay local
+versus publish work, given the frontier width? The work-packet model makes parallelism a per-object
+cost; the closure makes it a knob (the spill threshold), but the right setting depends on a frontier
+width that ranges from 3 (chameneos) to thousands (binarytrees) and is not known in advance. The
+remaining per-copy writes — metadata a framework keeps for plans and barriers the host does not use —
+are the second finding for the RQ4/RQ7 write-up. This also retires the "STW-bound" reading of the
+multi-domain gap (RQ10): the rendezvous is 26 of 674 ms of pause at 8 domains on the M4. ROADMAP item 35;
+NOTES 2026-09-30 (night) and (late).
 
 **A pacing observation (2026-09-29; not yet a result).** Two pacing failures share one shape (ROADMAP
 open item 20). The dynamic heap sizes itself from the page reservation seen at a heap-full poll, so
@@ -739,9 +747,10 @@ Full data + tables: `SCALABILITY.md` UPDATE 3.
 **UPDATE (2026-09-30 night) — the residual is per-pause cost, not the rendezvous.** With the pause log,
 time-to-stop is 26 of 674 ms of pause at 8 domains (M4), and on godel the GenImmix mutator already scales
 like vanilla (par_binarytrees 4.7× at d=8) while each nursery pause costs ≈ 0.6–1.4 µs per copied object,
-dominated by one `malloc` per copied object in mmtk-core's work-packet pipeline (RQ7, "The framework tax,
-located"; ROADMAP item 35). The chameneos anti-scaling was mostly the E1 barrier-study counters
-contending across domains (removed by PR 58). The lever is the minor collection's per-object cost, as the
+narrow work packets (one `malloc` per copy) on chameneos and per-copy metadata writes on binarytrees
+(RQ7, "The framework tax, located"; ROADMAP item 35; an opt-in local nursery closure cuts chameneos's
+nursery pause 29 %). The chameneos anti-scaling was mostly the E1 barrier-study counters
+contending across domains (removed by PR 58, merged). The lever is the minor collection's per-object cost, as the
 2026-06 hook below already suspected, not its ownership or its rendezvous.
 
 **Hook (the empirical trigger).** The 2026-06 scalability study (`SCALABILITY.md`) found that the fork's

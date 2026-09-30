@@ -28,10 +28,12 @@ evening and FIXED (merged; GH issues closed):** the near-OOM root-scan SIGSEGV (
 artefact (mmtk-core memset every fresh mapping) is fixed** (mmtk-core PR 7, `5454281016`, merged as `69b5ddf663`;
 ocaml-mmtk PR 53, merged, `3846019997`) and the M4 space-time sweep re-run: the fronts moved 40–66 MiB left and now meet
 vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Multi-domain scaling
-diagnosed (2026-09-30 night, item 35):** the gap is per-pause cost, not the STW rendezvous — one `malloc`
-per copied object in MMTk's nursery work-packet pipeline (≈ 1.36 µs per copied object on chameneos,
-≥ 2× stock), plus the E1 barrier-study counters contending across domains (removed by PR 58, pending
-merge: chameneos d=8 21.8 → 10.3 s); the trace-loop fix is not started. **Open:** LXR capacity and failures (items 21, 31 =
+diagnosed (2026-09-30 night, item 35):** the gap is per-pause cost, not the STW rendezvous — ≈ 1.36 µs
+per copied object on chameneos (≥ 2× stock; one `malloc` per copy from narrow 2–4-object work packets) and
+0.63 µs on binarytrees (wide packets; the per-copy writes), plus the E1 barrier-study counters contending
+across domains (removed by PR 58, merged `ee744db495`: chameneos d=8 21.8 → 10.3 s). **First lever landed,
+opt-in (2026-09-30 late):** a worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix) cuts
+chameneos nursery pause time 29 % (d=1) and binarytrees' 4 %; full testsuite run pending. **Open:** LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
 issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28), and item 28's
 process-exit residual. Order: items 21/31, 26, 25, 30, 20(c), 32, 23, 24.
@@ -657,7 +659,7 @@ line reuse (together they keep LXR's results provisional); (3) item 26, GH issue
 intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
 rest is open); (4) item 25, GH issue 33, a forked child cannot run a collection (explicit requests
 are now no-ops there; an allocation-triggered collection spins); (5) item 30, one-off multi-domain
-crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling gap, the two headline gaps after the macOS memset fix; item 35 is DIAGNOSED (one `malloc` per copied object in the nursery work-packet pipeline; the E1 counters, PR 58) and its fix, a worker-local nursery trace loop, is the next performance lever and also item 34's binarytrees time lever; item 33's per-pause log is done (PR 57); (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
+crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling gap, the two headline gaps after the macOS memset fix; item 35 is DIAGNOSED (per-copy nursery cost: narrow packets on chameneos, per-copy writes on binarytrees; the E1 counters, PR 58, merged) and its first lever, the opt-in worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`), has landed; the per-copy writes are the next lever and item 34's binarytrees time lever; item 33's per-pause log is done (PR 57, merged); (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
 reference-count anomaly in kb; (8) item 23, a possible concurrent-marking infix race; (9) item 24,
 two pre-existing side findings from the store-path audit. Evidence is labelled *verified*
 (reproduced by running), *source reading*, *inferred* or *unknown*.
@@ -1172,7 +1174,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     time (stock's sliced marking inside nursery pauses, incremental sweep), and pause time has not been
     measured — the panel and sweep report wall and RSS only, `MMTK_VERBOSE` prints totals. Task:
     (1) **DONE (2026-09-30 night):** a per-pause log in the binding behind `MMTK_PAUSE_LOG=1` (PR 57,
-    pending merge) and a `--pauses` mode in the quick drivers (`benchmarks` PR 59, merged `b316229cc1`)
+    merged `4b7b1d8b50`) and a `--pauses` mode in the quick drivers (`benchmarks` PR 59, merged `b316229cc1`)
     reporting max, p99, mean, count and the number of Full-heap pauses; vanilla's
     `OCAMLRUNPARAM=v=0x400` gives counts only, not per-GC times; (2) GenImmix vs Bactrian vs vanilla on binarytrees, kb, par_binarytrees
     d=8 and chameneos_redux at matched heaps (the sweep's front points), 3 reps, M4 and godel;
@@ -1196,31 +1198,45 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     adopted as a default: nursery bound 16→8→4→2 MiB per domain, bounded/reused work packets, page return;
     (3) the matmul drop (GenImmix 48–71 MiB, 0.62–0.66 s everywhere except a 32 MiB nursery with heap
     ≥96 MiB: 27 MiB / 0.58 s) explained. Godel with reps for the Linux cross-check. **Note (2026-09-30
-    night):** binarytrees' residual is the same per-object nursery cost that item 35 diagnoses (0.63 µs
-    per copied object, one `malloc` per copied object; NOTES 2026-09-30 night), so item 35's fix is also
-    this item's time lever — a slower collector needs more heap for the same time.
-35. **Multi-domain scaling decomposition (DIAGNOSED 2026-09-30 night; added 2026-09-30; the second
-    headline gap; fix not started).** The 2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs
+    night, corrected late):** binarytrees' residual is item 35's per-object nursery cost (0.63 µs per
+    copied object), but not its packet term: binarytrees' scan packets carry 2,759 objects and it makes
+    0.0027 malloc per copy (NOTES 2026-09-30 late). The opt-in local closure gains it only 4 %; its time
+    lever is item 35's per-copy writes (the T12 list) — a slower collector needs more heap for the same
+    time.
+35. **Multi-domain scaling decomposition (DIAGNOSED 2026-09-30 night; first lever LANDED opt-in
+    2026-09-30 late; added 2026-09-30; the second headline gap).** The 2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs
     vanilla 4.4×; par_spectralnorm 3.4× vs 5.2×; par_matmul 5.2× vs 6.1×; chameneos_redux anti-scales, 3.0 s
     at 1 domain → 13.4 s at 8 (vanilla 1.4 → 0.4 s). Decomposed on godel (14 cores of one NUMA node,
     GenImmix, `MMTK_THREADS` = domains, medians of 3) and cross-checked on the M4 with the new pause log;
-    full tables, commands and the chain of evidence: NOTES 2026-09-30 (night). **The gap is per-pause cost,
+    full tables, commands and the chain of evidence: NOTES 2026-09-30 (night); the mechanism correction
+    and the first lever: NOTES 2026-09-30 (late). **The gap is per-pause cost,
     not the rendezvous and not the scaling shape.** On par_binarytrees 20 the mutator scales 8.9 → 1.9 s
     (4.7×) and the pause 12.3 → 4.5 s (2.8×, vanilla's whole-program ratio is 2.85×), but 242 pauses cost
     12.3 s at d=1 while vanilla's entire run is 10.35 s. Three terms, ranked:
-    1. **Per-object nursery cost — one `malloc` per copied object** (*verified*). A nursery pause costs
-       ≈ 1.36 µs per copied object on chameneos (20.2 M copies, 27.5 s) and 0.63 µs on binarytrees, vs at
-       most ≈ 0.6 µs for vanilla's whole chameneos run, mutator included, at the same promoted volume.
-       An `LD_PRELOAD` counter shows one malloc per copied object (chameneos 200000: 7,837,307 copies,
-       7,861,077 mallocs; vanilla 110): `VectorQueue` buffers are allocated per work packet, and on
-       OCaml's nursery graphs (tiny objects, low fan-out, most edges to old objects) the
-       ProcessEdges → ScanObjects → ProcessEdges pipeline hands ≈ 1 item per packet. Profile share
-       (chameneos d=1, 1 worker): copying 17 %, packet machinery 25–30 %, side-metadata traffic next;
-       `EDGES_WORK_BUFFER_SIZE` 4096 → 65536 changes nothing (packets are never full). Also explains why
-       more GC workers slow single-domain binarytrees (M4: 1790 ms of pause with 12 workers vs 630 with 1).
+    1. **Per-object nursery cost** (*verified*). A nursery pause costs ≈ 1.36 µs per copied object on
+       chameneos (20.2 M copies, 27.5 s) and 0.63 µs on binarytrees, vs at most ≈ 0.6 µs for vanilla's
+       whole chameneos run, mutator included, at the same promoted volume. Two different terms:
+       - *chameneos — narrow packets.* An `LD_PRELOAD` counter shows one malloc per copied object
+         (chameneos 200000: 7,837,308 copies, 7,861,282 mallocs; vanilla 110). A packet census by an
+         independent review corrects the mechanism first inferred (one-object packets): nursery scan
+         packets average **3.001 objects, 99.95 % of width 2–4** (2,611,387 packets / 7,836,637 nodes;
+         edge packets 2,617,336 / 36,758,365 slots), and the malloc count is several allocations per
+         small packet (node vector, slot vector, boxed edge work), not one packet per copy.
+         `VectorQueue` buffers are allocated fresh per packet; `EDGES_WORK_BUFFER_SIZE` 4096 → 65536
+         changes nothing (packets are never full). Profile share (d=1, 1 worker): copying 17 %, packet
+         machinery 25–30 %, side-metadata traffic next.
+       - *binarytrees — per-copy writes.* 2,759 objects per scan packet (5,828 packets / 16,079,827
+         nodes), 0.0027 malloc per copy: its 0.63 µs is **not** packet overhead but the copy/metadata
+         path. Single-worker GenImmix already takes the UP path (`collection.rs:921-942`, no
+         forwarding-claim CAS), VO bits are off; what remains per promoted object is the header+payload
+         `memcpy`, the allocator cursor, the destination mark bit, a whole destination unlog byte, the
+         source forwarding pointer, one line-mark byte per spanned 256 B line, plus a relocated-slot
+         store per edge (the T12 list). Why more GC workers slow single-domain binarytrees (M4: 1790 ms
+         of pause with 12 workers vs 630 with 1) is **open**: with 5,828 wide packets,
+         packet hand-off is an unlikely explanation.
        After term 2, chameneos is 68 % (d=1) to 82 % (d=8) pause, almost all in nursery pauses (420 ×
        64 ms at d=1; 68 full pauses total 0.7 s).
-    2. **The E1 barrier-study counters** (*verified*; **fixed by PR 58, pending merge**). Plain
+    2. **The E1 barrier-study counters** (*verified*; **fixed by PR 58, merged `ee744db495`**). Plain
        non-atomic global counters bumped from every domain on every `caml_modify` / `caml_initialize` /
        barrier call: 68 % of chameneos d=8 CPU was in the write barrier. Removed: chameneos d=8 21.8 →
        10.3 s, 160 → 68 CPU-s, speedup 1.9× → 4.0×; d=1 and par_binarytrees unchanged. Most of the
@@ -1229,15 +1245,33 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
        total at d=8. Not a factor; the "STW-bound" reading (SCALABILITY.md updates 3 and 5) is
        corrected to "per-pause cost".
 
-    **Fix direction (not started):** a worker-local nursery trace loop in the mmtk-core fork — trace a
-    slot and, if the object was copied, scan it into the same local buffer (Cheney/oldify-style),
-    spilling to a packet only above a threshold (the parallelism knob); zero allocation per object. The
-    opt-in UP-oldify path (`MMTK_UP_OLDIFY=1`, `Scanning::up_oldify_packet`, SHAPE.md round 30) already
-    does this for eligible single-worker Bactrian pauses; generalising it to GenImmix and to several
-    workers is the first form to try. The residual per-object side-metadata traffic is the second lever.
+    **First lever — LANDED, opt-in (2026-09-30 late; mmtk-core `3acfce3465`, pinned `441a0b80b3`).** A
+    worker-local nursery closure: with `MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix's
+    `GenNurseryProcessEdges::flush` scans each copied object into one worker-local slot buffer and
+    processes those slots until the frontier is empty, reusing the frontier and slot vectors across waves;
+    above `MMTK_LOCAL_NURSERY_SPILL` (default 4096, min 2) half the frontier is published as a scan packet
+    for stealing; continuations still go through the ordinary packet; line marks (`post_scan_object`)
+    preserved; off under `extreme_assertions`, `count_live_bytes_in_gc` and non-GenImmix plans. godel,
+    3 reps, `MMTK_THREADS` = domains: chameneos_redux 500000 d=1 GC 27.8 → 19.6 s (−29 %, wall 40.9 →
+    32.7), d=8 8.6 → 7.5 s (−12 %); binarytrees 20 12.0 → 11.5 s (−4 %); par_binarytrees 20 d=8 4.35 →
+    4.0 s (−8 %, noisier); kb 50 3.49 → 3.17 s (−9 %). An independent review (one worker, same-binary
+    off/on): chameneos 200000 total pause −31 %, mallocs 7.86 M → 27.7 k. `sanity`-clean on five
+    benches at small heaps (1–4 workers, spill 16 to force spilling), 12/12 goldens at 4 domains, six
+    focused fiber/ephemeron/finaliser/barrier tests; **full testsuite run pending**. Open:
+    - (i) *Research question:* when should tracing stay local versus publish work, given the frontier
+      width? The spill threshold is the local-vs-parallel knob, set by hand; chameneos (narrow) and
+      binarytrees (wide) bracket it.
+    - (ii) Default-on after the testsuite run; (iii) extend to GenCopy and Bactrian (UP-oldify,
+      `MMTK_UP_OLDIFY=1`, SHAPE.md round 30, is the single-worker Bactrian precedent).
+    - (iv) **Next lever: the per-copy writes (T12 list)**, especially for binarytrees — *inferred*,
+      risk-scoped candidates: skip the unlog-byte store per copy when the object barrier is unused
+      (OCaml uses the region barrier) or initialise unlog over exclusive allocation ranges; fold repeated
+      line-mark stores over monotonic promotion ranges; batch destination mark initialisation. Upstream
+      mmtk-core master (tracing moved to `src/plan/tracing/gc_work/closure.rs`) still creates fresh
+      queues and alternates slot/node packets — nothing to borrow.
     Measured as a domain-sweep speedup curve with RSS, and on item 34's binarytrees front.
-    - (a) *Quick partial test:* pooled `VectorQueue` buffers, or mimalloc as the Rust global allocator,
-      to size the malloc share alone before the trace-loop work.
+    - (a) *Quick partial test (superseded by the closure):* pooled `VectorQueue` buffers, or mimalloc as
+      the Rust global allocator, to size the malloc share alone.
     - (b) *Young-target barrier filter* (branch `exp/barrier-filter`, **not landed**): the generational
       post-write barrier (mmtk-core's region path, `memory_region_copy_post`) records every mature store
       without checking the stored value, where stock's `caml_modify` checks `Is_young(val)`. A
@@ -1245,7 +1279,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
       GenImmix/GenCopy; `MMTK_NO_YOUNG_FILTER=1` opt-out) is `sanity`-clean but had no measurable effect
       on chameneos (its mature stores are of young values, which stock records too). Kept as an unproven,
       stock-faithful option pending a mature-mutation workload; not merged.
-    → NOTES 2026-09-30 (night); SCALABILITY.md update 7; RESEARCH_QUESTIONS RQ7; RESULTS.md.
+    → NOTES 2026-09-30 (night), 2026-09-30 (late); SCALABILITY.md update 7; RESEARCH_QUESTIONS RQ7; RESULTS.md.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 
