@@ -13,11 +13,17 @@ systhreads RUNNING-set bug (item 19, GH issue 24), the dynamic heap's pending-de
 too. **Combined run** (re-run independently, macOS arm64, dynamic heap, tree built in place at
 `da5f51ffba`): full testsuite GenImmix 1446 / 0, Bactrian 1446 / 0, Immix 1446 / 0; CI on `da5f51ffba`:
 Build green including both debug jobs, all-plans green for GenImmix, Immix, StickyImmix, SemiSpace and
-ConcurrentImmix, red for Bactrian (item 26), GenCopy (item 15) and LXR (item 21). **Open:** a GC-worker
-free abort under domain churn (item 28, GH issue 39; memory safety, default plan), LXR capacity and
-failures (item 21), fork (item 25, GH issue 33), explicit `Gc` requests (item 22), the Bactrian CI
-out-of-memory (item 26, GH issue 36), one-off multi-domain crashes on CI (item 30). Order: items 28,
-21, 25, 22, 26, 30, 15/20, 23, 24.
+ConcurrentImmix, red for Bactrian (item 26), GenCopy (item 15) and LXR (item 21). **Later on 2026-09-30**
+ocaml-mmtk PR 41 (merge `3fbe544984`) made explicit `Gc` requests synchronous (item 22 FIXED) and pinned
+mmtk-core `95b425a27d`, which carries mmtk-core PR 4 (`37d0143dd3`, `MMTK::is_collection_requested`) and
+PR 5 (GenCopy keeps worker mature copy buffers across nursery GCs; item 15 FIXED). Full testsuite on
+PR 41 (macOS arm64): GenImmix 1448 / 0 (also with the debug runtime), Immix, Bactrian and
+ConcurrentImmix 1448 / 0 at 512 MiB; all-plans CI on `3fbe544984` (run 36668846658): every gating plan
+green, GenCopy included (first time since the September merge), except LXR on its known set (item 21).
+**LXR capacity is diagnosed** (item 21, on unmerged research branches). **Open:** a GC-worker free abort
+under domain churn (item 28, GH issue 39; memory safety, default plan), LXR capacity and failures (items
+21, 31, 32), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH issue 36), one-off
+multi-domain crashes on CI (item 30). Order: items 28, 21/31, 26, 25, 30, 20(c), 32, 23, 24.
 
 Companion docs: [`README.md`](README.md) (overview + build/run),
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) (what this platform is *for*),
@@ -40,8 +46,8 @@ plan whose Default allocator is a bump/Immix region (the nine:
 init-write-dominated code; a backup trace reclaims cycles) — **experimental; single- AND multi-domain
 validated** (par_binarytrees D=1..32) as of 2026-07; **its results are provisional:** the silent
 wrong-results bug (item 17, GH issue 26) is fixed on mainline since 2026-09-29 (PR 30, `c59f7851c3`),
-but the fix exposed an open capacity problem, and LXR still fails a set of tests (open item 21), so every
-LXR time/RSS number must be re-measured; the post-merge abort (item 14) is fixed; requires a
+but the fix exposed an open capacity problem (diagnosed 2026-09-30, fixes not landed), and LXR still
+fails a set of tests (open items 21 and 31), so every LXR time/RSS number must be re-measured; the post-merge abort (item 14) is fixed; requires a
 pinned `MMTK_HEAP_SIZE_MB`; it runs in the all-plans testsuite workflow (`testsuite-plans.yml`) but is
 **not** in the byte-identical CLBG cross-plan gate. Design/status in `gc/mmtk/NOTES.md`. Run
 knobs: `MMTK_PLAN`, `MMTK_HEAP_SIZE_MB` (pins a **fixed** heap; the default is now a
@@ -499,8 +505,10 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 13. **Known failures recorded in NOTES but not otherwise tracked (open).**
     - **Near-OOM SEGV** — just above the true OOM point, `binarytrees 20` at a fixed 36–52 MiB heap
       segfaults in `ScanMutatorRoots` nondeterministically instead of raising `Out_of_memory` (GenImmix
-      mostly, Bactrian once). Not investigated further; an `rr` candidate. Related to item 3. → NOTES
-      "Near-OOM SEGV" (2026-08-06).
+      mostly, Bactrian once). Not investigated further; an `rr` candidate. Related to item 3. **Same
+      signature seen again (2026-09-30):** a SIGSEGV in the GC worker's root scan (`caml_scan_stack` <-
+      `caml_do_roots` <- `ScanMutatorRoots::do_work`, invalid address 0x18) in a tight-heap Bactrian
+      compile of `tformat.ml` (item 26). → NOTES "Near-OOM SEGV" (2026-08-06), 2026-09-30 (later).
     - **fragmed OOMs under Bactrian** — `fragmed` at 64 MiB with 4 workers (NOTES 2026-08-13, "needs its own
       look") and `fragmed-300` at 192 MiB (NOTES 2026-08-12, "a pacing-tightness item, not corruption").
       Whether the September pacing rework changed either is not recorded.
@@ -524,7 +532,9 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     (`MMTK_MEDIUM_NONMOVING=1`), and `cargo clippy`. The remaining LXR failures are tracked in item 21.
     → NOTES 2026-09-29 "LXR abort fix verified".
 
-15. **GenCopy: `misc/darkening_work.ml` (native) fails since the merge (open; cause not established).**
+15. **GenCopy: `misc/darkening_work.ml` (native) fails since the merge — FIXED 2026-09-30** by
+    mmtk-core PR 5 (merge `95b425a27d`, fix `1eab027050`), pinned by ocaml-mmtk PR 41 (merge
+    `3fbe544984`). The fix is described at the end of this item; the history below is kept.
     Output `error: writes caused 4 more cycles` instead of `ok` (the test compares
     `major_collections` with and without no-op writes and tolerates a difference of 2). Seen in
     both runs on the merged GC code: run 36534216189 (4 more cycles) and the rerun 36537448938 on
@@ -552,7 +562,17 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     **CI update (2026-09-30, from the run logs):** of the later runs it failed on the PR 35 branch
     (`7383bb3c93`) and on mainline `da5f51ffba`, and passed on `e351966d59` and the PR 38 branch
     (`d963811a74`). (On `e351966d59` GenCopy failed a different test, `parallel/tak.ml`: item 30.)
-    → NOTES 2026-09-29, 2026-09-30.
+    **Fix (2026-09-30).** The cause was as diagnosed: workers abandoned a 512 KiB mature copy-block tail
+    at every nursery GC, and the pressure law reads reserved pages. `GenCopy::prepare_worker` now rebinds
+    the worker copy allocator only when the GC is not a nursery GC. *As reported by the fix's author:*
+    majors per phase 21/30/21 -> 5/5/5 (reversed phase order 29/20/30 -> 5/5/5), 153 collections per phase
+    unchanged, mature-reservation growth per minor 2.9-5.4 MiB -> 0.3 MiB, `sanity` builds pass.
+    *Verified (re-run independently, macOS arm64):* `darkening_work` under GenCopy at 4096 MiB passes 3/3
+    (fails 3/3 without the fix); GenImmix, StickyImmix and Bactrian pass it; full GenCopy suite 1448 / 0,
+    GenImmix 1447 / 0. All-plans CI on `3fbe544984`: GenCopy green. *Safety argument (source reading):*
+    GenCopy mutators never allocate in the mature copy spaces; the worker copy selector is a separate
+    namespace; no release path assumes an empty worker buffer. The test's tolerance and the global block
+    size are unchanged. → NOTES 2026-09-29, 2026-09-30, 2026-09-30 (later).
 
 16. **Immix / ConcurrentImmix: `weak-ephe-final/weaklifetime.ml` times out at CI's fixed 4 GiB heap
     (pre-existing, not caused by the merge) — FIXED 2026-09-29 by ocaml-mmtk PR 27 (merge `69b81065c7`).** Exit -9 (ocamltest's 120 s SIGKILL) in run
@@ -596,19 +616,21 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     until item 21 is resolved and they are re-measured. (An earlier version of this item said an explicit `Gc.full_major ()` produces no
     collection under LXR; that was wrong — see item 22.) → NOTES 2026-09-29.
 
-**Items 18-27 (added 2026-09-29), 28-30 (added 2026-09-30).** Items 17, 18, 19 and 20(a) were fixed
-and merged on 2026-09-29, item 27 with the docs of PR 35, and item 29 on 2026-09-30. The combined
-run on mainline is in the intro. The OPEN work, in priority order: (1) item 28, GH issue 39, a GC
-worker frees a pointer it does not own under domain churn: ranked first because it is a
-memory-safety bug on the default plan, while item 21 limits an experimental plan; (2) item 21, LXR
-capacity and the remaining LXR failures (they keep LXR's results provisional); (3) item 25, GH issue
-33, a forked child cannot run a collection (it blocks item 22); (4) item 22, explicit `Gc` request
-semantics (a fix exists but is not mergeable); (5) item 26, GH issue 36, the intermittent Bactrian
-out-of-memory in Linux CI (cause unknown); (6) item 30, one-off multi-domain crashes on Linux CI
-(possibly item 28); (7) the reserved-pages pacing class: GenCopy `darkening_work` (items 15 and
-20(b)) and the unexplained July growth (20(c)); (8) item 23, a possible concurrent-marking infix
-race; (9) item 24, two pre-existing side findings from the store-path audit. Evidence is labelled
-*verified* (reproduced by running), *source reading*, *inferred* or *unknown*.
+**Items 18-27 (added 2026-09-29), 28-32 (added 2026-09-30).** Items 17, 18, 19 and 20(a) were fixed
+and merged on 2026-09-29, item 27 with the docs of PR 35, item 29 on 2026-09-30, and items 15 (=
+20(b)) and 22 later on 2026-09-30 (ocaml-mmtk PR 41, mmtk-core PRs 4 and 5). The OPEN work, in
+priority order: (1) item 28, GH issue 39, a GC worker frees a pointer it does not own under domain
+churn: ranked first because it is a memory-safety bug on the default plan, while items 21 and 31
+limit an experimental plan; (2) item 21, LXR capacity (diagnosed; candidate fixes on a research
+branch) and the remaining LXR failures, with item 31, LXR's unsound weak references, which blocks
+line reuse (together they keep LXR's results provisional); (3) item 26, GH issue 36, the
+intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
+rest is open); (4) item 25, GH issue 33, a forked child cannot run a collection (explicit requests
+are now no-ops there; an allocation-triggered collection spins); (5) item 30, one-off multi-domain
+crashes on Linux CI (possibly item 28); (6) the unexplained July growth (20(c)); (7) item 32, an LXR
+reference-count anomaly in kb; (8) item 23, a possible concurrent-marking infix race; (9) item 24,
+two pre-existing side findings from the store-path audit. Evidence is labelled *verified*
+(reproduced by running), *source reading*, *inferred* or *unknown*.
 
 18. **Two bulk-store paths skipped the generational barrier: silent corruption under the generational
     plans, including GenImmix, the default (GH issue 28) — FIXED 2026-09-29** by ocaml-mmtk PR 31
@@ -702,8 +724,8 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     itself; the debug CI jobs now fail on any future RUNNING-set violation (intended).
     → NOTES 2026-09-29.
 
-20. **Pacing laws fed by reserved pages (open; a class with two verified instances; instance (a) FIXED
-    2026-09-29).** Stock OCaml
+20. **Pacing laws fed by reserved pages (open; a class with two verified instances, both FIXED:
+    (a) 2026-09-29, (b) 2026-09-30; (c) unexplained).** Stock OCaml
     paces major work by allocated words; these laws instead read MMTk's page-reservation accounting.
     - **(a) Dynamic heap grows on an all-garbage program (Immix).** *Verified:* 1,000,000 discarded
       64-word arrays with an 8 MiB floor and a 128 MiB cap retain 23 pages after every GC, yet the
@@ -744,16 +766,18 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
       figures predate `032100ea2a` and are not affected by it. **Limits:** the macro-benchmarks that motivated
       `032100ea2a` (decompress, ydump, sedlex) were not run; Linux was not tested; mmtk-core's fork
       has no CI on pull requests, and the all-plans workflow did not run on the pin bump (item 27).
-    - **(b) GenCopy `darkening_work.ml`** — item 15.
+    - **(b) GenCopy `darkening_work.ml`** — item 15; FIXED 2026-09-30 by mmtk-core PR 5 (worker copy
+      buffers are no longer abandoned at nursery GCs, so the reserved pages stop inflating).
     - **(c) Unknown, possibly a third instance:** on a 2026-07-03 build (`cbc66e3efd`, before
       `032100ea2a`), Immix with the dynamic heap grew to 12-14 GB RSS on `weaklifetime` (a single
       measurement). Hypothesis, not instrumented: reserved pages track block occupancy, not live
       bytes.
     → NOTES 2026-09-29; RESEARCH_QUESTIONS RQ7.
 
-21. **LXR capacity, and the remaining LXR failures (open; second priority, after item 28).** The capacity problem was
-    exposed by the item-17 fix (merged 2026-09-29); the capacity figures below are as reported by the
-    fix's author, not re-run independently.
+21. **LXR capacity, and the remaining LXR failures (open; second priority, after item 28; capacity
+    DIAGNOSED 2026-09-30, candidate fixes on research branches, not landed).** The capacity problem was
+    exposed by the item-17 fix (merged 2026-09-29); the first capacity figures below are as reported by
+    the fix's author, not re-run independently. The 2026-09-30 diagnosis follows them.
     - With increments applied, the item-17 probe runs out of memory at 32 MiB with a ~0.5 MiB live
       set: used pages after RC pauses climb 364 -> 9068, about one 32 KiB block per kept 520-byte
       array.
@@ -763,7 +787,8 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     - *Source reading:* `ImmixSpace::get_reusable_block` returns `None` whenever `rc_enabled`
       (mmtk-core `policy/immix/immixspace.rs` ~1061-1072, commented "Throughput cost only"). With
       in-place promotion and no nursery evacuation, every block that holds a survivor stays whole.
-      The out-of-memory path also does not wait for an armed backup trace.
+      The out-of-memory path also did not wait for an armed backup trace (the item-22 early return;
+      fixed on mainline by PR 41).
     - binarytrees and kb apply the same RC increment totals with and without the fix (281802 and
       1558258), so their outputs were not affected; their memory behaviour still needs re-measuring.
     - **Consequence:** all LXR time and RSS numbers (RQ1) must be re-measured now that the fix is on
@@ -785,50 +810,115 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
       and compile-time failures where the bytecode `ocamlopt`, itself running under LXR, segfaults
       (exit -11) while compiling a test (`gc-roots/old_to_young_bulk_stores.ml` at `240b6c8f62`,
       `lib-systhreads/gh24_running_set_stress.ml` on the PR 32 branch).
+      On PR 41's CI run LXR failed `intext_par`, `weak_array_par`, `weaklifetime` and `weaktest`; on
+      mainline `3fbe544984` (run 36668846658) the compile segfaults of `old_to_young_bulk_stores.ml`
+      and `gh24_running_set_stress.ml`, `lf_skiplist/test_parallel.ml`, `forbidden`, `publish`,
+      `gc_mark_stack_overflow`, `weak_array_par`, `weaklifetime` and `weaktest` — all within the set.
+    - **Diagnosis (2026-09-30; research branches `research/lxr-capacity` in both repositories, pushed,
+      not merged: superproject `744053f961`, mmtk-core `392e41fb28`).** *Verified* (macOS arm64,
+      `MMTK_HEAP_SIZE_MB` pinned, new `MMTK_RC_RETAIN` accounting):
+      - *Block granularity.* The item-17 probe (1000 kept 520-byte arrays, ~0.5 MiB live) at 32 MiB:
+        457 KiB live in 884 held blocks (28 MiB); held is 62x live, 1.47x from line granularity and
+        42x from block granularity. The backup trace ran 104 times and reclaimed 0 (each held block
+        holds a live object; 0 cycles). Cause: the port never reuses lines under RC
+        (`get_reusable_block` returns `None` when `rc_enabled`) and never evacuates the nursery.
+      - *`chameneos_redux 500000` fails for four separate reasons, largest first.* (1) 2-bit sticky
+        counts pin chains of popped `Queue` cells (`Queue.pop` leaves `next` set, so one stuck cell
+        keeps every later cell): 10-20 MiB per epoch; the dead-but-counted set at the next Full is
+        ~229k each of `Queue` cells, closures and continuations, with rc=1 and 49 sticky; 4-bit counts
+        remove it (*inferred* for the exact pin; *verified* for the counts). (2) The mutator raises
+        `Out_of_memory` before the armed Full backup pause runs — the item-22 early return; fixed by
+        waiting for the pending request, now on mainline via PR 41. (3) A sweep guard ("mutator is
+        reusing this block") misfires under the port's single-bump epoch and refuses dead blocks: up
+        to 1585 held blocks with no live object (50 MiB), 1606 refusals counted in one run; it also
+        appears without effects (qchurn: 28 MiB held with 8 KiB live; 96 KiB with the guard off).
+        (4) Resuming a promoted continuation never decrements what its stack referenced (~38 KiB;
+        balanced once fixed); the fix needs a hook on resume (`caml_mmtk_cont_resumed` in
+        `runtime/fiber.c`, a prototype).
+      - *With all four and 4-bit counts:* the probe runs at 32 MiB (55 pauses, 0 Full);
+        `chameneos_redux` completes at 64/128/256 MiB with 0 Full, and increments equal decrements
+        (20,720,186 vs 20,721,337).
+      - *Line reuse* (prototype `MMTK_RC_LINE_REUSE`) runs the probe at 32 MiB but is NOT safe to
+        enable: LXR never counts or clears weak referents, so `Weak.get` can return freed memory
+        (item 31).
+      - *Reference LXR (source reading, `lxr/lxr-v0.32.0` `603e29bb13`):* it reuses lines under RC
+        (`rc_get_next_available_lines`), evacuates the nursery by default (`RC_NURSERY_EVACUATION`),
+        defragments mature at Full, and maps emergency and user requests to Full. The port dropped
+        all of these in its "minimal in-place cut" (NOTES 2026-06-29/30).
+      - *RSS tax:* LXR runs 50-100 MiB above Immix at the same pinned heap (probe at 32 MiB: 142-146
+        MiB vs 89 MiB; `chameneos_redux` at 64 MiB: 250 vs 145).
+      - *Testsuite under LXR before/after the prototype:* `mutation_old_value`, `lazy3`,
+        `ephe_custom`, `ephe_infix`, `ephetest_par`, `finaliser`, `weaklifetime2`,
+        `weaktest_par_load` and the effects tests (24/24) pass in both; `sorts` at 64 MiB fails
+        because the bytecode compiler itself segfaults or runs out of memory under LXR (known).
+      - **Status:** the resume-decrement hook and the sweep-guard fix (the two safe fixes) and a
+        4-bit default are candidate fixes on the research branch, not landed. Open follow-ups:
+        item 31 (weak references) and item 32 (a kb reference-count anomaly).
+      - **RQ1 consequence:** "barrier ~free" survives (it is mutator-side). "In-place RC wins at
+        memory parity" is unproven: the earlier parity was heap-size parity, LXR carries the RSS
+        tax, and every effects/queue workload was fiction before GH issue 26. Re-measure at RSS
+        parity with 4-bit counts, the guard off, resume decrements, the pending-request wait, and
+        line reuse off.
     - **Process consequence:** the LXR job is a gating job and is red on every PR. A red LXR job is
       treated as explained only when all its failing tests are within the set above; any other
       failure needs triage. The same rule applies to Bactrian (item 26): a red Bactrian job counts as
       explained only if its only failures are `ocamlopt.opt` `Out of memory` compile failures (GH issue
       36); anything else, including a test program's own `Out of memory`, needs triage.
-    → NOTES 2026-09-29.
+    → NOTES 2026-09-29, 2026-09-30 (later).
 
-22. **Explicit `Gc` requests return before the collection runs (open; likely GH issue 21; a fix exists
-    but is NOT mergeable yet).**
-    *Verified* (a 60-run matrix on `358ea7958c`, 64 MiB heap, `MMTK_THREADS=1`, GenImmix/Immix/LXR,
-    native and bytecode): after `Gc.major`, `Gc.full_major` or `Gc.compact` the collection counters
-    read 0/0 immediately after the call and 1/1 after a 20 ms blocking wait — the request is
-    scheduled and the call returns before the collection runs. `Gc.minor` produces no collection even
-    after the wait. After the wait the probe's weak reference is cleared under GenImmix and Immix but
-    NOT under LXR. *Source reading:* `park_until_resumed` (`gc/mmtk/binding/src/collection.rs` ~671)
-    returns at once while `gc_active` is still false; `Gc.minor` never requests an MMTk collection
-    (`runtime/gc_ctrl.c` ~285, `runtime/minor_gc.c` ~311, `runtime/domain.c` ~1339). *Inferred:* this
-    is the mechanism behind GH issue 21 (finaliser/weak clearing deferred on `Gc.full_major`; 9 tests
-    disabled). *Unknown:* why `finaliser.ml`, `globroots.ml` and `gcwords.ml` passed under the unfixed
-    LXR of item 14. **Fix, not merged (local topic commits):** mmtk-core
-    `885ed5a880` ("Expose pending collection requests to VM bindings": `MMTK::is_collection_requested`)
-    and ocaml-mmtk `6fc57da0f8` ("Wait for explicit GC requests to complete a pause", based on
-    `358ea7958c`): `park_until_resumed` waits while a collection is pending or active, `GC_COUNT` is
-    published before mutators resume, `caml_gc_minor` calls `caml_mmtk_collect_minor`, and a new test
-    `testsuite/tests/gc-roots/explicit_gc.ml`. **Scope limit:** it waits for the global STW pause
-    only; it does not establish completion of a whole ConcurrentImmix cycle, an LXR backup cycle, or
-    finaliser callbacks. LXR weak retention and an `alloc_async` timeout remain open.
-    **Verification (re-run independently, macOS arm64):** the new test `gc-roots/explicit_gc.ml` passes
-    under GenImmix, Immix, Bactrian and ConcurrentImmix, but the full GenImmix testsuite gives 1441
-    passed / 2 failed where the same base gives 0 failed:
-    - `lib-systhreads/testfork.ml`: the forked child hangs at `Gc.minor ()` and leaves an orphaned
-      process (fails 1/1; passes on the base). This is GH issue 33 (item 25), which the fix exposes.
-    - `lib-dynlink-domains/main.ml`: the native run is killed by the timeout (fails 3/3 under
-      `make one`; passes 3/3 on the base). The built binary run by hand exited normally. Cause unknown.
-      **Correction (2026-09-30): UNCONFIRMED.** The tree used for this result linked the test
-      programs against another tree's `otherlibs`: its test driver had been copied from a different
-      build tree and kept that tree's include paths (`ocamltest/ocamltest_config.ml`; `OCAMLSRCDIR`
-      does not override them). The result must be re-run in a tree built in place. This test also
-      failed once on mainline CI for an unrelated reason (item 29, GH issue 37). The `testfork`
-      regression stands.
-    **Status: blocked** on `testfork` (GH issue 33), pending a clean re-run of
-    `lib-dynlink-domains/main.ml`. Both commits also need rebasing (mmtk-core is now at `44d02b65a9`,
-    mainline at `6865b559ed`).
-    → NOTES 2026-09-29.
+22. **Explicit `Gc` requests returned before the collection ran (GH issue 21's mechanism) — FIXED
+    2026-09-30** by ocaml-mmtk PR 41 (merge `3fbe544984`; binding `00d1dcc001`, `67213e10d4`, runtime
+    `e3d803b4b9`, `7b9595f4cc`, tests `3108064b59`, `588e96b4a5`, `d0485c1342`), with mmtk-core PR 4
+    (merge `37d0143dd3`, `MMTK::is_collection_requested`) pinned through `95b425a27d`. GH issue 21 stays
+    open (below).
+    **Before the fix** (*verified*, a 60-run matrix on `358ea7958c`, 64 MiB heap, `MMTK_THREADS=1`,
+    GenImmix/Immix/LXR, native and bytecode): after `Gc.major`, `Gc.full_major` or `Gc.compact` the
+    collection counters read 0/0 immediately after the call and 1/1 after a 20 ms blocking wait;
+    `Gc.minor` produced no collection even after the wait. *Source reading:* `park_until_resumed`
+    returned at once while `gc_active` was still false, and `Gc.minor` never requested an MMTk
+    collection. (The earlier unmerged topic commits, mmtk-core `885ed5a880` and ocaml-mmtk
+    `6fc57da0f8`, are superseded by PR 41.)
+    **Fix.** `block_for_gc`'s `park_until_resumed` waits while a collection is requested or active,
+    bounded by an epoch counter that `resume_mutators` bumps under the STW lock, so a parker returns
+    at the first pause that completes after it parked. On the generational STW plans an explicit major
+    request is repeated until a full-heap pause completes (a request can coalesce onto another domain's
+    already-decided nursery pause). `Gc.minor` requests a non-exhaustive collection and waits.
+    `GC_COUNT` is published before mutators resume. In a forked child (GH issue 33, item 25) explicit
+    requests are no-ops and the wait ignores the request flag (a `pthread_atfork` child handler sets a
+    flag). New tests: `gc-roots/explicit_gc.ml`, `gc-roots/explicit_gc_domains.ml`.
+    **Guarantee on return, per plan** (*verified* with probes, 64 MiB, native and bytecode):
+    - Immix, SemiSpace (and MarkSweep/MarkCompact, bytecode): one whole-heap pause for every call.
+    - GenImmix, StickyImmix, GenCopy: `Gc.minor` one nursery pause; the major calls a full-heap pause.
+    - Bactrian: `Gc.minor` one nursery pause; the major calls one pause, a Full only if no concurrent
+      cycle was in flight.
+    - ConcurrentImmix: one pause, possibly only an InitialMark; no whole-cycle guarantee.
+    - LXR: one RC pause, no backup trace.
+    - NoGC, and any plan in a forked child: no-op.
+    **Differences from stock:** stock `Gc.full_major`/`Gc.compact` run three major cycles and drain
+    pending actions between them; here it is one pause, so a value alive only until its `Gc.finalise`
+    callback is reclaimed by a later collection.
+    **Cost** (*verified*): each explicit request is now a real STW pause of about 0.5 ms, fixed at any
+    heap size (2000 `Gc.compact` calls take about 1 s at 64, 512 and 4096 MiB, native and bytecode).
+    `regression/pr9853/compaction_corner_case.ml` (25001 compactions) is disabled under MMTk with the
+    greppable marker: its bytecode variant exceeded the 120 s CI timeout on every plan (native
+    passed), and it targets a stock-compactor corner case. Domain termination, which already requested
+    a collection per termination, now waits for it (*verified*, 3 runs each, macOS):
+    `par_binarytrees 20` at 8 domains 157-169 GCs / 1.8-2.1 s before, 173-181 / 1.75-1.8 s after; 2000
+    spawn-join rounds 1964-1999 GCs / 1.0 s before, 2000 / 0.9-1.0 s after.
+    **GH issue 21:** eight of its nine disabled tests now pass on every STW plan (10/10 GenImmix; once
+    each under Immix, StickyImmix, Bactrian, SemiSpace and GenCopy) but fail on ConcurrentImmix and
+    LXR, which are gating plans, so they stay disabled with markers naming those plans.
+    `c-api/alloc_async` still times out (its stub waits on a stock counter MMTk never updates).
+    **Verification:** full testsuite (macOS arm64) GenImmix 1448 / 0, GenImmix debug runtime 1448 / 0,
+    Immix, Bactrian and ConcurrentImmix 1448 / 0 (512 MiB). CI on PR 41: every gating job green except
+    LXR (its known set, item 21), GenCopy green for the first time since the September merge; the
+    all-plans run on the merge `3fbe544984` gives the same picture (checked from the run).
+    The `lib-dynlink-domains/main.ml` regression once attributed to the earlier fix is **refuted**:
+    10/10 passes in a tree built in place. `testfork` passes (explicit requests are no-ops in the
+    child).
+    **Also noted:** a forked child that allocates past its trigger spins at 100% CPU in
+    `alloc_slow_inline` (pre-existing; GH issue 33, item 25).
+    → NOTES 2026-09-29, 2026-09-30 (later).
 
 23. **Possible concurrent-marking infix race (open question; inferred, not probed).** Under
     ConcurrentImmix/Bactrian concurrent marking, a slot created at scan time is loaded later without
@@ -845,23 +935,26 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     - Immix with the non-default `MMTK_MEDIUM_NONMOVING=1` segfaults on large-array probes.
     → NOTES 2026-09-29.
 
-25. **GH issue 33: a forked child cannot run a collection (open; added 2026-09-29).** MMTk's GC worker
+25. **GH issue 33: a forked child cannot run a collection (open; added 2026-09-29; explicit requests
+    made no-ops in the child 2026-09-30).** MMTk's GC worker
     threads do not survive `fork()`. *Verified:* on a tree where `Gc.minor` requests an MMTk
-    collection and waits (the unmerged item-22 fix), `lib-systhreads/testfork.ml` hangs in the child at
+    collection and waits (the first, unmerged item-22 fix), `lib-systhreads/testfork.ml` hangs in the child at
     `Gc.minor ()` and leaves an orphaned process. *Source reading:* the child has no GC workers and no
     scheduler thread, a copy of the binding's stop-the-world state (the RUNNING set, `gc_active`) and of
     its mutex (possibly held by a worker at the fork), and nothing re-initialises MMTk in
-    `caml_thread_reinitialize` or the atfork path. **Latent on mainline**, because explicit `Gc`
-    requests do not wait (item 22) and `Gc.minor` requests nothing; the fork tests in the suite pass
-    today. *Unknown:* whether an allocation-triggered collection in a forked child hangs today (expected
-    from the source reading; no reproducer), and what the sibling MMTk bindings do at fork. **Fix
-    direction:** re-create the workers and reset the binding's STW state in the child (a
-    `pthread_atfork` child handler or `caml_atfork_child`), or fail cleanly on the child's first
-    collection request. Blocks item 22; `fork` was out of scope of the item-19 fix.
-    → NOTES 2026-09-29 (landings entry).
+    `caml_thread_reinitialize` or the atfork path. **Update (2026-09-30, PR 41):** explicit `Gc`
+    requests in a forked child are now no-ops (a `pthread_atfork` child handler sets a flag that the
+    request path and the wait consult), so `testfork` passes with synchronous explicit requests. **Still
+    open:** a forked child that allocates past its trigger spins at 100% CPU in `alloc_slow_inline`
+    (observed while verifying PR 41; pre-existing, not caused by it) — the allocation-triggered case
+    that was only expected from the source reading before. *Unknown:* what the sibling MMTk bindings do at fork.
+    **Fix direction:** re-create the workers and reset the binding's STW state in the child (in the
+    same child handler or `caml_atfork_child`), or fail cleanly on the child's first collection.
+    `fork` was out of scope of the item-19 fix.
+    → NOTES 2026-09-29 (landings entry), 2026-09-30 (later).
 
-26. **GH issue 36: intermittent Bactrian out-of-memory on Linux CI (open; added 2026-09-29; cause
-    unknown).** In the all-plans testsuite workflow (4 GiB pinned heap), `ocamlopt.opt`, itself
+26. **GH issue 36: intermittent Bactrian out-of-memory on Linux CI (open; added 2026-09-29; CI cause
+    unknown; a tight-heap reproduction partly diagnosed 2026-09-30).** In the all-plans testsuite workflow (4 GiB pinned heap), `ocamlopt.opt`, itself
     running under `MMTK_PLAN=Bactrian`, stops with `Fatal error: exception Out of memory` (exit 2) while
     compiling a test; the test is then counted as failed. *Verified from the run logs:*
     - Failed: `lib-string/test_string.ml` (run 36542738150, mainline `89d0602e12`), `misc/sorts.ml`
@@ -886,7 +979,27 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     **Next:** run `ocamlopt.opt` on `tformat.ml` repeatedly under `MMTK_PLAN=Bactrian
     MMTK_HEAP_SIZE_MB=4096` on Linux with `MMTK_VERBOSE=1` and `BACTRIAN_TRACE=1`, and record heap
     occupancy and the size of the failing request. The CI triage rule is in item 21.
-    → NOTES 2026-09-29 (landings entry), 2026-09-30.
+    **Progress (2026-09-30; not resolved).** *Verified* on macOS arm64 with a flambda compiler built to
+    match CI:
+    - At 4 GiB, no reproduction: 60/60 `tformat.ml` compiles at 1, 2 and the default GC worker count;
+      `tscanf`, `test_string` and `sorts` also pass.
+    - At 32 MiB, two workers, `MMTK_IMMIX_ALWAYS_DEFRAG`, compiling `tformat.ml` under Bactrian:
+      instrumentation shows `block_for_gc` returning with a collection requested but not active, then
+      the allocator rejecting the request at attempt 2 in emergency mode with the request still
+      pending — the premature-return path that PR 41 closes (item 22). The last Full had retained
+      8097/8192 pages and the binding had requested compact-all next.
+    - A/B with only the pending-request wait: 2 successes, then a third run failed after real
+      collections (attempt 4, no request pending, 7014/8192 pages) with a SIGSEGV in the GC worker's
+      root scan (`caml_scan_stack` <- `caml_do_roots` <- `ScanMutatorRoots::do_work`, invalid address
+      0x18) — the same signature as item 13's near-OOM SEGV.
+    - With `MMTK_COMPACT_OVERHEAD_PCT=0`: 3/3 successes. Repeated compaction requests contribute to
+      the tight-heap failure (not a fix).
+    **Open question:** after a Full, does `note_swept_baseline` repeatedly force compact-all without
+    admitting the allocation, with those pauses charged as failed allocation attempts? **Next
+    discriminator:** Linux CI history from `3fbe544984` onward — does the 4 GiB out-of-memory recur
+    with PR 41 in? (Bactrian was green on PR 41's CI run and on the merge's all-plans run 36668846658.)
+    The `parallel/churn.ml` test-program out-of-memory on `e351966d59` (above) is part of this item.
+    → NOTES 2026-09-29 (landings entry), 2026-09-30, 2026-09-30 (later).
 
 27. **The all-plans testsuite workflow did not run on a submodule bump — FIXED 2026-09-29** by
     `7383bb3c93` (merged with PR 35, `da5f51ffba`). `.github/workflows/testsuite-plans.yml` ran on
@@ -894,7 +1007,7 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     the gitlink `gc/mmtk-core`, which `gc/mmtk/**` does not match, so a pure pin bump got no all-plans
     run: PR 34 (`e788d8bdb5`, merged as `724ca4068a`, only `gc/mmtk-core` changed) had none, and
     mmtk-core's fork has no CI on pull requests. **Fix:** `'gc/mmtk-core'` added to `paths:`. Not yet
-    exercised by a pin bump. (Docs-only edits to `gc/mmtk/*.md` still trigger the workflow.)
+    exercised by a pure pin bump (PR 41 bumped the pin but also changed `gc/mmtk/`). (Docs-only edits to `gc/mmtk/*.md` still trigger the workflow.)
 
 28. **GH issue 39: a GC worker aborts freeing a work packet under domain churn (open; added
     2026-09-30; high priority — memory safety on the default plan).** *Symptom:* SIGABRT (exit 134),
@@ -946,6 +1059,25 @@ race; (9) item 24, two pre-existing side findings from the store-path audit. Evi
     allocator does not own, in a multi-domain program), which would place item 28 on Linux and the
     release runtime. The two logs do not identify the freeing thread. → NOTES 2026-09-30.
 
+31. **LXR weak references are unsound: `Weak.get` can return freed memory (open; added 2026-09-30; GH
+    issue not yet filed).** *Source reading:* LXR never counts or clears weak referents
+    (`WeakRefClosure` is disabled, and `process_weak_refs` never runs for LXR), so a weakly held
+    object whose count drops to zero is freed while the weak slot still points at it. *Verified*
+    (bytecode, 512 MiB, research branch of item 21): `weak-ephe-final/weak_array_par.ml` fails 8/20 on
+    mainline, 20/20 with the line-reuse prototype and 0/16 with `MMTK_WEAK_REFS=0`. *Inferred:* line
+    reuse overwrites the freed referent sooner, hence the higher failure rate. This explains LXR's
+    known `weak_array_par` failure (item 21) and blocks enabling line reuse under RC. Weak references
+    and ephemerons under deferred RC are a design gap in the port. **Next:** file the GH issue.
+    → NOTES 2026-09-30 (later).
+
+32. **LXR: objects reached by the Full trace with a zero reference count in kb (open; added 2026-09-30;
+    anomaly, cause unknown; GH issue not yet filed).** *Verified* (research branch of item 21, the
+    `sanity` feature's dead-object poisoning, every pause forced Full): in `kb 20`, 495-570 objects
+    reached by the Full trace have rc=0, deterministically; pre-existing. The item-17 probe,
+    `binarytrees 16`, `chameneos_redux 50000` and qchurn show 0. *Unknown:* the cause, and whether RC
+    could free any of these objects while they are reachable. **Next:** file the GH issue.
+    → NOTES 2026-09-30 (later).
+
 ### Research & measurement workstreams (M8 / RQ-driven)
 
 The active research/measurement threads behind the M8 milestone — the index; depth in `gc/mmtk/NOTES.md`,
@@ -965,7 +1097,23 @@ The active research/measurement threads behind the M8 milestone — the index; d
     `358ea7958c`, section "Performance (quick panel)" — a 2026-07-02 build, before PR 23 and the 16 MiB
     nursery default, not re-measured since). These LXR numbers are also
     provisional: they predate the item-17 fix (merged 2026-09-29) and the capacity problem it exposed
-    (open item 21), so they must be re-measured.
+    (open item 21), so they must be re-measured — at RSS parity, not heap-size parity (item 21's RQ1
+    consequence).
+  - **godel re-baseline (2026-09-30; cross-check host, not the representative one).** The quick panel,
+    vanilla 5.5.0 (released, non-flambda) vs GenImmix, Bactrian and Immix, dynamic heap, fork
+    `6865b559ed` / mmtk-core `44d02b65a9` (before PR 41), 14 physical cores of one NUMA node on godel
+    (56-core Xeon Gold 5120, `powersave` governor). Full table, configuration and caveats: `benchmarks`
+    branch, `quick/RESULTS-godel-2026-09-30.md` (raw: `quick/godel-2026-09-30-dynamic.ndjson`).
+    *Verified on that host; observations, all host-caveated:* compute-bound controls are flat
+    (nbody, fannkuchredux, mandelbrot within 0.96-1.03x); GC-heavy benches are worse relative to
+    vanilla than in the July M4 panel (binarytrees GenImmix 1.40x -> 1.66x, kb 1.20x -> 1.47x,
+    matrix_multiplication 0.87x -> 1.13x; the 16 MiB nursery default is the suspect, unverified);
+    Bactrian's binarytrees RSS is 404 MiB (4.4x vanilla, 2x GenImmix; 257 MiB in July), unexplained
+    (candidates: the compaction law, sliced marking, the new pacing); `chameneos_redux` is the worst
+    result (GenImmix 1.75x vanilla at 1 domain and 4x at 8; Immix is fastest at 1 domain, 0.44x, but
+    anti-scales). A worker-count check (`MMTK_THREADS` 4/14/56, binarytrees and kb, GenImmix) showed
+    no improvement. LXR was excluded (it needs a pinned heap and its results are provisional). The
+    like-for-like run on the M4 Pro, the representative host, is pending.
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime
