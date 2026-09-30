@@ -1295,6 +1295,45 @@ void caml_mmtk_keep_alive(value v)
     mmtk_ocaml_lxr_keep_alive((const void *) v);
 }
 
+/* LXR: a continuation is being resumed. If it was promoted, promotion scanned
+   its suspended stack as the continuation's fields and incremented every
+   referent; taking the stack (field 0 := NULL, no write barrier) and running it
+   would lose the matching decrements, so the referents stay counted until a
+   backup trace. Collect the stack's current values and hand them to the binding,
+   which defers one decrement per referent to the next pause (no-op unless the
+   plan is LXR and the continuation has a non-zero count). Called with the stack
+   still in place, after the take has succeeded, so it runs once per resume.
+   MMTK_LXR_NO_RESUME_DECS disables it (A/B). No OCaml allocation. */
+#define CAML_MMTK_RESUME_BUF 256
+struct caml_mmtk_resume_buf { const void *cont; size_t n; uintptr_t v[CAML_MMTK_RESUME_BUF]; };
+static int caml_mmtk_resume_decs = -1;
+static void caml_mmtk_resume_collect(void *data, value v, volatile value *p)
+{
+  struct caml_mmtk_resume_buf *b = data;
+  (void) p;
+  if (!Is_block(v)) return;
+  b->v[b->n++] = (uintptr_t) v;
+  if (b->n == CAML_MMTK_RESUME_BUF) {
+    mmtk_ocaml_lxr_continuation_resumed(b->cont, b->v, b->n);
+    b->n = 0;
+  }
+}
+void caml_mmtk_cont_resumed(value cont, value stk)
+{
+  struct caml_mmtk_resume_buf b;
+  if (caml_mmtk_resume_decs < 0)
+    caml_mmtk_resume_decs = getenv("MMTK_LXR_NO_RESUME_DECS") == NULL;
+  if (!caml_mmtk_resume_decs || !caml_mmtk_collects) return;
+  if (Ptr_val(stk) == NULL) return;
+  /* Cheap plan + count check first: an empty call returns false unless LXR
+     and the continuation is counted. */
+  if (!mmtk_ocaml_lxr_continuation_resumed((const void *) cont, b.v, 0)) return;
+  b.cont = (const void *) cont;
+  b.n = 0;
+  caml_scan_stack(caml_mmtk_resume_collect, 0, &b, Ptr_val(stk), NULL);
+  if (b.n > 0) mmtk_ocaml_lxr_continuation_resumed(b.cont, b.v, b.n);
+}
+
 /* Generational write barrier. Records that `count` value-sized slots starting
    at `start` may now hold pointers into the nursery, so a young collection
    scans them. Called from caml_modify/write_barrier (count 1, slot-based --

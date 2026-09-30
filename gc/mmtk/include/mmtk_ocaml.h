@@ -182,6 +182,9 @@ bool mmtk_ocaml_pin_object(const void* addr);
  * Returns false (no-op) for non-LXR plans. */
 bool mmtk_ocaml_lxr_keep_alive(const void* addr);
 
+/** LXR: decrement the stack referents of a promoted continuation being resumed. */
+bool mmtk_ocaml_lxr_continuation_resumed(const void* cont, const uintptr_t* targets, size_t n);
+
 /** Objects relocated by copying collection so far (Immix defrag, etc.). */
 size_t mmtk_ocaml_objects_copied(void);
 

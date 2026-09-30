@@ -674,11 +674,13 @@ CAMLprim value caml_continuation_use_noexc (value cont)
   if (caml_domain_alone()) {
     Field(cont, 0) = null_stk;
     caml_mmtk_cont_unlock(cont);
+    caml_mmtk_cont_resumed(cont, v);
     return v;
   }
 
   if (atomic_compare_exchange_strong(Op_atomic_val(cont), &v, null_stk)) {
     caml_mmtk_cont_unlock(cont);
+    caml_mmtk_cont_resumed(cont, v);
     return v;
   } else {
     caml_mmtk_cont_unlock(cont);

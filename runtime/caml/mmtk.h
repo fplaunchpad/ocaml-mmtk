@@ -249,6 +249,7 @@ extern void caml_mmtk_cont_unlock(value cont);
  * deleted, so the stack's snapshot roots are greyed into the SATB buffer and
  * survive the cycle. Self-gated; a no-op off the concurrent marking window. */
 extern void caml_mmtk_cont_snapshot(value cont);
+extern void caml_mmtk_cont_resumed(value cont, value stk);
 extern void caml_mmtk_interrupt(uintnat domain_state_addr);
 extern void caml_mmtk_uninterrupt(uintnat domain_state_addr);
 
