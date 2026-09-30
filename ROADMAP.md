@@ -76,7 +76,7 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix`), single- and multi-domain (`Domain.spawn` clean); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | **Weak arrays, ephemerons, finalisers** — `process_weak_refs` on by default (`MMTK_WEAK_REFS=0` opts out to the memory-safe never-clear interim). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, custom-block finalisers (incl. unmarshalled blocks), cross-domain orphaned-finaliser adoption. `pr3612`+`pr5233` pass. Bar #11 (resurrection ordering + orphaned ephemerons). | 🟢 done (default-on) |
 | M7 | **Pass the OCaml testsuite** — full bytecode suite ~1450/1547 pass under Immix/StickyImmix (`setarch -R`, per-test timeout). Non-pass are known-unsupported (statmemprof, runtime-events, `Gc.stat`-pacing) or the bug #3b intermittent multidomain hang — none are MMTk correctness diffs (output byte-identical to stock). | 🟢 done |
-| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. (These first-sweep figures are historical. In the 2026-07-02 quick panel (in `README.md` up to `358ea7958c`, section "Performance (quick panel)"; a 2026-07-02 build, before PR 23 and the 16 MiB nursery default), spectralnorm was 0.96× vanilla under GenImmix; in the 2026-09-30 M4 re-baseline (README "Performance evidence") it is 1.00× the time at 74 vs 5 MiB RSS.) | 🟡 **open milestone** |
+| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. (These first-sweep figures are historical. In the 2026-07-02 quick panel (in `README.md` up to `358ea7958c`, section "Performance (quick panel)"; a 2026-07-02 build, before PR 23 and the 16 MiB nursery default), spectralnorm was 0.96× vanilla under GenImmix; in the 2026-09-30 M4 re-baseline (`RESULTS.md`) it is 1.00× the time at 74 vs 5 MiB RSS.) | 🟡 **open milestone** |
 | M9 | **MMTk-only: excise the stock GC** — always-on; stock minor + major GC deleted; `shared_heap.c`/`.h` deleted (−1665 lines, live colour-machinery relocated to `major_gc.{c,h}`); per-domain minor-heap arena removed; `Gc.stat` reimplemented on MMTk stats; `Is_young` reservation retired. `ocaml-mmtk` is a single-GC runtime. **Complete** bar #11 (weak-clear semantics) + the flagged `memprof.c` colour read. Stage/bug depth: `gc/mmtk/NOTES.md`. | 🟢 done |
 | — | Parallel collection: verified correct; marking scales ~8.4× on 16 threads (parallel-friendly heaps) | ✅ |
 | — | **GC plans:** 12 wired (bytecode: 10 stock mmtk-core plans + our `Bactrian` and `LXR`), 9 native, 1 deferred (Compressor) — see the GC plans table below | 🟢 |
@@ -509,6 +509,8 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       signature seen again (2026-09-30):** a SIGSEGV in the GC worker's root scan (`caml_scan_stack` <-
       `caml_do_roots` <- `ScanMutatorRoots::do_work`, invalid address 0x18) in a tight-heap Bactrian
       compile of `tformat.ml` (item 26). → NOTES "Near-OOM SEGV" (2026-08-06), 2026-09-30 (later).
+      Tracked as **GH issue 49**; the 2026-09-30 space-time sweep reproduces it on 14 binarytrees grid
+      points (6 GenImmix, 8 Bactrian; `RESULTS.md`).
     - **fragmed OOMs under Bactrian** — `fragmed` at 64 MiB with 4 workers (NOTES 2026-08-13, "needs its own
       look") and `fragmed-300` at 192 MiB (NOTES 2026-08-12, "a pacing-tightness item, not corruption").
       Whether the September pacing rework changed either is not recorded.
@@ -1120,7 +1122,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
     cores, 24 GiB, macOS, machine quiet), vanilla 5.5.0 (released, non-flambda) vs GenImmix, Bactrian and
     Immix, dynamic heap, fork `b714bb86d3` (tree identical to mainline merge `3fbe544984`, PR 41) /
     mmtk-core `95b425a27d`, 1 GC worker per sequential cell (N for an N-domain cell), no pinning, 3 reps
-    (median) + 1 warmup. Table and caveats: `README.md` "Performance evidence"; raw:
+    (median) + 1 warmup. Tables and caveats: `RESULTS.md` "Quick panel (screening)"; raw:
     `benchmarks` branch `quick/m4-2026-09-30-dynamic.ndjson`, `quick/m4-2026-09-30.log`,
     `quick/graphs_m4/`. It supersedes the 2026-07-02 panel for the tracing plans. *Verified on that
     host; a dynamic-heap screening, not a verdict (next bullet):* compute-bound controls flat (0.99-1.01x
@@ -1136,13 +1138,26 @@ The active research/measurement threads behind the M8 milestone — the index; d
     host is compared only with its own vanilla.
   - **Space-time curves (method of record from 2026-09-30).** GC performance is a space-time curve, so a
     single dynamic-heap cell (wall ratio + RSS) is a *screening* result, not a verdict — e.g. the 2026-09-30 M4
-    panel has GenImmix at 0.78× vanilla's time on binarytrees at 2.6× its RSS, a different point on the curve,
-    not a win. **Open:** a sweep driver next to `quick/quickbench.py` that, after Jane Street's allocator
-    showdown method, runs each GC-sensitive bench (binarytrees, kb, matrix_multiplication, LU_decomposition,
-    chameneos at 1 domain) once per grid point and plots x = max RSS, y = wall, one front per configuration:
-    vanilla `OCAMLRUNPARAM` `o` (space_overhead) × `s` (minor heap); each MMTk plan `MMTK_HEAP_SIZE_MB`
-    {32…256} + dynamic × `MMTK_NURSERY` {default, 4 MiB, 32 MiB}. A plan "wins" only where its front lies
-    below-and-left of vanilla's. First run on the M4; godel as the cross-check.
+    panel has GenImmix at 0.78× vanilla's time on binarytrees at 2.6× its RSS, a point vanilla's front beats
+    (0.92 s at 116 MiB). Driver `quick/spacetime.py` on the `benchmarks` branch, after Jane Street's allocator
+    showdown method: each GC-sensitive bench (binarytrees, kb, matrix_multiplication, LU_decomposition,
+    chameneos at 1 domain) once per grid point, x = max RSS, y = wall, one front per configuration; vanilla
+    `OCAMLRUNPARAM` `o` × `s`, each MMTk plan `MMTK_HEAP_SIZE_MB` {32…256} + dynamic × `MMTK_NURSERY`
+    {default, 4 MiB, 32 MiB}. A plan "wins" only where its front lies below-and-left of vanilla's.
+    **First sweep DONE (2026-09-30, M4 Pro, 440 points, one run each; results and every graph in
+    `RESULTS.md`):** no plan dominates vanilla on any GC-heavy bench. binarytrees, kb and LU are dominated
+    for all three plans (MMTk's lowest RSS is 60–90 MiB above vanilla's; kb/LU times near parity there,
+    binarytrees ~2×), and GenImmix/Bactrian on chameneos; matrix_multiplication and Immix on chameneos are "faster only at higher RSS" (2–5×
+    and 3× vanilla's RSS). **Open questions it raised:** (a) decompose the RSS floor (side metadata, nursery
+    outside the pinned heap, chunk-granularity mapping, the ~26 MiB startup floor, Immix fragmentation;
+    GenImmix matrix_multiplication drops from ~120 to 41 MiB with a 32 MiB nursery, so it is not static);
+    (b) why the generational plans take 2.6–3.1× Immix's time on chameneos (continuation stacks vs the
+    promotion path); (c) GenImmix/Bactrian segfault in `caml_scan_stack` (item 13, "Near-OOM SEGV")
+    instead of raising `Out_of_memory` at small pinned heaps (binarytrees, 32–48 MiB; Bactrian also 64
+    and 96 MiB with a 32 MiB nursery; GH issue 49; Immix fails cleanly); (d) compute benches are not
+    bracketed — vanilla's `o`/`s` do not move matrix_multiplication off 19 MiB and no MMTk configuration reaches it, so
+    that comparison is a floor comparison, not a front one; (e) repeat on godel with reps (dispersion,
+    Linux RSS accounting).
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime

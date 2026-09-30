@@ -292,139 +292,24 @@ defaults rather than copying settings from historical runs.
 
 ## Performance evidence
 
-GC performance is a space-time curve, so every figure below pairs wall time with
-peak RSS. A single dynamic-heap cell is a screening result: it shows where each
-collector's default policy lands, not which collector is better. The verdict
-comes from a front-to-front sweep (heap and nursery for MMTk, `space_overhead`
-and minor-heap size for vanilla, plotting max RSS against wall). That sweep is
-pending; its curves will accompany this table and replace it as the reference result.
+GC performance is a space-time curve, so every result pairs wall time with peak
+RSS, and a collector wins only where its front (max RSS against wall, over the
+heap and nursery knobs for MMTk and `space_overhead` × minor-heap size for
+vanilla) lies below and to the left of vanilla's. The first sweep (2026-09-30,
+Apple M4 Pro) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on any
+GC-heavy bench today. The gap is a memory floor: MMTk's lowest RSS sits
+60–90 MiB above vanilla's on every such bench, while its times at that RSS are
+near parity on `kb` and LU and about 2× on `binarytrees`. Where MMTk is faster, it
+is faster only at more memory: Immix beats vanilla on single-domain
+`chameneos_redux` (1.05 s vs 1.37 s) at 3× the RSS (117 vs 37 MiB), and the
+generational plans take 2.6–3.1× Immix's time there.
 
-**Current panel: Apple M4 Pro, 2026-09-30.** This is the representative host. The quick
-suite lives on the separate
-[`benchmarks` branch](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks).
-Raw records:
-[`quick/m4-2026-09-30-dynamic.ndjson`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/m4-2026-09-30-dynamic.ndjson);
-full log: [`quick/m4-2026-09-30.log`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/m4-2026-09-30.log);
-charts: [`quick/graphs_m4/`](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks/quick/graphs_m4).
-Configuration:
+![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/summary.png)
 
-- host: Apple M4 Pro (8 performance and 4 efficiency cores, 24 GiB), macOS 26.6, kept quiet during the run;
-- fork: `b714bb86d3`, whose tree is identical to mainline merge `3fbe544984`
-  (PR 41), with mmtk-core `95b425a27d`;
-- vanilla: opam `5.5.0` (released, non-flambda);
-- plans: GenImmix (the default), Bactrian and Immix, each with the dynamic
-  (space-overhead) heap;
-- one GC worker per sequential cell and N workers for an N-domain cell
-  (`--threads domains`);
-- no core pinning and no `setarch`;
-- the panel's perf sizes, 3 measured runs (median) after 1 warmup, with RSS as the peak across runs.
-
-LXR is excluded because it needs a pinned heap and its results are provisional.
-
-Each cell shows median wall time in ms, the ratio to vanilla in parentheses, and max RSS in MiB. Lower is better.
-
-| bench | vanilla | GenImmix | Bactrian | Immix |
-|---|--:|--:|--:|--:|
-| `binarytrees` | 1653 / 92 | 1289 (0.78×) / 238 | 1390 (0.84×) / 249 | 2756 (1.67×) / 197 |
-| `nbody` | 674 / 2 | 673 (1.00×) / 26 | 674 (1.00×) / 26 | 682 (1.01×) / 41 |
-| `fannkuchredux` | 1550 / 2 | 1557 (1.00×) / 26 | 1559 (1.01×) / 26 | 1557 (1.00×) / 42 |
-| `spectralnorm` | 671 / 5 | 668 (1.00×) / 74 | 672 (1.00×) / 74 | 794 (1.18×) / 94 |
-| `mandelbrot` | 768 / 2 | 756 (0.99×) / 26 | 756 (0.99×) / 26 | 758 (0.99×) / 41 |
-| `matrix_multiplication` | 751 / 19 | 654 (0.87×) / 112 | 611 (0.81×) / 98 | 618 (0.82×) / 78 |
-| `LU_decomposition` | 803 / 17 | 825 (1.03×) / 91 | 825 (1.03×) / 91 | 1050 (1.31×) / 98 |
-| `kb` | 426 / 8 | 490 (1.15×) / 91 | 477 (1.12×) / 87 | 464 (1.09×) / 103 |
-
-The compute-bound controls, `nbody`, `fannkuchredux` and `mandelbrot`, stay within
-0.99–1.01× of vanilla's time on every plan. Their RSS is each plan's startup floor:
-26 MiB for GenImmix and Bactrian, 41–42 MiB for Immix, and 2 MiB for vanilla.
-
-No plan wins on both coordinates for a GC-heavy bench. On `binarytrees`, GenImmix
-takes 0.78× vanilla's time and uses 2.6× its memory. On `matrix_multiplication`,
-it takes 0.87× the time and uses 5.9× the memory. On `kb`, it takes 1.15× the time
-and uses 91 MiB against vanilla's 8 MiB.
-
-<details>
-<summary><b>Parallel domain sweep</b>: median wall (ms) / max RSS (MiB) for 1, 2, 4 and 8 domains</summary>
-
-| bench | plan | d=1 | d=2 | d=4 | d=8 | T(1)/T(8) |
-|---|---|--:|--:|--:|--:|--:|
-| `par_spectralnorm` | vanilla | 1302 / 5 | 711 / 8 | 357 / 12 | 251 / 21 | 5.19× |
-| `par_spectralnorm` | GenImmix | 1279 / 74 | 658 / 75 | 419 / 82 | 379 / 92 | 3.37× |
-| `par_spectralnorm` | Bactrian | 1287 / 74 | 667 / 76 | 418 / 82 | 382 / 92 | 3.37× |
-| `par_spectralnorm` | Immix | 1492 / 94 | 788 / 95 | 433 / 97 | 467 / 99 | 3.19× |
-| `par_matmul` | vanilla | 770 / 19 | 456 / 19 | 265 / 19 | 127 / 20 | 6.08× |
-| `par_matmul` | GenImmix | 709 / 112 | 488 / 135 | 308 / 106 | 137 / 111 | 5.17× |
-| `par_matmul` | Bactrian | 651 / 99 | 365 / 99 | 209 / 99 | 130 / 104 | 5.01× |
-| `par_matmul` | Immix | 641 / 78 | 362 / 111 | 194 / 99 | 129 / 100 | 4.97× |
-| `par_binarytrees` | vanilla | 1644 / 92 | 819 / 149 | 570 / 293 | 378 / 561 | 4.35× |
-| `par_binarytrees` | GenImmix | 1359 / 241 | 896 / 364 | 576 / 384 | 548 / 623 | 2.48× |
-| `par_binarytrees` | Bactrian | 1459 / 247 | 958 / 483 | 641 / 490 | 515 / 609 | 2.83× |
-| `par_binarytrees` | Immix | 2766 / 192 | 2984 / 249 | 3989 / 371 | 7537 / 398 | 0.37× |
-| `chameneos_redux` | vanilla | 1421 / 37 | 697 / 74 | 542 / 146 | 419 / 295 | 3.39× |
-| `chameneos_redux` | GenImmix | 3016 / 131 | 6688 / 161 | 9153 / 228 | 13372 / 369 | 0.23× |
-| `chameneos_redux` | Bactrian | 3313 / 128 | 7305 / 160 | 11204 / 231 | 15694 / 370 | 0.21× |
-| `chameneos_redux` | Immix | 1067 / 118 | 2070 / 149 | 2753 / 211 | 5423 / 335 | 0.20× |
-
-</details>
-
-**`chameneos_redux` anti-scales on every MMTk plan.** It is continuation-heavy and uses effect handlers.
-
-| Domains | GenImmix | Vanilla |
-|--:|---|---|
-| 1 | 3016 ms, 131 MiB | 1421 ms, 37 MiB |
-| 8 | 13372 ms, 369 MiB | 419 ms, 295 MiB |
-
-At 1 domain, Immix is the fastest configuration: 1067 ms and 118 MiB. It also slows down as domains are added, reaching 5423 ms at 8 domains.
-
-On the other parallel benches, all three MMTk plans still gain speed as domains are added, but less than vanilla does. Their speedup at 8 domains is 3.2–3.4× on `par_spectralnorm`, compared with vanilla's 5.2×. On `par_matmul` it is 5.0–5.2×, compared with 6.1×. On `par_binarytrees`, GenImmix reaches 2.5× and ends at 548 ms and 623 MiB. Vanilla ends at 378 ms and 561 MiB. Immix anti-scales on `par_binarytrees`.
-
-**Caveats for this panel:**
-
-- Each figure comes from one panel run on one host, and no dispersion is reported.
-- The runs were not pinned to cores. Macs mix performance and efficiency cores, so 8-domain cells can
-  land on efficiency cores.
-- The RSS floors differ from Linux. The same program's peak RSS is accounted differently on macOS.
-
-**Cross-check against godel.** The same panel was run on the Linux cross-check host
-godel. That run is written up in
-[`quick/RESULTS-godel-2026-09-30.md`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/RESULTS-godel-2026-09-30.md)
-on the `benchmarks` branch. It used an older fork, from before PR 41, on a
-Xeon running the `powersave` governor.
-
-Time ratios do not carry across hosts:
-
-| Bench (GenImmix) | godel | M4 |
-|---|--:|--:|
-| `binarytrees` | 1.66× | 0.78× |
-| `kb` | 1.47× | 1.15× |
-| `matrix_multiplication` | 1.13× | 0.87× |
-
-Vanilla's peak RSS is the same on both hosts where the live set dominates. For `binarytrees`,
-it is 92 MiB on each. MMTk's RSS is higher on the M4: GenImmix `binarytrees` uses 238 MiB there
-against 187 MiB on godel, and `kb` uses 91 MiB against 29 MiB. Compare each host only against
-its own vanilla. godel reported GC-heavy results worse than the July M4 panel, and a 404 MiB
-Bactrian `binarytrees`. Neither appears on the M4.
-
-**Superseded results.** The Apple M4 Pro quick panel of **2026-07-02** is now historical.
-It was measured before the current nursery default, Bactrian's sliced marking
-and incremental sweep, and later runtime fixes. It is still the only panel with LXR figures:
-LXR took 0.76× vanilla's time on `binarytrees` with 309 MiB RSS. Every LXR
-time and RSS figure predates the 2026-09-29 wrong-results fix and must be
-re-measured. Its `chameneos_redux` measurements are invalid, because that run silently
-dropped most reference-count increments.
-The **2026-08-12** [SHAPE round 28](gc/mmtk/SHAPE.md#round-28-d5-pareto--the-honest-frontier-front-to-front-2026-08-12)
-compared fronts after sweeping heap sizing and nursery settings: vanilla dominated
-Bactrian on `binarytrees`, Knuth–Bendix (`kb`), LU and `spectralnorm`. It shows how the pending
-sweep works, but the plans have changed since.
-
-[`SCALABILITY.md`](SCALABILITY.md) preserves the scaling experiments and controls.
-[`PERFORMANCE.md`](PERFORMANCE.md) describes the measurement methodology. Some setup
-assumptions there are historical. For a comparison, record:
-
-- compiler revisions;
-- heap and nursery settings;
-- domains and GC workers;
-- both time and RSS.
+Every graph with its reading, the quick-panel tables (sequential and parallel),
+configuration, raw data and history: [`RESULTS.md`](RESULTS.md). Measurement
+method: [`PERFORMANCE.md`](PERFORMANCE.md); scaling experiments:
+[`SCALABILITY.md`](SCALABILITY.md).
 
 ## Source and further reading
 

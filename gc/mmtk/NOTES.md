@@ -85,7 +85,7 @@ MiB on both, LU 17 on both), but MMTk's does not (GenImmix binarytrees 187 vs
 not visible in godel's RSS, and the builds differ. *Inferred:* compare each
 host only against its own vanilla, and compare fronts, not cells.
 
-### Space-time sweep (method of record; pending)
+### Space-time sweep (method of record)
 
 A single dynamic-heap cell is a screening result. The verdict is the
 front-to-front sweep (ROADMAP workstreams, "Space-time curves"), after Jane
@@ -101,6 +101,36 @@ Street's allocator showdown method:
 - One run per grid point; plot x = max RSS, y = wall, one front per
   configuration. A plan wins only where its front lies below and to the left
   of vanilla's. First on the M4, godel as the cross-check.
+
+### Sweep results (*verified*, one run per point)
+
+Run on the M4 the same day (440 points; driver `quick/spacetime.py`, raw
+`quick/spacetime-m4.ndjson`, `quick/spacetime-m4.log`,
+`quick/graphs_spacetime_m4/` on the `benchmarks` branch). Every graph with its
+reading is in [`RESULTS.md`](../../RESULTS.md). Classes (from the sweep's
+`SUMMARY.md`; "faster only at higher RSS" = the fronts do not overlap and MMTk
+is faster but further right):
+
+| bench | GenImmix | Bactrian | Immix |
+|---|---|---|---|
+| binarytrees | dominated | dominated | dominated |
+| kb | dominated | dominated | dominated |
+| matrix_multiplication | faster only at higher RSS | faster only at higher RSS | faster only at higher RSS |
+| LU_decomposition | dominated | dominated | dominated |
+| chameneos_redux (1 domain) | dominated | dominated | faster only at higher RSS |
+
+No plan dominates vanilla anywhere. MMTk's lowest RSS is 60-90 MiB above
+vanilla's on every GC-heavy bench (kb 82 vs 7 MiB, LU 86 vs 17, binarytrees
+132-159 vs 64, chameneos 117 vs 37); at that RSS kb and LU are within
+1.02-1.14x of vanilla's time and binarytrees is ~2x. matrix_multiplication:
+all 16 vanilla points sit at 19 MiB / 0.744 s, MMTk 0.59-0.67 s from 41 MiB
+(GenImmix, 32 MiB nursery; 112-134 MiB otherwise), so it is a floor
+comparison. chameneos: Immix 1.05 s at 117 MiB vs vanilla 1.37 s at 37;
+GenImmix/Bactrian 2.6x/2.9x Immix's time at their defaults. 14 binarytrees points segfaulted
+(6 GenImmix, 8 Bactrian; GH issue 49); 6 Immix points raised `Out_of_memory`.
+Open questions (RSS floor decomposition, generational cost on effects, issue
+49, bracketing compute benches, a godel repeat with reps): ROADMAP
+workstreams, "Space-time curves".
 
 ---
 
