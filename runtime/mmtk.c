@@ -1280,8 +1280,9 @@ uintnat caml_mmtk_heap_size_bytes(void)
    state (observed: channel/custom-block corruption -> crash under a moving
    plan). Instead trigger a real MMTk collection on the calling domain and block
    until it completes: on return, a stop-the-world pause that stopped this
-   domain after the call has finished. No-op for NoGC (cannot collect) and in
-   a forked child (GH issue 33, see caml_mmtk_forked_child). */
+   domain after the call has finished (on a generational STW plan, a full-heap
+   one; see mmtk_ocaml_handle_user_collection_request). No-op for NoGC (cannot
+   collect) and in a forked child (GH issue 33, see caml_mmtk_forked_child). */
 void caml_mmtk_collect(void)
 {
   if (caml_mmtk_collects && !caml_mmtk_in_forked_child())
