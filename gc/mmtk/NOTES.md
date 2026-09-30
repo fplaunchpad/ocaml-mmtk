@@ -5,7 +5,7 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused (item 13, fix on PR 51); GH issue 39 root-caused with rr (item 28, fix on PR 52); macOS RSS floor diagnosed and fixed (PR 53), space-time re-sweep; space-time driver review (KNOWN FAILURES)
+## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused and fixed (item 13, PR 51, merged); GH issue 39 root-caused with rr and fixed (item 28, PR 52, merged); macOS RSS floor diagnosed and fixed (PR 53, merged), space-time re-sweep; space-time driver review (KNOWN FAILURES)
 
 Evidence labels as in the entries below. Local runs are macOS arm64.
 
@@ -66,7 +66,7 @@ are small blocks (wosize 2 or 4) in blocks promoted in place. Output correct.
 It matters because the `rc_dead` block freeing and line reuse trust a zero
 count.
 
-### GH issue 49 (ROADMAP item 13, "Near-OOM SEGV") - ROOT-CAUSED; fix on PR 51, pending merge
+### GH issue 49 (ROADMAP item 13, "Near-OOM SEGV") - ROOT-CAUSED; FIXED by PR 51 (merged `ce2dd86167`, issue closed)
 
 *Verified* (lldb on the shipped binary; fault in `scan_stack_frames` at
 `fiber.c:305` with `regs == 0`, frame `camlBinarytrees$make_277+144`, a
@@ -94,11 +94,11 @@ vanilla 5.5.0). New test `gc-roots/oom_in_call_gc.ml` (`MMTK_HEAP_SIZE_MB=32`,
 Bactrian. The Bactrian tight-heap crash of GH issue 36 (fault 0x18, entry
 2026-09-30 (later)) is the same bug.
 
-KNOWN FAILURE repro (until PR 51 merges; deterministic, 3/3):
+Repro (before PR 51; deterministic, 3/3):
 `MMTK_PLAN=GenImmix MMTK_HEAP_SIZE_MB=32 MMTK_THREADS=1 ./binarytrees.native 20`
 (exit 139; `quick/src/binarytrees.ml` on the `benchmarks` branch).
 
-### GH issue 39 (ROADMAP item 28) - ROOT-CAUSED with rr; fix on PR 52, pending merge
+### GH issue 39 (ROADMAP item 28) - ROOT-CAUSED with rr; FIXED by PR 52 (merged `0015fbf179`, issue closed)
 
 *Verified* with `rr` on godel, in a build that widens the window with a
 `yield_now()` inside `VectorQueue::take`. A terminating domain leaves RUNNING
@@ -187,10 +187,11 @@ front, not a default; (5) re-measure LXR metadata on Linux.
 removed):* side-metadata RSS scales with spaces x specs x mmap granularity
 wherever the OS does not demand-zero - a framework-versus-bespoke tax.
 
-### macOS memset fix and space-time re-sweep - FIXED (pending merge), re-swept
+### macOS memset fix and space-time re-sweep - FIXED (merged), re-swept
 
 *Fix:* mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not
-memset fresh mappings on macOS"), pinned by ocaml-mmtk PR 53 (pending merge;
+memset fresh mappings on macOS"; merged into `0.32-ocaml` as `69b5ddf663`),
+pinned by ocaml-mmtk PR 53 (merged, `3846019997`; the sweep's
 fork `d6933f65da` = mainline `6bb7a1be36` + the pin). A fresh anonymous
 mapping is already zero, so the memset only made every mapped chunk resident.
 
@@ -218,7 +219,7 @@ Shift 40-66 MiB (about 60 for GenImmix/Bactrian, 42-51 for Immix, 14 for
 GenImmix's 32 MiB-nursery matmul points); times unchanged within the
 single-run noise (vanilla's own default moved by up to 12 % between the two
 sweeps with the same binaries). Verdict classes unchanged; the same 20 points
-fail (GH issue 49; PR 51 not in this build). What changed is the reading:
+fail (GH issue 49; PR 51, merged later, not in this build). What changed is the reading:
 the fronts now meet vanilla's. binarytrees: at 94.5 MiB vanilla (`o=120,s=1M`)
 1.21 s vs GenImmix 1.64 s; at 136 MiB 0.85 vs 1.31; vanilla's best (0.85 s)
 needs 116 MiB and GenImmix never reaches it (best 0.98 s at 176 MiB) - the
@@ -373,7 +374,7 @@ all 16 vanilla points sit at 19 MiB / 0.744 s, MMTk 0.59-0.67 s from 41 MiB
 (GenImmix, 32 MiB nursery; 112-134 MiB otherwise), so it is a floor
 comparison. chameneos: Immix 1.05 s at 117 MiB vs vanilla 1.37 s at 37;
 GenImmix/Bactrian 2.6x/2.9x Immix's time at their defaults. 14 binarytrees points segfaulted
-(6 GenImmix, 8 Bactrian; GH issue 49, root-caused later that day, fix on PR 51 pending merge); 6
+(6 GenImmix, 8 Bactrian; GH issue 49, root-caused and fixed later that day by PR 51, merged); 6
 Immix points raised `Out_of_memory`. **Caveat (evening entry above):** on macOS the RSS
 coordinate includes 40-66 MiB per front start of mmtk-core zero-fill artefact; fixed and re-swept
 the same day (evening entry, "macOS memset fix"), which supersedes these RSS figures.
@@ -677,7 +678,7 @@ known set (item 21).
 **UPDATE (2026-09-30, evening):** root-caused with `rr` on godel (traces
 `~/i39w/rrtraces/w_natd_c10000/run1`, `run2`): a terminating domain's
 deregistration flush races a pause's `ScanMutatorRoots` flush of the same
-mutator. Fix on PR 52, pending merge. See the evening entry.
+mutator. Fixed by PR 52 (merged `0015fbf179`; GH issue 39 closed). See the evening entry.
 
 - *Symptom:* SIGABRT (exit 134), no output, under the same spawn/join stress
   as above (debug runtime, bytecode, default plan, macOS arm64). Stack of
@@ -2388,7 +2389,7 @@ to a subtly wrong binary. Not investigated.
 **UPDATE (2026-09-30, evening): ROOT-CAUSED** (GH issue 49): `gc_regs` set to
 NULL by the bug-4 fix before raising `Out_of_memory` inside `caml_call_gc`;
 the raise's pending-action poll starts a collection that scans that frame's
-register roots through NULL. Fix on PR 51, pending merge. Repro:
+register roots through NULL. Fixed by PR 51 (merged `ce2dd86167`; GH issue 49 closed). Repro before the fix:
 `binarytrees 20` at `MMTK_HEAP_SIZE_MB=32` (GenImmix, deterministic). See the
 evening entry.
 

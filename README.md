@@ -9,12 +9,14 @@ collector at startup with `MMTK_PLAN`; the default is **GenImmix**.
 **Research prototype (status 2026-09-30).** Several correctness bugs, including
 silent data corruption under the default plan, were found and fixed on
 2026-09-29 and 2026-09-30; see [known limits](#what-works-and-what-is-still-open).
-Still open, and worth knowing before you try it: a rare collector abort when
+Among them, fixed on mainline on 2026-09-30: a rare collector abort when
 domains are created and terminated rapidly
-([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)) and a
-segfault instead of `Out_of_memory` when a pinned heap is too small
-([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49)), both
-root-caused with fixes awaiting merge; a `fork`ed child cannot run a collection
+([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39), PR 52;
+the process-exit path that force-cancels peer domains still deregisters them
+without the fix's guard) and a segfault instead of `Out_of_memory` when a
+pinned heap is too small
+([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49), PR 51).
+Still open, and worth knowing before you try it: a `fork`ed child cannot run a collection
 ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)); and results
 under the LXR plan are provisional.
 
@@ -112,22 +114,26 @@ the heap and so does not exercise the heap-growth fix):
 
 **Known correctness limits (2026-09-30):**
 
-- A GC worker occasionally aborts with `pointer being freed was not allocated`
-  (or segfaults) when domains are spawned and joined rapidly while another
-  domain allocates
+- **Fixed 2026-09-30.** A GC worker occasionally aborted with `pointer being freed was not allocated`
+  (or segfaulted) when domains were spawned and joined rapidly while another
+  domain allocated
   ([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)): a few
   percent of runs of a stress program, on the release and debug runtimes,
   native and bytecode, macOS and Linux. Cause (found with `rr`): a terminating
-  domain's buffer flush races a collection's flush of the same buffers, so one
-  buffer is freed twice. Fix in
-  [PR 52](https://github.com/fplaunchpad/ocaml-mmtk/pull/52), awaiting merge.
+  domain's buffer flush raced a collection's flush of the same buffers, so one
+  buffer was freed twice. Fixed by
+  [PR 52](https://github.com/fplaunchpad/ocaml-mmtk/pull/52) (merged,
+  `0015fbf179`); GH issue 39 is closed. Residual: when the main domain
+  force-cancels peer domains at process exit, their deregistration still
+  flushes without the fix's guard.
   Two one-off Linux CI crashes in multi-domain tests (a `double free` under
   ConcurrentImmix, a segfault under GenCopy) are plausibly the same bug.
-- At a pinned heap too small for the program, a program can segfault in the
+- **Fixed 2026-09-30.** At a pinned heap too small for the program, a program could segfault in the
   collector's root scan instead of raising `Out_of_memory`, under every plan
   that collects on the retry
-  ([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49)). Fix in
-  [PR 51](https://github.com/fplaunchpad/ocaml-mmtk/pull/51), awaiting merge.
+  ([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49)). Fixed by
+  [PR 51](https://github.com/fplaunchpad/ocaml-mmtk/pull/51) (merged,
+  `ce2dd86167`, with the test `gc-roots/oom_in_call_gc.ml`); GH issue 49 is closed.
 - A `fork`ed child has none of the collector's worker threads, so a collection
   in the child cannot run
   ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)). Explicit
@@ -322,7 +328,7 @@ heap and nursery knobs for MMTk and `space_overhead` × minor-heap size for
 vanilla) lies below and to the left of vanilla's. The current sweep
 (2026-09-30, Apple M4 Pro, after removing a macOS artefact in which mmtk-core
 memset every fresh mapping and so made it resident; mmtk-core `5454281016`,
-PR 53 pending merge) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on
+pinned by PR 53, merged) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on
 any GC-heavy bench today. On `binarytrees` the gap is collector speed:
 GenImmix's front starts at 94 MiB / 1.64 s beside vanilla's default
 (91 MiB / 1.51 s), but vanilla's curve falls faster, and at equal RSS vanilla

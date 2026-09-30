@@ -7,7 +7,7 @@ screening result; the fronts are the verdict. Method: [`PERFORMANCE.md`](PERFORM
 
 **Verdict (2026-09-30, Apple M4 Pro, after the macOS memset fix).** No MMTk
 plan dominates vanilla on any GC-heavy bench. Removing the macOS artefact
-(mmtk-core `5454281016`, pinned by ocaml-mmtk PR 53, pending merge) moved every
+(mmtk-core `5454281016`, pinned by ocaml-mmtk PR 53, merged) moved every
 MMTk front 40–66 MiB to the left, so the fronts now meet vanilla's and the
 comparison is front against front. On `binarytrees` the gap is collector speed,
 not memory: GenImmix's front starts at 94 MiB / 1.64 s, beside vanilla's
@@ -20,8 +20,9 @@ vanilla's default time at 27–31 vs 19 MiB; Immix on single-domain
 `chameneos_redux`, 0.77× at 74 vs 37 MiB), it is faster only at more memory.
 The generational plans (GenImmix, Bactrian) take 2.25–2.51× vanilla's time on
 the effects-heavy `chameneos_redux` (2.7–3.3× Immix's), and at too-small pinned
-heaps they segfault instead of raising `Out_of_memory` (GH issue 49,
-root-caused; fix on PR 51, pending merge).
+heaps they segfaulted instead of raising `Out_of_memory` in both sweeps (GH
+issue 49; fixed since by PR 51, merged as `ce2dd86167`, which neither sweep's
+build contains).
 
 ## Space-time fronts (2026-09-30, M4 Pro, after the memset fix)
 
@@ -60,8 +61,8 @@ anywhere on the grid. The SUMMARY's 1.09× compares GenImmix's first point
 with vanilla's default, not with vanilla's front. All three plans are
 dominated. Six GenImmix points (32 and 48 MiB heaps) and eight Bactrian points
 (32 and 48 MiB, plus 64 and 96 MiB with a 32 MiB nursery) segfaulted (GH issue
-49; root-caused, fix on PR 51 pending merge and not in this build, after which
-these points raise `Out_of_memory`); the six failed Immix points (32 and
+49; fixed by PR 51, merged after this sweep and not in its build; with the
+fix these points raise `Out_of_memory`); the six failed Immix points (32 and
 48 MiB) raised `Out_of_memory` cleanly. Before the fix, the fronts started at
 156 MiB / 1.79 s (GenImmix), 159 / 1.86 (Bactrian) and 132 / 2.58 (Immix) and
 did not overlap vanilla's.
@@ -228,8 +229,8 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
    first recorded in August, near the true OOM point. **Root-caused:**
    raising `Out_of_memory` from inside `caml_call_gc` left the saved-register
    pointer NULL, and a collection started by the raise scanned that frame
-   through it. Every plan is exposed; Immix rarely collects on the retry. Fix
-   on PR 51, pending merge (not in either sweep's build); a correctness bug,
+   through it. Every plan is exposed; Immix rarely collects on the retry.
+   Fixed by PR 51 (merged, `ce2dd86167`; not in either sweep's build); a correctness bug,
    independent of the performance question.
 4. **Compute-bound controls are flat** (0.99–1.01× time in the panel), so the
    MMTk mutator path costs nothing measurable on allocation-light code.
@@ -252,7 +253,8 @@ anonymous mapping is already zero, so the memset only made pages resident.
 Measured with `vmmap`, `kb` at a 32 MiB heap was 60 MiB metadata + 12 mature +
 8 nursery + 2.5 malloc = 82.6 MiB, of which 1.4 MiB of metadata was needed.
 The fix is mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not
-memset fresh mappings on macOS"), pinned by ocaml-mmtk PR 53 (pending merge).
+memset fresh mappings on macOS"; mmtk-core PR 7, merged as `69b5ddf663`),
+pinned by ocaml-mmtk PR 53 (merged, `3846019997`).
 Checked with a `sanity` build (`binarytrees 18` at 64 MiB and `kb 30` at
 32 MiB on GenImmix, Bactrian and Immix: no invalid reference), 12/12
 quick-panel goldens, and wall time unchanged; spot RSS fell from 25 to 9 MiB
@@ -286,8 +288,8 @@ the decomposition and the fix are in `gc/mmtk/NOTES.md` 2026-09-30 (evening),
 
 - Host: Apple M4 Pro (8 performance + 4 efficiency cores, 24 GiB), macOS 26.6,
   kept quiet during the runs. No core pinning, no `setarch`.
-- Fork, this sweep: `d6933f65da` (PR 53: mainline `6bb7a1be36` plus the
-  mmtk-core pin), mmtk-core `5454281016`. Fork, first sweep and panel:
+- Fork, this sweep: `d6933f65da` (PR 53's head: mainline `6bb7a1be36` plus the
+  mmtk-core pin; merged as `3846019997`), mmtk-core `5454281016`. Fork, first sweep and panel:
   `b714bb86d3`, tree identical to mainline merge `3fbe544984` (PR 41);
   mmtk-core `95b425a27d`. Vanilla, both: opam `5.5.0` (released,
   non-flambda), the same binaries.

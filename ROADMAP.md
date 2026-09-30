@@ -22,14 +22,15 @@ ConcurrentImmix 1448 / 0 at 512 MiB; all-plans CI on `3fbe544984` (run 366688466
 green, GenCopy included (first time since the September merge), except LXR on its known set (item 21).
 **LXR capacity is diagnosed** (item 21) and its **retention fixes are merged** (ocaml-mmtk PR 46,
 merge `6bb7a1be36`; mmtk-core PR 6, `b566d1f5b7`, pinned at `7a36bbb0b5`). **Root-caused the same
-evening, fixes on open PRs pending merge:** the near-OOM root-scan SIGSEGV (item 13, GH issue 49; PR 51)
-and the GC-worker free abort under domain churn (item 28, GH issue 39, with `rr`; PR 52). **The macOS RSS
-artefact (mmtk-core memset every fresh mapping) is fixed** (mmtk-core PR 7, `5454281016`; ocaml-mmtk
-PR 53, pending merge) and the M4 space-time sweep re-run: the fronts moved 40–66 MiB left and now meet
-vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Open:** items 13 and 28 until PRs 51 and 52 merge, LXR capacity and failures (items 21, 31 =
+evening and FIXED (merged; GH issues closed):** the near-OOM root-scan SIGSEGV (item 13, GH issue 49; PR 51,
+`ce2dd86167`) and the GC-worker free abort under domain churn (item 28, GH issue 39, with `rr`; PR 52,
+`0015fbf179`). **The macOS RSS
+artefact (mmtk-core memset every fresh mapping) is fixed** (mmtk-core PR 7, `5454281016`, merged as `69b5ddf663`;
+ocaml-mmtk PR 53, merged, `3846019997`) and the M4 space-time sweep re-run: the fronts moved 40–66 MiB left and now meet
+vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Open:** LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
-issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28). Order: items 28/13 (merge),
-21/31, 26, 25, 30, 20(c), 32, 23, 24.
+issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28), and item 28's
+process-exit residual. Order: items 21/31, 26, 25, 30, 20(c), 32, 23, 24.
 
 Companion docs: [`README.md`](README.md) (overview + build/run),
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) (what this platform is *for*),
@@ -518,8 +519,8 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       `caml_do_roots` <- `ScanMutatorRoots::do_work`, invalid address 0x18) in a tight-heap Bactrian
       compile of `tformat.ml` (item 26). → NOTES "Near-OOM SEGV" (2026-08-06), 2026-09-30 (later).
       Tracked as **GH issue 49**; the 2026-09-30 space-time sweep reproduces it on 14 binarytrees grid
-      points (6 GenImmix, 8 Bactrian; `RESULTS.md`). **ROOT-CAUSED 2026-09-30 (evening); fix on PR 51,
-      pending merge.** The bug-4 fix (`caml_mmtk_recycle_gc_regs_bucket`) set `Caml_state->gc_regs = NULL`
+      points (6 GenImmix, 8 Bactrian; `RESULTS.md`). **ROOT-CAUSED 2026-09-30 (evening); FIXED by PR 51
+      (merged, `ce2dd86167`; GH issue 49 closed).** The bug-4 fix (`caml_mmtk_recycle_gc_regs_bucket`) set `Caml_state->gc_regs = NULL`
       before `caml_raise_out_of_memory` inside `caml_call_gc`'s saved-registers window; `caml_raise` runs
       pending actions before unwinding, the GC poll re-attempts the TLAB refill, under the generational
       plans that starts a collection while the `caml_call_gc` frame is still top of stack, and the root
@@ -531,7 +532,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
       leaves `gc_regs` alone (stock's semantics; one `Wosize_gc_regs` block, ~460 B, abandoned per caught
       `Out_of_memory`, as in stock). New test `gc-roots/oom_in_call_gc.ml`: exit 139 before, passes on 5
       plans; `binarytrees 20` at 32 MiB is a clean `Out_of_memory` on GenImmix and Bactrian. The Bactrian
-      tight-heap crash of item 26 (fault 0x18) is the same bug. Repro until merge: `binarytrees 20` at
+      tight-heap crash of item 26 (fault 0x18) is the same bug. Repro before the fix: `binarytrees 20` at
       `MMTK_HEAP_SIZE_MB=32`, GenImmix. → NOTES 2026-09-30 (evening).
     - **fragmed OOMs under Bactrian** — `fragmed` at 64 MiB with 4 workers (NOTES 2026-08-13, "needs its own
       look") and `fragmed-300` at 192 MiB (NOTES 2026-08-12, "a pacing-tightness item, not corruption").
@@ -644,10 +645,9 @@ Correctness before performance; dependencies noted. **Depth for every item is in
 and merged on 2026-09-29, item 27 with the docs of PR 35, item 29 on 2026-09-30, and items 15 (=
 20(b)) and 22 later on 2026-09-30 (ocaml-mmtk PR 41, mmtk-core PRs 4 and 5); item 21's retention
 fixes merged that evening (PR 46, mmtk-core PR 6). The OPEN work, in
-priority order: (1) item 28, GH issue 39, a GC worker frees a pointer it does not own under domain
-churn: ranked first because it is a memory-safety bug on the default plan, while items 21 and 31
-limit an experimental plan — root-caused, fix on PR 52 pending merge, with item 13 (GH issue 49,
-fix on PR 51); (2) item 21, LXR capacity (diagnosed; retention fixes merged; block-granularity
+priority order (item 28, GH issue 39, a GC worker freeing a pointer it does not own under domain
+churn, and item 13, GH issue 49, are FIXED: PRs 52 and 51, merged, issues closed; item 28's
+process-exit residual remains): (1) item 21, LXR capacity (diagnosed; retention fixes merged; block-granularity
 retention open) and the remaining LXR failures, with item 31, LXR's unsound weak references, which blocks
 line reuse (together they keep LXR's results provisional); (3) item 26, GH issue 36, the
 intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
@@ -881,7 +881,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
         4-bit default are **MERGED** (below). Open follow-ups: item 31 (weak references, GH issue 44)
         and item 32 (a kb reference-count anomaly, GH issue 45).
       - *RSS tax caveat:* measured on macOS while mmtk-core zero-filled every mapped metadata chunk
-        (workstreams, "Space-time curves"; fixed by mmtk-core `5454281016`, PR 53 pending merge); likely
+        (workstreams, "Space-time curves"; fixed by mmtk-core `5454281016`, pinned by PR 53, merged); likely
         partly that artefact; re-measure (Linux, or macOS after the fix).
       - **RQ1 consequence:** "barrier ~free" survives (it is mutator-side). "In-place RC wins at
         memory parity" is unproven: the earlier parity was heap-size parity, LXR carries the RSS
@@ -1044,7 +1044,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
       collections (attempt 4, no request pending, 7014/8192 pages) with a SIGSEGV in the GC worker's
       root scan (`caml_scan_stack` <- `caml_do_roots` <- `ScanMutatorRoots::do_work`, invalid address
       0x18) — the same signature as item 13's near-OOM SEGV, and (root-caused 2026-09-30 evening)
-      the same bug: item 13's `gc_regs == NULL` scan, fix on PR 51.
+      the same bug: item 13's `gc_regs == NULL` scan, fixed by PR 51 (merged).
     - With `MMTK_COMPACT_OVERHEAD_PCT=0`: 3/3 successes. Repeated compaction requests contribute to
       the tight-heap failure (not a fix).
     **Open question:** after a Full, does `note_swept_baseline` repeatedly force compact-all without
@@ -1062,9 +1062,10 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     mmtk-core's fork has no CI on pull requests. **Fix:** `'gc/mmtk-core'` added to `paths:`. Not yet
     exercised by a pure pin bump (PR 41 bumped the pin but also changed `gc/mmtk/`). (Docs-only edits to `gc/mmtk/*.md` still trigger the workflow.)
 
-28. **GH issue 39: a GC worker aborts freeing a work packet under domain churn (open until PR 52
-    merges; added 2026-09-30; ROOT-CAUSED with `rr` the same evening; high priority — memory safety on
-    the default plan).** *Symptom:* SIGABRT (exit 134),
+28. **GH issue 39: a GC worker aborts freeing a work packet under domain churn — FIXED 2026-09-30**
+    by ocaml-mmtk PR 52 (merge `0015fbf179`; GH issue 39 closed; added 2026-09-30, ROOT-CAUSED with
+    `rr` the same evening; was high priority — memory safety on the default plan; the process-exit
+    residual below remains). *Symptom:* SIGABRT (exit 134),
     no output. The macOS crash report shows thread `mmtk-gc-worker` in `abort` <- `malloc_report`
     (`pointer being freed was not allocated`) <- `drop_in_place<Box<dyn GCWork<OCamlVM>>>` <-
     `GCWorker::run` <- `start_worker` <- `VMCollection::spawn_gc_thread` (one crash report's stack read
@@ -1086,8 +1087,8 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     mutator, which flushes the same buffers on a GC worker. Both `take` the same `region_modbuf`
     buffer (replay: same pointer, len 1), each wraps it in a `ProcessRegionModBuf` packet, and dropping
     the second packet frees it again (the abort); the SIGSEGV variant processes an already-freed buffer
-    (`ProcessModBuf::do_work`). So: release runtime, native code and Linux are all affected. **Fix on
-    PR 52, pending merge:** `caml_mmtk_domain_terminate` holds a binding slot (`caml_mmtk_try_begin_bind`
+    (`ProcessModBuf::do_work`). So: release runtime, native code and Linux are all affected. **Fix
+    (PR 52, merged):** `caml_mmtk_domain_terminate` holds a binding slot (`caml_mmtk_try_begin_bind`
     … `caml_mmtk_end_bind`) across `mmtk_ocaml_deregister_domain`; a slot is granted only while no
     collection is active and `stop_all_mutators` waits for held slots, so no pause flushes this mutator
     concurrently and the next pause no longer includes it (also closing the window where a pause missed
@@ -1234,13 +1235,13 @@ The active research/measurement threads behind the M8 milestone — the index; d
     (b) why the generational plans take 2.6–3.1× Immix's time on chameneos (continuation stacks vs the
     promotion path); (c) GenImmix/Bactrian segfault in `caml_scan_stack` (item 13, "Near-OOM SEGV")
     instead of raising `Out_of_memory` at small pinned heaps (binarytrees, 32–48 MiB; Bactrian also 64
-    and 96 MiB with a 32 MiB nursery; GH issue 49; Immix fails cleanly) — **root-caused, fix on PR 51,
-    pending merge** (item 13); (d) compute benches are not
+    and 96 MiB with a 32 MiB nursery; GH issue 49; Immix fails cleanly) — **root-caused and fixed by PR 51,
+    merged after both sweeps** (item 13); (d) compute benches are not
     bracketed — vanilla's `o`/`s` do not move matrix_multiplication off 19 MiB and no MMTk configuration reaches it, so
     that comparison is a floor comparison, not a front one; (e) repeat on godel with reps (dispersion,
     Linux RSS accounting).
     **RSS floor decomposition (question (a)): DONE 2026-09-30 — macOS zero-fill. macOS memset fix:
-    mmtk-core PR 7 (`5454281016`) / ocaml-mmtk PR 53 (pending merge). Re-sweep DONE 2026-09-30,
+    mmtk-core PR 7 (`5454281016`, merged as `69b5ddf663`) / ocaml-mmtk PR 53 (merged, `3846019997`). Re-sweep DONE 2026-09-30,
     `RESULTS.md`.**
     *Source reading:* mmtk-core's `dzmmap`/`dzmmap_noreplace` (`src/util/memory.rs`) call `zero()` under
     `#[cfg(not(target_os = "linux"))]` and the chunk mmapper maps whole 4 MiB chunks, so on macOS every
@@ -1256,13 +1257,13 @@ The active research/measurement threads behind the M8 milestone — the index; d
     fronts carried a 40–66 MiB/point OS artefact in the RSS coordinate; the "RSS ≈ 4× live is
     fragmentation" reading is wrong on macOS (≈73 % of kb's RSS was zero-filled metadata). **Fix:**
     mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not memset fresh mappings on
-    macOS"), pinned by ocaml-mmtk PR 53 (pending merge); `sanity` (binarytrees 18 @ 64 MiB, kb 30 @
+    macOS"), pinned by ocaml-mmtk PR 53 (merged, `3846019997`); `sanity` (binarytrees 18 @ 64 MiB, kb 30 @
     32 MiB; GenImmix/Bactrian/Immix; 0 invalid), 12/12 quick-panel goldens, wall unchanged; spot RSS
     nbody 25→9 MiB, kb@32 90→31, binarytrees@64 164→119 (GenImmix), kb@32 Immix 86→43. **Re-sweep
     (same grid, same vanilla binaries; `benchmarks` `3e150aa0dc`, `quick/spacetime-m4-nz.*`):** front
     starts moved 40–66 MiB left (binarytrees GenImmix 156→94 MiB, kb 82→23, LU 86→26, matmul 41→27,
     chameneos 118→58) and the fronts now meet vanilla's; verdict classes unchanged; the same 20 points
-    fail (GH issue 49, PR 51 not in the build). On binarytrees the gap is now collector speed (at equal
+    fail (GH issue 49; PR 51, merged later, not in the build). On binarytrees the gap is now collector speed (at equal
     RSS vanilla is 1.15–1.54× faster; its curve falls faster with memory); on kb/LU a 9–16 MiB floor
     plus 3–22 % time. **Open (residual floor, 8–21 MiB above vanilla on kb/LU/matmul/chameneos for GenImmix/Bactrian,
     Immix 11–37):** (1) the nursery (bounded up to 16 MiB, outside the pinned heap, counted twice in the heap
@@ -1465,7 +1466,7 @@ The active research/measurement threads behind the M8 milestone — the index; d
 - **bug #2** — native unmarshalling allocated off-heap (intern path was `#ifndef NATIVE_CODE`); un-guarded so native interns via MMTk. (CI ocamldoc SIGSEGV resolved; manpage repro 0/12.)
 - **bug #3** — MMTk STW stop barrier was a no-op (blocking-section counter underflowed `usize`); fixed by passing the domain to `caml_mmtk_enter/leave_blocking`.
 - **bug #3b** — multidomain spawn/STW deadlock: replaced the global stop-counter with an MMTk-native per-mutator RUNNING set (`stop_all_mutators` waits for `running.is_empty()`); also fixed an MMTk-STW × OCaml-minor-STW deadlock + a terminate corruption; removed `park_terminating`. native `domain_dls` 14/30 hang → 30/30.
-- **bug #4** — `gc_regs` bucket leak on OOM-raise inside `caml_call_gc` (RESTORE_ALL_REGS skipped); `caml_mmtk_recycle_gc_regs_bucket()` before the raise. 25/25→0/25. **Superseded (2026-09-30):** the recycling (which also set `gc_regs = NULL`) caused the near-OOM root-scan SIGSEGV (item 13, GH issue 49); PR 51 (pending merge) replaces it with `caml_mmtk_ensure_free_gc_regs_bucket`.
+- **bug #4** — `gc_regs` bucket leak on OOM-raise inside `caml_call_gc` (RESTORE_ALL_REGS skipped); `caml_mmtk_recycle_gc_regs_bucket()` before the raise. 25/25→0/25. **Superseded (2026-09-30):** the recycling (which also set `gc_regs = NULL`) caused the near-OOM root-scan SIGSEGV (item 13, GH issue 49); PR 51 (merged, `ce2dd86167`) replaces it with `caml_mmtk_ensure_free_gc_regs_bucket`.
 - **bug #1** — `is_forwarded` read forwarding-bits metadata that non-moving plans don't map; register that spec only for `moves_objects && !needs_forward_after_liveness`.
 - **moving-GC root cause** — forwarding-pointer / `Infix_tag` collision in `slot.rs` `classify` (consult forwarding-bits side metadata before trusting the header).
 - **GC-mid-`intern_rec`** — unmarshaller ran a GC through raw un-rooted C pointers; suppress collection across unmarshal via `is_collection_enabled`.
@@ -1584,7 +1585,7 @@ short-lived-allocation profile favours a copying nursery; see `PERFORMANCE.md`).
   The vanilla-minor + MMTk-major intermediate was superseded, not just deferred.
 - RSS on macOS was inflated by mmtk-core itself: `dzmmap` zero-filled every mapped 4 MiB chunk
   (heap and side metadata) off Linux. **Fixed** (mmtk-core PR 7, `5454281016`; ocaml-mmtk PR 53,
-  pending merge): fronts moved 40–66 MiB left. **Residual:** a 10–20 MiB floor above vanilla (nursery,
+  merged, `3846019997`): fronts moved 40–66 MiB left. **Residual:** a 10–20 MiB floor above vanilla (nursery,
   GC work-packet vectors, per-space chunks), and no page is returned to the OS on macOS (every return
   path is Linux-only). Figures measured on macOS before the fix (the first M4 sweep and panel, the LXR
   metadata tax) overstate MMTk's RSS (workstreams, "Space-time curves").

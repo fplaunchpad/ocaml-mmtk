@@ -168,7 +168,7 @@ GC introduces run-to-run nondeterminism (collection timing depends on allocation
     (`gc/mmtk-core/src/util/memory.rs`) called `zero()` off Linux, and chunks are mapped 4 MiB at a
     time, so every heap and side-metadata chunk was fully resident once mapped (40–66 MiB per front
     start on the first M4 space-time sweep; `kb` 91 MiB on the M4 vs 29 on godel). **Fixed** by
-    mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7), pinned by ocaml-mmtk PR 53 (pending merge);
+    mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7), pinned by ocaml-mmtk PR 53 (merged, `3846019997`);
     the M4 sweep was re-run with it (`RESULTS.md`). MMTk RSS measured on macOS *before* the fix (the
     first sweep, the 2026-09-30 M4 panel, the LXR metadata tax) overstates MMTk's memory; do not
     compare it with Linux figures. Every page-return path is still Linux-only, so macOS RSS never
