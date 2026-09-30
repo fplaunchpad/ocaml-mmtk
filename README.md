@@ -6,8 +6,15 @@ collector. It builds the bytecode and native compilers, bootstraps itself, and
 supports multicore programs using `Domain.spawn` and effect handlers. Choose a
 collector at startup with `MMTK_PLAN`; the default is **GenImmix**.
 
-**Research prototype:** native code using the default plan has a reproduced
-silent-corruption bug; see [known limits](#what-works-and-what-is-still-open).
+**Research prototype (status 2026-09-30).** Several correctness bugs, including
+silent data corruption under the default plan, were found and fixed on
+2026-09-29 and 2026-09-30; see [known limits](#what-works-and-what-is-still-open).
+Still open, and worth knowing before you try it: a rare collector abort when
+domains are created and terminated rapidly
+([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)); a `fork`ed
+child cannot run a collection
+([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)); and results
+under the LXR plan are provisional.
 
 ## Why this fork exists
 
@@ -35,39 +42,81 @@ experiments.
 
 ## What works, and what is still open
 
-Bytecode and native execution have been validated on **x86-64 Linux** and
-**Apple Silicon macOS**, including moving and generational collectors,
-multi-domain collection, weak references, ephemerons, and finalisers. Native
-allocation uses the existing compiler fast path, backed by MMTk allocation
-regions. The stock OCaml collector has been removed; compare against a separate
-vanilla OCaml 5.5.0 build.
+Bytecode and native code run on **x86-64 Linux** and **Apple Silicon macOS**,
+including moving and generational collectors, multi-domain collection, weak
+references, ephemerons, and finalisers. Native allocation uses the existing
+compiler fast path, backed by MMTk allocation regions. The stock OCaml collector
+has been removed; compare against a separate vanilla OCaml 5.5.0 build.
 
-On **2026-09-29**, [post-merge Linux CI](https://github.com/fplaunchpad/ocaml-mmtk/actions/runs/36534216189),
-covering bytecode and native variants, reported no failures among 1495 tests
-considered per plan under GenImmix, StickyImmix, SemiSpace, and Bactrian.
-GenCopy failed `misc/darkening_work.ml`; Immix and ConcurrentImmix hit the
-`weaklifetime.ml` timeout, addressed by a merged
-[test heap-pinning change](https://github.com/fplaunchpad/ocaml-mmtk/pull/27).
-The suite includes disabled cases for unsupported features and GC timing
-differences. Memprof is unsupported; [`runtime_events` GC-event emission](https://github.com/fplaunchpad/ocaml-mmtk/issues/20)
+The evidence is OCaml's own testsuite, bytecode and native variants, run per
+plan. On **2026-09-29**, with all of that day's fixes merged, the full testsuite
+passed with no failures (1446 tests) under GenImmix, Immix and Bactrian on macOS
+arm64 with the default dynamic heap. On
+[Linux CI](https://github.com/fplaunchpad/ocaml-mmtk/actions/runs/36583101914)
+(4 GiB pinned heap) it passed under GenImmix, Immix, StickyImmix, SemiSpace and
+ConcurrentImmix, and the debug-runtime jobs passed. In the same run, Bactrian
+failed one compile with an intermittent out-of-memory
+([GH issue 36](https://github.com/fplaunchpad/ocaml-mmtk/issues/36)), GenCopy
+failed `misc/darkening_work.ml`, an intermittent collection-count test that
+depends on pacing ([ROADMAP](ROADMAP.md) open item 15), and LXR failed its known
+set of tests (below). The suite includes disabled cases for unsupported features
+and GC timing differences. Memprof is unsupported;
+[`runtime_events` GC-event emission](https://github.com/fplaunchpad/ocaml-mmtk/issues/20)
 is unimplemented, and [signal-delivery poll points](https://github.com/fplaunchpad/ocaml-mmtk/issues/19)
 differ from stock OCaml in two tests.
 
-**Known correctness limits (2026-09-29):** LXR has a documented
-[silent wrong-results bug](https://github.com/fplaunchpad/ocaml-mmtk/issues/26), so
-its results are provisional. The [native `Array.fill` path](runtime/array.c) also
-lacks the generational write barrier: silent corruption has been reproduced
-under **GenImmix (the default)**, StickyImmix, GenCopy, and Bactrian. A fix is in
-progress. Programs using `Thread` with blocking sections have reproduced
-[heap corruption and thread-exit GC hangs](https://github.com/fplaunchpad/ocaml-mmtk/issues/24#issuecomment-5889314954)
-on macOS. The thread-exit hang affects both bytecode and native code; a
-coordination fix is in progress.
+**Fixed on 2026-09-29 and 2026-09-30** (on mainline; each verified with a
+reproducer and full testsuite runs on macOS arm64, then by Linux CI, which pins
+the heap and so does not exercise the heap-growth fix):
 
-Explicit `Gc` requests are also under investigation: `Gc.major`, `Gc.full_major`,
-and `Gc.compact` can return before their collection runs, while `Gc.minor` does
-not trigger MMTk in the tested configurations. Current dynamic heap sizing can
-also grow the budget despite a stable live set, reproduced under Immix; its fix
-has not landed. These gaps matter when interpreting tests and benchmark results.
+- Native `Array.fill` and unmarshalling of data marshalled with `No_sharing`
+  skipped the generational write barrier, silently corrupting data under
+  GenImmix (the default since 2026-06-24), StickyImmix, GenCopy and Bactrian
+  ([GH issue 28](https://github.com/fplaunchpad/ocaml-mmtk/issues/28)).
+- Programs using `Thread` with blocking sections could hang in a collection at
+  thread exit or corrupt the heap
+  ([GH issue 24](https://github.com/fplaunchpad/ocaml-mmtk/issues/24)). The debug
+  runtime now aborts on any violation of the invariant involved. Not covered:
+  Windows, and `fork` (below).
+- LXR computed wrong results when a field holding an integer or a static value
+  was overwritten ([GH issue 26](https://github.com/fplaunchpad/ocaml-mmtk/issues/26)).
+- The dynamic heap grew on garbage under plans whose collections are
+  triggered by the heap filling (Immix, SemiSpace). The cause was an MMTk
+  change of 2026-08-30 that reached mainline on 2026-09-29; RSS figures for
+  those plans measured with the dynamic heap on trees containing it are
+  inflated.
+- Creating domains while a collection was running could delay signal delivery
+  to some domains, and tripped an assertion in the debug runtime
+  ([GH issue 37](https://github.com/fplaunchpad/ocaml-mmtk/issues/37)).
+
+**Known correctness limits (2026-09-30):**
+
+- A GC worker occasionally aborts with `pointer being freed was not allocated`
+  when domains are spawned and joined rapidly while another domain allocates
+  ([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)): about 1–3%
+  of runs of a stress program (default plan, debug runtime, bytecode, macOS).
+  Whether it affects the release runtime, native code or Linux is unknown. It
+  is a memory-safety bug in the collector; its cause is unknown. Linux CI also
+  showed two one-off crashes in multi-domain tests on 2026-09-29 (a
+  `double free` abort under ConcurrentImmix, a segfault under GenCopy); whether
+  they are the same bug is unknown.
+- A `fork`ed child has none of the collector's worker threads, so a collection
+  in the child cannot run
+  ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)). The fork
+  tests in the suite pass because nothing in them waits for a collection.
+- `Gc.major`, `Gc.full_major` and `Gc.compact` return before their collection
+  runs, and `Gc.minor` requests no collection from MMTk. Tests and benchmarks
+  that assume a collection has happened when these calls return can mislead. A
+  fix exists but is not merged.
+- LXR results are provisional. With the wrong-results fix, LXR retains a
+  whole block per survivor, so it needs much more memory than it appeared
+  to (`chameneos_redux` needs a 256 MiB heap where it previously
+  seemed to run in 64 MiB), and it still fails a set of tests locally and on
+  Linux CI.
+- Under Bactrian, the native compiler (and, once, a test program)
+  intermittently fails with `Out of memory` on Linux CI at a 4 GiB heap
+  ([GH issue 36](https://github.com/fplaunchpad/ocaml-mmtk/issues/36)); cause
+  unknown, not reproduced on macOS.
 
 [`ROADMAP.md`](ROADMAP.md) tracks the work;
 [`gc/mmtk/NOTES.md`](gc/mmtk/NOTES.md) contains dated fixes, validation, and known
@@ -127,7 +176,7 @@ These plans support **both bytecode and native code**:
 | **StickyImmix** | Generational collection with an in-place nursery; stop-the-world. |
 | **Bactrian** | Copying nursery and Immix mature heap; adaptive full or sliced stop-the-world major collection and incremental sweep by default. Optional worker-concurrent marking. |
 | **ConcurrentImmix** | Concurrent marking with a deletion write barrier; mature reclamation remains stop-the-world. |
-| **LXR** | In-place reference counting on Immix, with stop-the-world backup tracing for cycles. **Known wrong results; provisional. Requires a pinned heap.** |
+| **LXR** | In-place reference counting on Immix, with stop-the-world backup tracing for cycles. **Provisional: high memory use and known test failures. Requires a pinned heap.** |
 | **GenCopy** | Copying nursery and copying mature heap; stop-the-world. |
 | **SemiSpace** | Whole-heap copying between two spaces; stop-the-world. |
 | **NoGC** | Allocation without reclamation, useful for bounded experiments. |
@@ -159,10 +208,15 @@ it does not reproduce the paper's concurrent backup collector. The backup is
 requested when an RC pause reclaims too little at high occupancy, or leaves the
 heap critically full. Earlier validation included single-domain runs and
 multi-domain `par_binarytrees` at 1–32 domains, but those checks did not exercise
-the pattern now known to give wrong results. The
-[release-counter abort](https://github.com/fplaunchpad/ocaml-mmtk/issues/25) was
-fixed in the current MMTk submodule; that fix does not resolve issue 26.
-LXR participates in the
+the pattern that gave wrong results
+([GH issue 26](https://github.com/fplaunchpad/ocaml-mmtk/issues/26), fixed on
+2026-09-29). With that fix, LXR needs much more memory than earlier runs
+suggested: by source reading, each block holding a survivor stays whole, because
+this port neither reuses partly free blocks nor evacuates survivors. This and
+the remaining test failures are tracked in [`ROADMAP.md`](ROADMAP.md) (open
+item 21). The
+[release-counter abort](https://github.com/fplaunchpad/ocaml-mmtk/issues/25) is
+also fixed. LXR participates in the
 [cross-plan testsuite workflow](.github/workflows/testsuite-plans.yml), while
 remaining an experimental research plan.
 
@@ -174,7 +228,7 @@ Environment variables apply at process startup. Sizes ending in `_MB` are MiB;
 | Variable | Default | Meaning |
 |---|---|---|
 | `MMTK_PLAN` | `GenImmix` | Select the collector. |
-| `MMTK_HEAP_SIZE_MB` | Unset | Pin a fixed heap. Otherwise the intended target is about 2.2× the live heap, estimated from collector accounting, with nursery headroom and a physical-RAM ceiling; see the current growth bug above. A heap budget is not an RSS limit. |
+| `MMTK_HEAP_SIZE_MB` | Unset | Pin a fixed heap. Otherwise the intended target is about 2.2× the live heap, estimated from collector accounting, with nursery headroom and a physical-RAM ceiling. A heap budget is not an RSS limit. |
 | `MMTK_MIN_HEAP_MB` | `32` | Lower bound for the default dynamic heap target. |
 | `MMTK_NURSERY` | `Bounded:2097152,16777216` | Generational nursery budget: 2–16 MiB per live domain by default. Explicit values are not scaled; for example, `Fixed:8388608`. Unit suffixes such as `2m` do not parse. |
 | `MMTK_NURSERY_PER_DOMAIN` | Enabled | Set to `0` to disable domain scaling of the default nursery. When the heap cannot grow, the scaled minimum is constrained to preserve mature-heap space. |
@@ -216,7 +270,7 @@ them.
 | `MMTK_COMPACT_OVERHEAD_PCT` | `100` | Concurrent plans' threshold for requesting mature compaction after a Full when reserved space sufficiently exceeds traced live bytes. `0` disables this trigger. |
 | `MMTK_UP_OLDIFY` | `0` | Opt-in stock-style nursery tracing for eligible single-worker Bactrian pauses. |
 
-Current policy lives in the [Bactrian implementation](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/src/plan/concurrent/bactrian/global.rs)
+Current policy lives in the [Bactrian implementation](https://github.com/fplaunchpad/mmtk-core/blob/44d02b65a980743eb0e91078bf0bf8f3b54d9214/src/plan/concurrent/bactrian/global.rs)
 and [binding collection code](gc/mmtk/binding/src/collection.rs). Further allocation,
 major-pacing, and compaction experiments are recorded in
 [`gc/mmtk/SHAPE.md`](gc/mmtk/SHAPE.md); consult the implementation for current
@@ -239,8 +293,10 @@ Those results predate the current nursery default, Bactrian's sliced marking and
 incremental sweep, and later runtime fixes. Dynamic heaps and pinned LXR heaps
 also produced different RSS values. They motivate the research questions;
 they are not current-default or equal-memory performance claims.
-LXR results are additionally provisional because of its open wrong-results bug;
-its earlier `chameneos_redux` measurements cannot be treated as valid evidence.
+Every LXR time and RSS figure, including the `binarytrees` numbers above, predates
+the 2026-09-29 wrong-results fix and must be re-measured: the fix changes how
+much memory LXR retains. Its earlier `chameneos_redux` measurements are invalid,
+because that run silently dropped most reference-count increments.
 
 The **2026-08-12** [SHAPE round 28](gc/mmtk/SHAPE.md#round-28-d5-pareto--the-honest-frontier-front-to-front-2026-08-12)
 compared memory/time frontiers after sweeping heap sizing and nursery settings
@@ -274,5 +330,5 @@ and both time and RSS for a comparison.
 ## License
 
 OCaml retains its [license](LICENSE). MMTk is dual-licensed under
-[MIT](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/LICENSE-MIT)
-and [Apache 2.0](https://github.com/fplaunchpad/mmtk-core/blob/045f121143c5772fd2715d8bfaf5274238ced4b1/LICENSE-APACHE).
+[MIT](https://github.com/fplaunchpad/mmtk-core/blob/44d02b65a980743eb0e91078bf0bf8f3b54d9214/LICENSE-MIT)
+and [Apache 2.0](https://github.com/fplaunchpad/mmtk-core/blob/44d02b65a980743eb0e91078bf0bf8f3b54d9214/LICENSE-APACHE).
