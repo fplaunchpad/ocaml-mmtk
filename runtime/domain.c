@@ -466,6 +466,18 @@ static void domain_create(uintnat initial_minor_heap_wsize,
     domain_state = d->state;
   }
 
+  /* Publish the interrupt word in the same [all_domains_lock] hold that
+     parked the slot, as upstream does: the MMTk bind loop below may drop
+     that lock, and another creator could then park and activate a later
+     slot while this one still had no interrupt word. That breaks the
+     invariant checked by [check_stw_domains] (slots with an interrupt
+     word form a prefix of [all_domains] covering the active domains) on
+     which the early exit of [caml_interrupt_all_signal_safe] relies. A
+     reused slot published this same pointer already; a fresh state was
+     zeroed by calloc, and the release store orders that first. */
+  atomic_store_explicit(&s->interrupt_word, &domain_state->young_limit,
+                        memory_order_release);
+
   /* Note: until we take d->domain_lock, the domain_state may still be
    * shared with a domain which is terminating (see
    * caml_domain_terminate). */
@@ -504,11 +516,6 @@ static void domain_create(uintnat initial_minor_heap_wsize,
   caml_state = domain_state;
 
   domain_state->young_limit = 0;
-  /* Synchronized with [caml_interrupt_all_signal_safe], so that the
-     initializing write of young_limit happens before any
-     interrupt. */
-  atomic_store_explicit(&s->interrupt_word, &domain_state->young_limit,
-                        memory_order_release);
 
   domain_state->id = d->id;
 
