@@ -148,11 +148,37 @@ static GC_PAUSE_START: Mutex<Option<Instant>> = Mutex::new(None);
 /// path must not do I/O, and a mutator is parked waiting on this. A pause is 24
 /// bytes, so even a run with a million collections costs 24 MB.
 ///
-/// Enabled only when MMTK_PAUSE_LOG names an output path; otherwise every pause
-/// costs one relaxed atomic load of the disabled flag.
+/// Enabled only when MMTK_PAUSE_LOG is set; otherwise every pause costs one
+/// relaxed atomic load of the disabled flag. Two modes (runtime/mmtk.c picks):
+///  - `MMTK_PAUSE_LOG=1`: one `[mmtk-pause]` line per pause on stderr, written
+///    by the GC worker AFTER the mutators have been woken (outside the measured
+///    span, so no mutator waits on the write), plus a `[mmtk-pause-summary]`
+///    line at exit (`mmtk_ocaml_pause_log_summary`).
+///  - `MMTK_PAUSE_LOG=<path>`: the records are written as NDJSON at exit.
+/// Only the GC worker running stop_all_mutators / resume_mutators writes any of
+/// this state (one pause at a time), so multi-domain runs do not race on it.
 static PAUSE_LOG: Mutex<Vec<PauseRecord>> = Mutex::new(Vec::new());
 static PAUSE_LOG_ON: AtomicBool = AtomicBool::new(false);
+static PAUSE_LOG_STDERR: AtomicBool = AtomicBool::new(false);
 static PAUSE_LOG_T0: Mutex<Option<Instant>> = Mutex::new(None);
+/// Bound on the in-memory record vector (24 MB at 24 bytes a record). Pauses
+/// past the cap are still counted in the exact totals of `PAUSE_STATS`, but
+/// not in the percentiles; the summary says `capped=1` when that happened.
+const PAUSE_LOG_CAP: usize = 1 << 20;
+static PAUSE_STATS: Mutex<PauseStats> = Mutex::new(PauseStats {
+    n: 0,
+    full: 0,
+    total_nanos: 0,
+    max_nanos: 0,
+    dropped: 0,
+});
+/// The pause in flight: filled by stop_all_mutators once the world is stopped,
+/// consumed by resume_mutators. Touched only when the pause log is armed.
+static PAUSE_CUR: Mutex<PauseCur> = Mutex::new(PauseCur {
+    stopped: None,
+    kind: "",
+    domains: 0,
+});
 
 #[derive(Clone, Copy)]
 struct PauseRecord {
@@ -161,6 +187,54 @@ struct PauseRecord {
     at_nanos: u64,
     dur_nanos: u64,
     full: bool,
+}
+
+struct PauseStats {
+    n: u64,
+    full: u64,
+    total_nanos: u64,
+    max_nanos: u64,
+    dropped: u64,
+}
+
+struct PauseCur {
+    /// When the rendezvous completed (no domain RUNNING any more).
+    stopped: Option<Instant>,
+    /// Pause kind if the plan names it at stop time (concurrent plans); ""
+    /// means "decide at resume from last_collection_full_heap".
+    kind: &'static str,
+    /// Mutators visited for root scanning in this pause.
+    domains: usize,
+}
+
+/// The kind of the pause that is starting, for plans whose pause kind is known
+/// at stop time (concurrent plans: `current_pause` is set by
+/// `schedule_collection`, which runs before StopMutators, and cleared again by
+/// `end_of_gc` before resume). A sliced-marking plan (Bactrian) runs a mark
+/// quantum inside every nursery pause of a marking cycle, and a sweep quantum
+/// while the deferred sweep is pending; those are tagged `+mark` / `+sweep`.
+fn pause_kind_at_stop() -> &'static str {
+    use mmtk::plan::concurrent::Pause;
+    let plan = crate::mmtk().get_plan();
+    let Some(c) = plan.concurrent() else {
+        return "";
+    };
+    match c.current_pause() {
+        Some(Pause::Full) => "full",
+        Some(Pause::InitialMark) => "initial",
+        Some(Pause::FinalMark) => "final",
+        Some(Pause::Nursery) => {
+            let mark = c.marking_confined_to_pauses() && c.concurrent_work_in_progress();
+            let sweep = !c.sweep_drained();
+            match (mark, sweep) {
+                (false, false) => "nursery",
+                (true, false) => "nursery+mark",
+                (false, true) => "nursery+sweep",
+                (true, true) => "nursery+mark+sweep",
+            }
+        }
+        None => "",
+    }
 }
 
 /// Mature (major-heap) reserved pages right after the last FULL collection — the
@@ -581,6 +655,52 @@ pub extern "C" fn mmtk_ocaml_pause_log_enable() {
     PAUSE_LOG_ON.store(true, Ordering::Relaxed);
 }
 
+/// Arm per-pause recording in stderr mode (`MMTK_PAUSE_LOG=1`): as
+/// `mmtk_ocaml_pause_log_enable`, plus one `[mmtk-pause]` line per pause.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_pause_log_enable_stderr() {
+    PAUSE_LOG_STDERR.store(true, Ordering::Relaxed);
+    PAUSE_LOG_ON.store(true, Ordering::Relaxed);
+}
+
+/// Print the `[mmtk-pause-summary]` line to stderr (atexit, stderr mode).
+/// count/total/max/full are exact over every pause; the percentiles are over
+/// the recorded pauses (all of them unless `capped=1`). Nearest-rank
+/// percentiles, all durations in microseconds.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_pause_log_summary() {
+    if !PAUSE_LOG_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    let st = PAUSE_STATS.lock().unwrap();
+    let mut d: Vec<u64> = PAUSE_LOG.lock().unwrap().iter().map(|r| r.dur_nanos).collect();
+    d.sort_unstable();
+    let pct = |p: f64| -> f64 {
+        if d.is_empty() {
+            return 0.0;
+        }
+        let rank = ((p / 100.0) * d.len() as f64).ceil() as usize;
+        d[rank.clamp(1, d.len()) - 1] as f64 / 1e3
+    };
+    let us = |ns: u64| ns as f64 / 1e3;
+    let mean = if st.n == 0 { 0.0 } else { us(st.total_nanos) / st.n as f64 };
+    use std::io::Write;
+    let line = format!(
+        "[mmtk-pause-summary] count={} full={} total_us={:.1} mean_us={:.1} p50_us={:.1} \
+         p95_us={:.1} p99_us={:.1} max_us={:.1} capped={}\n",
+        st.n,
+        st.full,
+        us(st.total_nanos),
+        mean,
+        pct(50.0),
+        pct(95.0),
+        pct(99.0),
+        us(st.max_nanos),
+        (st.dropped > 0) as u8
+    );
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
 /// Write the recorded pauses as NDJSON to `path` (NUL-terminated C string).
 /// Called from the runtime's atexit handler. Returns the number written, or
 /// -1 if the path could not be opened.
@@ -622,6 +742,81 @@ pub unsafe extern "C" fn mmtk_ocaml_pause_log_dump(path: *const std::os::raw::c_
         return -1;
     }
     recs.len() as i64
+}
+
+/// Book one completed pause (per-pause log armed). `start` = entry to
+/// stop_all_mutators, `dur` = start -> mutators woken (the same span GC_NANOS
+/// sums), `resume_at` = entry to resume_mutators. Runs on the GC worker after
+/// the wake-up, so the stderr write is outside the measured pause.
+fn record_pause(
+    start: Instant,
+    dur: Duration,
+    resume_at: Instant,
+    was_full: bool,
+    gen_plan: bool,
+    epoch: u64,
+) {
+    let (stopped, kind, domains) = {
+        let mut cur = PAUSE_CUR.lock().unwrap();
+        let r = (cur.stopped.take(), cur.kind, cur.domains);
+        cur.kind = "";
+        cur.domains = 0;
+        r
+    };
+    let kind = match (kind, was_full, gen_plan) {
+        ("", true, true) => "full",
+        ("", false, true) => "nursery",
+        // No nursery/full distinction: every pause is a whole-heap GC.
+        ("", _, false) => "gc",
+        (k, _, _) => k,
+    };
+    let dur_ns = dur.as_nanos() as u64;
+    let seq = {
+        let mut st = PAUSE_STATS.lock().unwrap();
+        st.n += 1;
+        st.full += was_full as u64;
+        st.total_nanos += dur_ns;
+        st.max_nanos = st.max_nanos.max(dur_ns);
+        let mut log = PAUSE_LOG.lock().unwrap();
+        if log.len() < PAUSE_LOG_CAP {
+            let mut t0 = PAUSE_LOG_T0.lock().unwrap();
+            let base = *t0.get_or_insert(start);
+            drop(t0);
+            log.push(PauseRecord {
+                at_nanos: start.saturating_duration_since(base).as_nanos() as u64,
+                dur_nanos: dur_ns,
+                full: was_full,
+            });
+        } else {
+            st.dropped += 1;
+        }
+        st.n
+    };
+    if PAUSE_LOG_STDERR.load(Ordering::Relaxed) {
+        let us = |d: Duration| d.as_nanos() as f64 / 1e3;
+        let (ttsp, gc) = match stopped {
+            Some(s) => (
+                us(s.saturating_duration_since(start)),
+                us(resume_at.saturating_duration_since(s)),
+            ),
+            None => (0.0, 0.0),
+        };
+        // Format first, then ONE write(2): eprintln! may split a line into
+        // several writes, which interleave with the C runtime's own stderr
+        // output from other threads (seen with MMTK_VERBOSE on 8 domains).
+        use std::io::Write;
+        let line = format!(
+            "[mmtk-pause] n={} kind={} stw_us={:.1} ttsp_us={:.1} gc_us={:.1} domains={} epoch={}\n",
+            seq,
+            kind,
+            us(dur),
+            ttsp,
+            gc,
+            domains,
+            epoch
+        );
+        let _ = std::io::stderr().write_all(line.as_bytes());
+    }
 }
 
 extern "C" {
@@ -899,6 +1094,13 @@ impl Collection<OCamlVM> for VMCollection {
             }
         }
 
+        // Rendezvous complete (per-pause log: ttsp = pause start -> here).
+        let stopped_at = if PAUSE_LOG_ON.load(Ordering::Relaxed) {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
         // World stopped: field slots cannot change until resume — enable the
         // trusted classify/load fast path for this pause (concurrent plans).
         if DYNAMIC_TRUSTED.load(Ordering::Relaxed) {
@@ -947,13 +1149,27 @@ impl Collection<OCamlVM> for VMCollection {
         // pause so `mutators()` and `number_of_mutators()` agree for its whole
         // duration (see active_plan::PAUSE_MUTATORS).
         crate::active_plan::freeze_mutators_for_pause();
+        let mut visited = 0usize;
         for mutator in crate::active_plan::VMActivePlan::mutators() {
             mutator_visitor(mutator);
+            visited += 1;
+        }
+        if let Some(stopped) = stopped_at {
+            let mut cur = PAUSE_CUR.lock().unwrap();
+            cur.stopped = Some(stopped);
+            cur.kind = pause_kind_at_stop();
+            cur.domains = visited;
         }
     }
 
     /// GC worker: collection finished — un-poison every domain and wake them.
     fn resume_mutators(_tls: VMWorkerThread) {
+        // Per-pause log: end of the GC work proper (gc_us = stopped -> here).
+        let resume_at = if PAUSE_LOG_ON.load(Ordering::Relaxed) {
+            Some(Instant::now())
+        } else {
+            None
+        };
         crate::active_plan::thaw_mutators_after_pause();
         // Mutators are about to run again: back to full revalidation before any
         // wake (concurrent plans only; see DYNAMIC_TRUSTED).
@@ -975,6 +1191,7 @@ impl Collection<OCamlVM> for VMCollection {
         // non-generational plan `.generational()` is None, so EVERY GC counts as a
         // full GC and the trigger is inert — behaviour is unchanged there.
         let plan = crate::mmtk().get_plan();
+        let gen_plan = plan.generational().is_some();
         // A completed CONCURRENT cycle (FinalMark just ended) is a major
         // collection for pacing purposes, exactly like a STW Full: the mature
         // heap was retraced + swept, so the pressure baseline and the
@@ -1121,6 +1338,7 @@ impl Collection<OCamlVM> for VMCollection {
         GC_COUNT.fetch_add(1, Ordering::Relaxed);
         let mut s = STW.lock().unwrap();
         s.epoch = s.epoch.wrapping_add(1);
+        let epoch = s.epoch;
         s.gc_active = false;
         GC_ACTIVE.store(false, Ordering::SeqCst);
         STW_COND.notify_all();
@@ -1129,16 +1347,8 @@ impl Collection<OCamlVM> for VMCollection {
             let dur = start.elapsed();
             GC_NANOS.fetch_add(dur.as_nanos() as u64, Ordering::Relaxed);
             // Keep the individual pause too, not just the running sum (#R1).
-            if PAUSE_LOG_ON.load(Ordering::Relaxed) {
-                let mut t0 = PAUSE_LOG_T0.lock().unwrap();
-                let base = *t0.get_or_insert(start);
-                let at = start.saturating_duration_since(base).as_nanos() as u64;
-                drop(t0);
-                PAUSE_LOG.lock().unwrap().push(PauseRecord {
-                    at_nanos: at,
-                    dur_nanos: dur.as_nanos() as u64,
-                    full: was_full,
-                });
+            if let Some(resume_at) = resume_at {
+                record_pause(start, dur, resume_at, was_full, gen_plan, epoch);
             }
         }
     }

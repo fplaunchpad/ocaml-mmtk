@@ -214,6 +214,15 @@ void mmtk_ocaml_pause_log_enable(void);
  *  records written, 0 if recording was never armed, or -1 on I/O failure. */
 int64_t mmtk_ocaml_pause_log_dump(const char *path);
 
+/** MMTK_PAUSE_LOG=1: arm recording and print one line per pause to stderr,
+ *    [mmtk-pause] n=<seq> kind=<k> stw_us=<f> ttsp_us=<f> gc_us=<f> domains=<d> epoch=<e>
+ *  (written by the GC worker after the mutators are woken). */
+void mmtk_ocaml_pause_log_enable_stderr(void);
+
+/** Print the exit summary line (stderr mode),
+ *    [mmtk-pause-summary] count= full= total_us= mean_us= p50_us= p95_us= p99_us= max_us= capped= */
+void mmtk_ocaml_pause_log_summary(void);
+
 /** Register a custom block (with a finalize op) on MMTk's finalizer queue. Kept
  *  alive + forwarded until unreachable, then returned by mmtk_ocaml_poll_finalizable. */
 void mmtk_ocaml_add_finalizer(const void* addr);

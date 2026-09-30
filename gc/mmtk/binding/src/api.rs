@@ -104,10 +104,10 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     let concurrent_plan = matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR");
     let stw_trusted = !concurrent_plan && trusted_allowed;
     mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
-    // Copy counting is telemetry: arm it only when someone will read it.
-    if std::env::var_os("MMTK_VERBOSE").is_some()
-        || std::env::var_os("MMTK_PAUSE_LOG").is_some()
-    {
+    // Copy counting is telemetry: arm it only when someone will read it. Not
+    // under MMTK_PAUSE_LOG: nothing there reads the count, and its locked
+    // per-copy add would inflate the very pauses being measured.
+    if std::env::var_os("MMTK_VERBOSE").is_some() {
         mmtk_ocaml_common::object_model::COUNT_COPIES
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }

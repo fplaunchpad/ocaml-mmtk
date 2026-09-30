@@ -5,6 +5,48 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-30 (night) - per-pause log (`MMTK_PAUSE_LOG=1`; ROADMAP items 33, 34, 35)
+
+Items 33 (RQ7 pause-time decision), 34 and 35 need wall split into mutator
+time and pause time, per pause. `MMTK_PAUSE_LOG=<path>` (backlog R1) already
+kept every pause in memory and wrote NDJSON at exit; `MMTK_PAUSE_LOG=1` now
+prints instead, for the bench drivers (`--pauses` in `quick/quickbench.py`):
+
+    [mmtk-pause] n=<seq> kind=<k> stw_us=<f> ttsp_us=<f> gc_us=<f> domains=<d> epoch=<e>
+    [mmtk-pause-summary] count= full= total_us= mean_us= p50_us= p95_us= p99_us= max_us= capped=
+
+- *stw_us* is the span `MMTK_VERBOSE`'s GC time already sums: entry to
+  `stop_all_mutators` (before `gc_active` is raised and the domains are
+  poisoned) to just after `resume_mutators` has un-poisoned the domains,
+  bumped the epoch and notified the parkers. It includes the rendezvous. It
+  does NOT include the time from a mutator's collection request to the GC
+  worker entering `stop_all_mutators` (worker wake-up latency). *ttsp_us* is
+  the rendezvous (start to "no domain RUNNING"); *gc_us* is stopped to entry
+  of `resume_mutators` (the GC work proper); the remainder is pacing
+  bookkeeping plus the wake.
+- *kind*: generational plans `nursery` / `full` (`last_collection_full_heap`);
+  concurrent plans the pause the plan scheduled (`initial`, `final`, `full`,
+  `nursery`, with `+mark` / `+sweep` when Bactrian's sliced marking or
+  incremental sweep runs a quantum in that nursery pause); plans with neither
+  `gc` (every pause whole-heap, counted as full). *domains* = mutators visited
+  for roots (a Domain.spawn program with 8 workers shows 9).
+- The line is formatted then written with one `write(2)` by the GC worker
+  after the wake-up, outside the measured span; `eprintln!` split lines and
+  interleaved with the C runtime's stderr on 8 domains.
+- Records are capped at 2^20 (24 MB); count, total, max and full stay exact
+  past the cap, percentiles cover the recorded pauses, `capped=1` says so.
+- `MMTK_PAUSE_LOG` no longer arms copy counting (only `MMTK_VERBOSE` does):
+  nothing in the pause log reads it, and its locked per-copy add inflated the
+  pauses being measured.
+
+*Verified* (M4, native and bytecode): the per-line count equals
+`MMTK_VERBOSE`'s GC count and the summary total its GC time — binarytrees 20
+GenImmix 241 pauses (13 full) / 1790 ms both ways; Bactrian 250 (11 full; 1
+initial, 4 nursery+mark) / 1788 ms; Immix 113 / 6836 ms; par_binarytrees 20
+GenImmix DOMAINS=8, 3 runs, 178 / 172 / 176 pauses, totals equal to the ms.
+Flag off: binarytrees 20, 6 interleaved reps, 1.78 s (base) vs 1.80 s median,
+within run-to-run noise (±0.1 s).
+
 ## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused and fixed (item 13, PR 51, merged); GH issue 39 root-caused with rr and fixed (item 28, PR 52, merged); macOS RSS floor diagnosed and fixed (PR 53, merged), space-time re-sweep; space-time driver review (KNOWN FAILURES)
 
 Evidence labels as in the entries below. Local runs are macOS arm64.
