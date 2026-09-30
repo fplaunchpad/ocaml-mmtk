@@ -9,10 +9,14 @@ collector at startup with `MMTK_PLAN`; the default is **GenImmix**.
 **Research prototype (status 2026-09-30).** Several correctness bugs, including
 silent data corruption under the default plan, were found and fixed on
 2026-09-29 and 2026-09-30; see [known limits](#what-works-and-what-is-still-open).
-Still open, and worth knowing before you try it: a rare collector abort when
+Among them, fixed on mainline on 2026-09-30: a rare collector abort when
 domains are created and terminated rapidly
-([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)); a `fork`ed
-child cannot run a collection
+([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39), PR 52;
+the process-exit path that force-cancels peer domains still deregisters them
+without the fix's guard) and a segfault instead of `Out_of_memory` when a
+pinned heap is too small
+([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49), PR 51).
+Still open, and worth knowing before you try it: a `fork`ed child cannot run a collection
 ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)); and results
 under the LXR plan are provisional.
 
@@ -101,30 +105,49 @@ the heap and so does not exercise the heap-growth fix):
 - GenCopy's GC workers abandoned part of a copy block at every nursery
   collection, which inflated its major-collection pacing
   ([ROADMAP](ROADMAP.md) item 15).
+- LXR kept memory it should have freed: its sweeps refused dead blocks,
+  resumed continuations never released what their stacks referenced, and
+  2-bit counts saturated. `chameneos_redux` now runs at a 64 MiB heap with no
+  backup traces (it needed 256 MiB); the cost is 5–10% wall time under LXR.
+  Verified with the effects tests and pinned-heap probes, not a full LXR
+  testsuite run ([ROADMAP](ROADMAP.md) item 21).
 
 **Known correctness limits (2026-09-30):**
 
-- A GC worker occasionally aborts with `pointer being freed was not allocated`
-  when domains are spawned and joined rapidly while another domain allocates
-  ([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)): about 1–3%
-  of runs of a stress program (default plan, debug runtime, bytecode, macOS).
-  Whether it affects the release runtime, native code or Linux is unknown. It
-  is a memory-safety bug in the collector; its cause is unknown. Linux CI also
-  showed two one-off crashes in multi-domain tests on 2026-09-29 (a
-  `double free` abort under ConcurrentImmix, a segfault under GenCopy); whether
-  they are the same bug is unknown.
+- **Fixed 2026-09-30.** A GC worker occasionally aborted with `pointer being freed was not allocated`
+  (or segfaulted) when domains were spawned and joined rapidly while another
+  domain allocated
+  ([GH issue 39](https://github.com/fplaunchpad/ocaml-mmtk/issues/39)): a few
+  percent of runs of a stress program, on the release and debug runtimes,
+  native and bytecode, macOS and Linux. Cause (found with `rr`): a terminating
+  domain's buffer flush raced a collection's flush of the same buffers, so one
+  buffer was freed twice. Fixed by
+  [PR 52](https://github.com/fplaunchpad/ocaml-mmtk/pull/52) (merged,
+  `0015fbf179`); GH issue 39 is closed. Residual: when the main domain
+  force-cancels peer domains at process exit, their deregistration still
+  flushes without the fix's guard.
+  Two one-off Linux CI crashes in multi-domain tests (a `double free` under
+  ConcurrentImmix, a segfault under GenCopy) are plausibly the same bug.
+- **Fixed 2026-09-30.** At a pinned heap too small for the program, a program could segfault in the
+  collector's root scan instead of raising `Out_of_memory`, under every plan
+  that collects on the retry
+  ([GH issue 49](https://github.com/fplaunchpad/ocaml-mmtk/issues/49)). Fixed by
+  [PR 51](https://github.com/fplaunchpad/ocaml-mmtk/pull/51) (merged,
+  `ce2dd86167`, with the test `gc-roots/oom_in_call_gc.ml`); GH issue 49 is closed.
 - A `fork`ed child has none of the collector's worker threads, so a collection
   in the child cannot run
   ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)). Explicit
   `Gc` calls in the child are no-ops; a child that allocates enough to need a
   collection spins at 100% CPU.
-- LXR results are provisional. With the wrong-results fix, LXR retains a
-  whole block per survivor, so it needs much more memory than it appeared
-  to (`chameneos_redux` needs a 256 MiB heap where it previously
-  seemed to run in 64 MiB), and it still fails a set of tests locally and on
-  Linux CI. The causes are diagnosed, with fixes not yet merged
-  ([ROADMAP](ROADMAP.md) item 21). LXR does not clear weak references, so
-  `Weak.get` can return freed memory (item 31).
+- LXR results are provisional. LXR still retains a whole block per surviving
+  object (it neither reuses partly free blocks nor evacuates survivors), so a
+  small live set can still exhaust a small heap, and it still fails a set of
+  tests locally and on Linux CI ([ROADMAP](ROADMAP.md) item 21). LXR does not
+  count or clear weak references, so `Weak.get` can return freed memory: do
+  not use LXR for programs that use `Weak` or `Ephemeron`
+  ([GH issue 44](https://github.com/fplaunchpad/ocaml-mmtk/issues/44)). Its
+  backup trace also reaches some objects whose reference count is zero
+  ([GH issue 45](https://github.com/fplaunchpad/ocaml-mmtk/issues/45)).
 - Under Bactrian, the native compiler (and, once, a test program)
   intermittently fails with `Out of memory` on Linux CI at a 4 GiB heap
   ([GH issue 36](https://github.com/fplaunchpad/ocaml-mmtk/issues/36)); cause
@@ -188,7 +211,7 @@ These plans support **both bytecode and native code**:
 | **StickyImmix** | Generational collection with an in-place nursery; stop-the-world. |
 | **Bactrian** | Copying nursery and Immix mature heap; adaptive full or sliced stop-the-world major collection and incremental sweep by default. Optional worker-concurrent marking. |
 | **ConcurrentImmix** | Concurrent marking with a deletion write barrier; mature reclamation remains stop-the-world. |
-| **LXR** | In-place reference counting on Immix, with stop-the-world backup tracing for cycles. **Provisional: high memory use and known test failures. Requires a pinned heap.** |
+| **LXR** | In-place reference counting on Immix, with stop-the-world backup tracing for cycles. **Provisional: block-granularity memory retention, unsound weak references, and known test failures. Requires a pinned heap.** |
 | **GenCopy** | Copying nursery and copying mature heap; stop-the-world. |
 | **SemiSpace** | Whole-heap copying between two spaces; stop-the-world. |
 | **NoGC** | Allocation without reclamation, useful for bounded experiments. |
@@ -222,9 +245,15 @@ heap critically full. Earlier validation included single-domain runs and
 multi-domain `par_binarytrees` at 1–32 domains, but those checks did not exercise
 the pattern that gave wrong results
 ([GH issue 26](https://github.com/fplaunchpad/ocaml-mmtk/issues/26), fixed on
-2026-09-29). With that fix, LXR needs much more memory than earlier runs
-suggested: by source reading, each block holding a survivor stays whole, because
-this port neither reuses partly free blocks nor evacuates survivors. This and
+2026-09-29). With that fix, LXR needed much more memory than earlier runs
+suggested. The retention fixes merged on 2026-09-30 (sweeps no longer refuse
+dead blocks, resumed continuations release their stack referents, 4-bit
+reference counts by default) removed most of it, but each block holding a
+survivor still stays whole, because this port neither reuses partly free
+blocks nor evacuates survivors. Line reuse waits on weak-reference handling
+([GH issue 44](https://github.com/fplaunchpad/ocaml-mmtk/issues/44)) and a
+zero-count anomaly
+([GH issue 45](https://github.com/fplaunchpad/ocaml-mmtk/issues/45)). This and
 the remaining test failures are tracked in [`ROADMAP.md`](ROADMAP.md) (open
 item 21). The
 [release-counter abort](https://github.com/fplaunchpad/ocaml-mmtk/issues/25) is
@@ -248,6 +277,7 @@ Environment variables apply at process startup. Sizes ending in `_MB` are MiB;
 | `MMTK_VERBOSE` | Unset | Any value, including `0`, enables initialization details and an exit summary; unset it to disable. |
 | `MMTK_PAUSE_LOG` | Unset | Path for per-pause stop-the-world records, useful while GC-event emission through `runtime_events` is unimplemented. |
 | `MMTK_TRANSPARENT_HUGEPAGES` | `true` on Linux; off elsewhere | Request transparent hugepages on Linux. Record this setting in memory comparisons. |
+| `MMTK_RC_RETAIN` | Unset | LXR only. Any value prints one `[RC-RETAIN]` line per pause (held vs live memory, continuation-resume decrements, dead-cycle counts) and `[RC-SANITY]` lines for traced objects with a zero count. Diagnostic. |
 | `MMTK_ALLOC_JITTER` | `6` | Vary placement before bump allocations of at least 2 KiB, using up to 63 cache-line pads. `0` disables this padding. |
 
 Both bounded nurseries and explicit fixed pins have a guard against a nursery
@@ -295,16 +325,20 @@ defaults rather than copying settings from historical runs.
 GC performance is a space-time curve, so every result pairs wall time with peak
 RSS, and a collector wins only where its front (max RSS against wall, over the
 heap and nursery knobs for MMTk and `space_overhead` × minor-heap size for
-vanilla) lies below and to the left of vanilla's. The first sweep (2026-09-30,
-Apple M4 Pro) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on any
-GC-heavy bench today. The gap is a memory floor: MMTk's lowest RSS sits
-60–90 MiB above vanilla's on every such bench, while its times at that RSS are
-near parity on `kb` and LU and about 2× on `binarytrees`. Where MMTk is faster, it
-is faster only at more memory: Immix beats vanilla on single-domain
-`chameneos_redux` (1.05 s vs 1.37 s) at 3× the RSS (117 vs 37 MiB), and the
-generational plans take 2.6–3.1× Immix's time there.
+vanilla) lies below and to the left of vanilla's. The current sweep
+(2026-09-30, Apple M4 Pro, after removing a macOS artefact in which mmtk-core
+memset every fresh mapping and so made it resident; mmtk-core `5454281016`,
+pinned by PR 53, merged) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on
+any GC-heavy bench today. On `binarytrees` the gap is collector speed:
+GenImmix's front starts at 94 MiB / 1.64 s beside vanilla's default
+(91 MiB / 1.51 s), but vanilla's curve falls faster, and at equal RSS vanilla
+is 1.15–1.54× faster. On `kb` and LU what remains is a 9–16 MiB memory floor
+and 3–22 % time. Where MMTk is faster, it is faster only at more memory:
+`matrix_multiplication` (0.58 s vs 0.76 s at 27–31 vs 19 MiB) and Immix on
+single-domain `chameneos_redux` (1.02 s vs 1.33 s at 74 vs 37 MiB), where the
+generational plans take 2.7–3.3× Immix's time.
 
-![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/summary.png)
+![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/summary.png)
 
 Every graph with its reading, the quick-panel tables (sequential and parallel),
 configuration, raw data and history: [`RESULTS.md`](RESULTS.md). Measurement
