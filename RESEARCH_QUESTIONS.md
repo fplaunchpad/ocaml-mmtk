@@ -285,6 +285,27 @@ slot handling, so the barrier-cost finding (near-free on OCaml's init-write-domi
 re-checked with the rest: every LXR time and RSS number, including the binarytrees and
 `chameneos_redux` figures, must be re-measured before it is used.
 
+**LXR status (2026-09-30): capacity diagnosed, fixes not landed.** The capacity problem (ROADMAP item 21)
+has four separate causes on `chameneos_redux` and one structural cause on the small-live-set probe: the
+port neither reuses lines under RC nor evacuates the nursery, so held memory is 62x live on the probe
+(42x of it from block granularity), and the port dropped the reference LXR's line reuse, nursery
+evacuation, mature defragmentation and Full-on-emergency (source reading of `lxr/lxr-v0.32.0`). LXR also
+carries an RSS tax of 50-100 MiB over Immix at the same pinned heap. Candidate fixes are on the unmerged
+`research/lxr-capacity` branches. **Consequence for RQ1:** "the field barrier is ~free" survives (it is a
+mutator-side measurement); "in-place RC wins at memory parity" is **unproven** — the earlier parity was
+heap-size parity, not RSS parity, and every effects/queue workload was invalid before the GH issue 26
+fix. The re-measurement must be at RSS parity with the candidate fixes applied (4-bit counts, sweep
+guard off, resume decrements, the pending-request wait, line reuse off, since line reuse is unsafe while
+weak references are unsound, ROADMAP item 31).
+
+*Observation (2026-09-30; novelty unverified): the RC bit width is a workload-sensitive parameter.*
+With 2-bit sticky counts, OCaml's stdlib `Queue` produces a nepotism-like effect under deferred RC:
+`Queue.pop` leaves the popped cell's `next` set, so one cell whose count has stuck keeps every later cell
+alive until a backup trace — 10-20 MiB per epoch on `chameneos_redux`, ~229k each of queue cells,
+closures and continuations at the next Full. 4-bit counts remove it (verified for the counts; inferred
+for the exact pin). The width that suffices depends on the program's sharing pattern, not only on the
+heap.
+
 ### RQ2 — How does a multicore *functional* workload map onto the GC design space? *(characterization; lowest research risk; precursor to RQ1)*
 
 **The platform.** M9 is done, and ROADMAP #15 wired the rest of MMTk's plans cheaply — *one language,
@@ -336,6 +357,15 @@ heap as its workload** — confirmed gap. Effect handlers are new and near-uniqu
 genuinely first-of-kind GC characterization. **Venue:** ISMM / OOPSLA. **Risk:** medium. **Novelty:
 genuine but narrow** — the contribution is the measurement + the (possibly negative / surprising)
 mechanism result, so it must be honest about what fibers do and don't put in the collected heap.
+
+*Observation (2026-09-30; novelty unverified; ROADMAP item 21): deferred RC on a language with one-shot
+continuations needs a barrier on resume.* A suspended fiber stack is a mutable object that the mutator
+writes without a field barrier. Under the LXR port, resuming a promoted continuation never decremented
+what its stack referenced (~38 KiB leaked on `chameneos_redux`; balanced once a hook on resume,
+`caml_mmtk_cont_resumed` in `runtime/fiber.c`, was prototyped). It is the RC analogue of
+`caml_darken_cont`, which the stock concurrent marker needs for the same reason. This supports the
+hypothesis's framing — fibers matter to a collector through their stacks as roots/mutable objects, not
+as heap pressure — and adds an RC-specific obligation.
 
 ### RQ4 — Practitioner report: retrofitting MMTk onto a *GC-friendly* language *(bank-it / experience; near-term)*
 
@@ -389,7 +419,16 @@ Two further observations these fixes support (observations, not results):
   pacing law.* The dynamic heap sized itself from the reservation seen at a heap-full poll, so Immix and
   SemiSpace grew their heaps on an all-garbage program (item 20(a), fixed by sizing from actual pending
   requests); GenCopy's mature-pressure law reads reserved pages that GC-worker block tails inflate
-  (items 15, 20(b), open).
+  (items 15, 20(b); fixed 2026-09-30 by keeping the worker copy buffers across nursery GCs).
+- *A request API that returns before its effect is a semantic gap, not a timing detail.* Explicit `Gc`
+  requests returned before their pause ran (ROADMAP item 22, fixed 2026-09-30): the host's API promises
+  a completed collection, the framework's promises a scheduled one. Making them synchronous also showed
+  that the guarantee differs per plan (a concurrent plan can only promise one pause, not a whole cycle).
+- *Weak references and ephemerons under deferred RC are a design gap in the port* (2026-09-30;
+  observation, novelty unverified). The LXR port never counts or clears weak referents, so `Weak.get`
+  can return freed memory (ROADMAP item 31, verified with `weak_array_par`). A host with weak arrays
+  and ephemerons as first-class runtime features needs the RC plan to define when a weak slot is
+  cleared; the port has no such rule yet.
 
 **Honest framing.** The headline is not "OCaml was easy." It is **"a GC-friendly design eliminates the
 *root/motion* impedance the Julia/CRuby reports spent most of their effort on, but the *coordination*
@@ -545,7 +584,8 @@ accounting meeting a pacing law modelled on OCaml's `space_overhead`. For RQ7 th
 expressiveness point: matching stock's pacing may need a live-bytes or allocated-words signal that
 the framework does not currently provide to the plan. (Update, 2026-09-29: the first failure is fixed
 in mmtk-core by sizing the demand from the actual pending requests, and SemiSpace turned out to be
-affected too; the GenCopy one is open. See RQ4's observations.)
+affected too. Update, 2026-09-30: the GenCopy one is fixed too, by keeping the worker copy buffers
+across nursery GCs. Neither fix gives the law a live-bytes signal. See RQ4's observations.)
 
 ---
 
@@ -832,8 +872,9 @@ protocol). Detail + the fence-audit numbers: `gc/mmtk/NOTES.md` (2026-06-25).
   is per-RQ research, not bring-up.
 - **RQ1:** *(landed)* ConcurrentImmix + the SATB barrier, and (2026-07-02) the **LXR** RC plan
   (`MMTK_PLAN=LXR`, experimental; results provisional — the silent wrong-results bug is fixed and merged
-  (2026-09-29, ROADMAP item 17), but the fix exposed a capacity problem and LXR still fails a set of tests
-  (open item 21); all LXR time/RSS numbers need re-measuring). *Remaining:* a richer latency harness and a mutation-rate /
+  (2026-09-29, ROADMAP item 17), but the fix exposed a capacity problem, diagnosed 2026-09-30 with
+  candidate fixes unmerged, and LXR still fails a set of tests (open items 21 and 31); all LXR time/RSS
+  numbers need re-measuring at RSS parity). *Remaining:* a richer latency harness and a mutation-rate /
   lifetime-dispersion instrument. *(This is the real research engineering.)*
 - **RQ2 / RQ3:** + a benchmark suite — Sandmark, the compiler, CLBG (in-repo), effect microbenchmarks for
   RQ3 — plus a per-benchmark allocation / survival / dispersion / mutation profiler. **RQ2 sub-bullet:** add

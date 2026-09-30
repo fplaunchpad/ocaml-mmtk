@@ -58,8 +58,11 @@ ConcurrentImmix, and the debug-runtime jobs passed. In the same run, Bactrian
 failed one compile with an intermittent out-of-memory
 ([GH issue 36](https://github.com/fplaunchpad/ocaml-mmtk/issues/36)), GenCopy
 failed `misc/darkening_work.ml`, an intermittent collection-count test that
-depends on pacing ([ROADMAP](ROADMAP.md) open item 15), and LXR failed its known
-set of tests (below). The suite includes disabled cases for unsupported features
+depends on pacing (fixed later that day, below), and LXR failed its known
+set of tests (below). On the
+[CI run](https://github.com/fplaunchpad/ocaml-mmtk/actions/runs/36668846658) of
+the explicit-`Gc` fix (below), every gating plan passed, GenCopy and Bactrian
+included, except LXR on that known set. The suite includes disabled cases for unsupported features
 and GC timing differences. Memprof is unsupported;
 [`runtime_events` GC-event emission](https://github.com/fplaunchpad/ocaml-mmtk/issues/20)
 is unimplemented, and [signal-delivery poll points](https://github.com/fplaunchpad/ocaml-mmtk/issues/19)
@@ -88,6 +91,16 @@ the heap and so does not exercise the heap-growth fix):
 - Creating domains while a collection was running could delay signal delivery
   to some domains, and tripped an assertion in the debug runtime
   ([GH issue 37](https://github.com/fplaunchpad/ocaml-mmtk/issues/37)).
+- `Gc.minor`, `Gc.major`, `Gc.full_major` and `Gc.compact` returned before
+  their collection ran, and `Gc.minor` requested no collection from MMTk. They
+  now return after a completed pause: a full-heap pause for the major calls on
+  the stop-the-world plans; on ConcurrentImmix and LXR one pause, not a whole
+  marking cycle or backup trace. Unlike stock OCaml, a major call is one
+  collection, not three, and each call is a real stop-the-world pause (about
+  0.5 ms).
+- GenCopy's GC workers abandoned part of a copy block at every nursery
+  collection, which inflated its major-collection pacing
+  ([ROADMAP](ROADMAP.md) item 15).
 
 **Known correctness limits (2026-09-30):**
 
@@ -102,17 +115,16 @@ the heap and so does not exercise the heap-growth fix):
   they are the same bug is unknown.
 - A `fork`ed child has none of the collector's worker threads, so a collection
   in the child cannot run
-  ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)). The fork
-  tests in the suite pass because nothing in them waits for a collection.
-- `Gc.major`, `Gc.full_major` and `Gc.compact` return before their collection
-  runs, and `Gc.minor` requests no collection from MMTk. Tests and benchmarks
-  that assume a collection has happened when these calls return can mislead. A
-  fix exists but is not merged.
+  ([GH issue 33](https://github.com/fplaunchpad/ocaml-mmtk/issues/33)). Explicit
+  `Gc` calls in the child are no-ops; a child that allocates enough to need a
+  collection spins at 100% CPU.
 - LXR results are provisional. With the wrong-results fix, LXR retains a
   whole block per survivor, so it needs much more memory than it appeared
   to (`chameneos_redux` needs a 256 MiB heap where it previously
   seemed to run in 64 MiB), and it still fails a set of tests locally and on
-  Linux CI.
+  Linux CI. The causes are diagnosed, with fixes not yet merged
+  ([ROADMAP](ROADMAP.md) item 21). LXR does not clear weak references, so
+  `Weak.get` can return freed memory (item 31).
 - Under Bactrian, the native compiler (and, once, a test program)
   intermittently fails with `Out of memory` on Linux CI at a 4 GiB heap
   ([GH issue 36](https://github.com/fplaunchpad/ocaml-mmtk/issues/36)); cause
