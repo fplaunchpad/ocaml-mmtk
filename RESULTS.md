@@ -5,22 +5,27 @@ peak RSS, and a plan is better than vanilla only where its front lies below and
 to the left of vanilla's. A single dynamic-heap cell (the quick panel) is a
 screening result; the fronts are the verdict. Method: [`PERFORMANCE.md`](PERFORMANCE.md).
 
-**Verdict (2026-09-30, Apple M4 Pro).** No MMTk plan dominates vanilla on any
-GC-heavy bench. On `binarytrees`, `kb` and `LU_decomposition` every plan is
-dominated: its lowest RSS sits 60–90 MiB above vanilla's, and at that RSS
-vanilla is at least as fast. Where MMTk is faster (`matrix_multiplication`,
-and Immix on single-domain `chameneos_redux`), it is faster only at 2–5× the
-memory, in a region vanilla's knobs never reach. The gap is a memory floor, not
-collector speed, and on macOS about 55 MiB of it per point is an artefact of
-mmtk-core zero-filling its mappings (see "What the curves say", item 1); a
-re-sweep without it is pending. The generational plans (GenImmix, Bactrian) take 2.6–3.1× the
-time of plain Immix on the effects-heavy `chameneos_redux`, and at too-small
-pinned heaps they segfault instead of raising `Out_of_memory` (GH issue 49,
+**Verdict (2026-09-30, Apple M4 Pro, after the macOS memset fix).** No MMTk
+plan dominates vanilla on any GC-heavy bench. Removing the macOS artefact
+(mmtk-core `5454281016`, pinned by ocaml-mmtk PR 53, pending merge) moved every
+MMTk front 40–66 MiB to the left, so the fronts now meet vanilla's and the
+comparison is front against front. On `binarytrees` the gap is collector speed,
+not memory: GenImmix's front starts at 94 MiB / 1.64 s, beside vanilla's
+default (91 MiB / 1.51 s), but vanilla's curve falls faster (0.85 s at
+116 MiB, where GenImmix needs 136 MiB for 1.31 s and 176 MiB for 0.98 s), so
+at equal RSS vanilla is 1.15–1.54× faster. On `kb` and `LU_decomposition` the
+gap is a residual memory floor of 9–16 MiB (GenImmix, Bactrian; Immix 30–37)
+plus 3–22 % time. Where MMTk is faster (`matrix_multiplication`, 0.76×
+vanilla's default time at 27–31 vs 19 MiB; Immix on single-domain
+`chameneos_redux`, 0.77× at 74 vs 37 MiB), it is faster only at more memory.
+The generational plans (GenImmix, Bactrian) take 2.25–2.51× vanilla's time on
+the effects-heavy `chameneos_redux` (2.7–3.3× Immix's), and at too-small pinned
+heaps they segfault instead of raising `Out_of_memory` (GH issue 49,
 root-caused; fix on PR 51, pending merge).
 
-## Space-time fronts (2026-09-30, M4 Pro)
+## Space-time fronts (2026-09-30, M4 Pro, after the memset fix)
 
-![Space-time fronts, five benches](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/summary.png)
+![Space-time fronts, five benches](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/summary.png)
 
 x = max RSS (MiB), y = wall (s); lower-left is better. Markers are all grid
 points, the solid line is each configuration's lower-left front, the hollow
@@ -29,84 +34,115 @@ ring is its default configuration, and the dashed curve is a
 run per point, 440 points, one GC worker, no dispersion: these are observed
 fronts over this grid. Classes are from the sweep's `SUMMARY.md`:
 *dominated* = vanilla's front is at least as good over the common memory
-budgets (each front's best point extended rightwards; only `binarytrees` has
-overlapping measured RSS); *faster only at higher RSS* = the fronts do not
-overlap and MMTk is faster but further right. The driver has no symmetric
-"smaller but slower" class; no point of this dataset needs it.
+budgets (each front's best point extended rightwards); *faster only at higher
+RSS* = MMTk is faster but its front lies further right. The driver has no
+symmetric "smaller but slower" class; no point of this dataset needs it. Each
+section ends with the same bench in the first sweep, whose MMTk RSS carried the
+macOS memset artefact (see "The macOS memset artefact" below). Vanilla's
+binaries were the same in both sweeps; its default point moved by up to 12 %
+between them (`kb` 0.45 → 0.40 s, `binarytrees` 1.64 → 1.51 s), which bounds
+single-run noise.
 
 ### binarytrees (depth 20)
 
-![binarytrees](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/spacetime_binarytrees.png)
+![binarytrees](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/spacetime_binarytrees.png)
 
-Vanilla's front runs from 64 MiB / 2.39 s to 162 MiB / 0.89 s (default:
-91 MiB / 1.64 s). The MMTk fronts start where vanilla's ends: GenImmix at
-156 MiB / 1.79 s, reaching 1.26 s at 188 MiB and 1.04 s at 233 MiB; Bactrian at
-159 MiB / 1.86 s; Immix at 132 MiB / 2.58 s. At ~160 MiB GenImmix takes 1.79 s
-against vanilla's 0.89 s, about 2×. All three plans are dominated. Six GenImmix
-points (32 and 48 MiB heaps) and eight Bactrian points (32 and 48 MiB, plus 64
-and 96 MiB with a 32 MiB nursery) segfaulted (GH issue 49; root-caused, fix on
-PR 51 pending merge, after which these points raise `Out_of_memory`); the six
-failed Immix points (32 and 48 MiB) raised `Out_of_memory` cleanly.
+Vanilla's front runs from 64 MiB / 2.17 s to 116 MiB / 0.85 s (default
+91 MiB / 1.51 s). GenImmix's front starts at 94 MiB / 1.64 s and reaches
+1.31 s at 136 MiB, 1.20 s at 142 MiB and 0.98 s at 176 MiB (default 167 MiB /
+1.21 s); every point on it but one uses the 32 MiB nursery, and a 4 MiB
+nursery costs 0.4–0.8 s at the same heap. Bactrian runs from 101 MiB / 1.74 s
+to 186 MiB / 1.05 s, Immix from 90 MiB / 2.41 s to 272 MiB / 0.97 s. The
+fronts now overlap: at 94.5 MiB vanilla (`o=120,s=1M`) takes 1.21 s and
+GenImmix 1.64 s (1.36×); at 136 MiB, 0.85 s against 1.31 s (1.54×); vanilla
+never needs more than 116 MiB for its best time, which GenImmix does not reach
+anywhere on the grid. The SUMMARY's 1.09× compares GenImmix's first point
+with vanilla's default, not with vanilla's front. All three plans are
+dominated. Six GenImmix points (32 and 48 MiB heaps) and eight Bactrian points
+(32 and 48 MiB, plus 64 and 96 MiB with a 32 MiB nursery) segfaulted (GH issue
+49; root-caused, fix on PR 51 pending merge and not in this build, after which
+these points raise `Out_of_memory`); the six failed Immix points (32 and
+48 MiB) raised `Out_of_memory` cleanly. Before the fix, the fronts started at
+156 MiB / 1.79 s (GenImmix), 159 / 1.86 (Bactrian) and 132 / 2.58 (Immix) and
+did not overlap vanilla's.
 
-**Takeaway: the allocation-heavy flagship loses by a full memory floor; the
-panel's "0.78×" is a point at 238 MiB that vanilla beats at 116 MiB.**
+**Takeaway: with the artefact gone, the allocation-heavy flagship loses on
+collector speed at a given heap, not on a memory floor: vanilla's curve falls
+faster with memory than any MMTk plan's.**
 
 ### kb (Knuth–Bendix)
 
-![kb](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/spacetime_kb.png)
+![kb](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/spacetime_kb.png)
 
-Vanilla's front lives at 7–39 MiB (0.61 → 0.38 s; default 8 MiB / 0.45 s).
-The MMTk fronts start at 82–86 MiB, and their nearest points are 1.02–1.14×
-vanilla's default time (Immix 86 MiB / 0.47 s, Bactrian 82 / 0.51, GenImmix
-82 / 0.52). Every plan is dominated.
+Vanilla's front lives at 7–39 MiB (0.44 → 0.36 s; default 8 MiB / 0.40 s).
+Bactrian starts at 22 MiB / 0.48 s and GenImmix at 23 MiB / 0.49 s, both
+reaching 0.39–0.40 s at 63 MiB (defaults 27 MiB / 0.44 s and 31 MiB / 0.45 s);
+Immix starts at 44 MiB / 0.43 s and reaches 0.38 s at 106 MiB. Against
+vanilla's default the nearest points are 1.20× (Bactrian), 1.22× (GenImmix)
+and 1.09× (Immix); against vanilla's best time (0.36 s at 39 MiB) MMTk's best
+is 1.05–1.13× at 1.6–5× the RSS. Every plan is dominated. Before the fix, the
+fronts started at 82 MiB (GenImmix, Bactrian) and 86 MiB (Immix), 75–79 MiB
+above vanilla's.
 
-**Takeaway: time is near parity; the loss is memory alone, a 10× larger
-footprint for a small-live-set program.**
+**Takeaway: a small-live-set program pays a 15 MiB floor (37 MiB for Immix)
+and 5–22 % time; the 10× footprint of the first sweep was the artefact.**
 
 ### matrix_multiplication (768)
 
-![matrix_multiplication](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/spacetime_matrix_multiplication.png)
+![matrix_multiplication](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/spacetime_matrix_multiplication.png)
 
-All 16 vanilla points sit at 19 MiB / 0.744 s: `o` and `s` do not move a
-fixed-live-set compute bench. Every MMTk plan runs at 0.59–0.67 s, but its
-lowest RSS is 41 MiB (GenImmix, with a 32 MiB nursery and a heap of 96 MiB or
-more; its other points are 112–134 MiB), 77 MiB (Immix) and 97 MiB (Bactrian).
-Class: faster only at higher RSS, 0.79× at the nearest point.
+All 16 vanilla points sit at 19 MiB / 0.73–0.76 s: `o` and `s` do not move a
+fixed-live-set compute bench. Every MMTk plan reaches 0.58 s, at 27 MiB
+(GenImmix, only with a 32 MiB nursery and a heap of 96 MiB or more; its other
+points are 48–71 MiB and 0.62–0.66 s, default 48 MiB / 0.64 s), 30 MiB
+(Immix) and 31 MiB (Bactrian). Class: faster only at higher RSS, 0.76× at the
+nearest point. Before the fix, the lowest RSS was 41 MiB (GenImmix, the same
+32 MiB-nursery points; its other points 112–134 MiB), 77 MiB (Immix) and
+97 MiB (Bactrian), with the same times.
 
-**Takeaway: the grids do not bracket each other here, so this is a floor
-comparison, not a front comparison: MMTk is ~20% faster at 2–5× the RSS.**
-Why the GenImmix floor drops from ~120 to 41 MiB with a 32 MiB nursery is open.
+**Takeaway: the grids still do not bracket each other, so this is a floor
+comparison: MMTk is ~24 % faster at 8–12 MiB more RSS (1.4–1.7×).** Why
+GenImmix drops from 48–71 to 27 MiB with a 32 MiB nursery and a large heap is
+open.
 
 ### LU_decomposition (900)
 
-![LU_decomposition](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/spacetime_LU_decomposition.png)
+![LU_decomposition](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/spacetime_LU_decomposition.png)
 
-Vanilla: 17 MiB / 0.79 s (default 17 MiB / 0.80 s). GenImmix and Bactrian
-start at 86 MiB and are 1.07–1.08× vanilla's time there, flattening to
-0.80–0.81 s at 106–114 MiB; Immix sits at 98 MiB / 1.05 s (1.32×) and does not
-improve with more memory. All dominated.
+Vanilla: 17 MiB / 0.79 s (default 17 MiB / 0.82 s). GenImmix and Bactrian
+start at 26 MiB / 0.84 s (1.03× vanilla's default, 1.07× its best) and flatten
+to 0.79–0.80 s at 46 MiB (defaults 31 MiB / 0.81 s); Immix sits at
+47–64 MiB / 1.02–1.03 s (1.25× vanilla's default) and does not improve with
+more memory. All dominated. Before the fix, GenImmix and Bactrian started at
+86 MiB / 0.85–0.86 s and Immix at 98 MiB / 1.05 s.
 
-**Takeaway: same shape as `kb` (near-parity time, 5× the memory); Immix's
-flat 1.3× is a separate, non-GC cost.**
+**Takeaway: same shape as `kb` (a 9 MiB floor for the generational plans,
+near-parity time); Immix's flat 1.25× is a separate, non-GC cost.**
 
 ### chameneos_redux (500000, 1 domain)
 
-![chameneos_redux](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/spacetime_chameneos_redux.png)
+![chameneos_redux](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/spacetime_chameneos_redux.png)
 
-Vanilla: 37–46 MiB, 1.38 → 1.14 s (default 37 MiB / 1.37 s). Immix is flat at
-1.03–1.05 s from 117 MiB up (default 118 MiB / 1.11 s): faster only at higher
-RSS, 0.77× at the nearest point. GenImmix (118–174 MiB, 3.1 → 2.7 s; default
-2.86 s) and Bactrian (120–140 MiB, 3.4 → 3.2 s; default 3.25 s) are dominated.
-At their defaults, all within 118–127 MiB, the generational plans take 2.6×
-(GenImmix, 2.86 s) and 2.9× (Bactrian, 3.25 s) Immix's time (1.11 s).
+Vanilla: 37–46 MiB, 1.33 → 1.09 s (default 37 MiB / 1.33 s). Immix is flat
+at 0.97–1.02 s from 74 MiB up (default 75 MiB / 1.01 s): faster only at higher
+RSS, 0.77× vanilla's default at 2× its RSS (0.94× vanilla's best, 1.09 s at
+46 MiB). GenImmix (58–139 MiB, 2.99 → 2.63 s; default 65 MiB / 2.77 s) and
+Bactrian (54–82 MiB, 3.33 → 3.09 s; default 64 MiB / 3.28 s) are dominated,
+2.25× and 2.51× vanilla's default time at their nearest points. At their
+defaults, all within 64–75 MiB, the generational plans take 2.7× (GenImmix)
+and 3.3× (Bactrian) Immix's time. Before the fix, all three fronts started at
+117–120 MiB, with the same times.
 
 **Takeaway: on continuation- and effects-heavy code, generationality itself is
-the cost; plain Immix beats vanilla by 23% at 3× the memory.**
+the cost; plain Immix beats vanilla's default by 23 % at twice the memory.**
 
 ## Quick panel (screening)
 
 One point per plan, at the dynamic heap: where each default policy lands, not
 which collector is better. Median wall ms (ratio to vanilla) / max RSS MiB.
+The panel was measured before the macOS memset fix, so every MMTk RSS
+figure below carries that artefact (spot re-measure after the fix: `nbody`
+GenImmix 25 → 9 MiB; see "The macOS memset artefact"); its times stand.
 
 ![Sequential time ratio](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_m4/seq_ratio.png)
 ![Sequential max RSS](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_m4/seq_rss.png)
@@ -161,54 +197,100 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
 
 ## What the curves say
 
-1. **RSS ≫ heap, and the floor loses every front.** A 64 MiB pinned GenImmix
-   heap gives 156–181 MiB RSS on `binarytrees`; a 32 MiB heap gives 82 MiB on
-   `kb`. MMTk's lowest RSS is 60–90 MiB above vanilla's on `binarytrees`, `kb`,
-   LU and `chameneos_redux`, and that offset, not collection speed, is what places each MMTk front to the
-   right of vanilla's. **Decomposed (2026-09-30), mostly a macOS artefact:**
-   off Linux, mmtk-core zero-fills every heap and side-metadata chunk it maps
-   (4 MiB each), so each chunk is fully resident, and no page is returned to
-   the OS. Measured with `vmmap`: `kb` at a 32 MiB heap is 60 MiB metadata +
-   12 mature + 8 nursery + 2.5 malloc = 82.6 MiB, where 1.4 MiB of metadata is
-   needed; `binarytrees` at 64 MiB is 60 mature + 16 nursery + 60 metadata
-   (5.7 needed) + 29–36 GC work-packet memory. So the RSS coordinate on
-   macOS includes ~55 MiB per point of this artefact, and roughly 73 % of
-   `kb`'s RSS is zero-filled metadata, not fragmentation. Godel's GenImmix
-   `kb`, 29 MiB, agrees. *Open:* remove the zero-fill on macOS and re-sweep
-   (pending); then the GC work-packet memory and the nursery's share. The
-   `matrix_multiplication` GenImmix drop from ~120 to 41 MiB with a 32 MiB
-   nursery says the floor is not static. Details: `gc/mmtk/NOTES.md`
-   2026-09-30 (evening).
-2. **Generational plans lose 2.6–3.1× to Immix on effects-heavy code**
-   (`chameneos_redux`, 1 domain, in both the sweep and the panel), and every
-   plan anti-scales with domains there. *Open:* is it continuation stacks
-   (fiber scanning or remembered-set traffic on stack writes) or the promotion
-   path? Needs a profile, not a guess.
+1. **The residual RSS floor is 10–20 MiB; on `binarytrees` the gap is
+   collector speed.** With the memset artefact removed, the generational
+   plans' fronts start 8–21 MiB above vanilla's on `kb`, LU,
+   `matrix_multiplication` and `chameneos_redux` (Immix 11–37 MiB), and a
+   compute-bound program's startup floor is 9 MiB (`nbody`, GenImmix; vanilla
+   2). On `binarytrees` GenImmix's first point (94 MiB) sits beside vanilla's
+   default (91 MiB), and what places the front to the right is time: at equal
+   RSS vanilla is 1.36× (94.5 MiB) to 1.54× (136 MiB) faster, and GenImmix
+   never reaches vanilla's 0.85 s. *Open, candidates for the floor:* the
+   nursery (bounded up to 16 MiB by default, outside the pinned heap and
+   counted twice in the heap budget); GC work-packet vectors (29–36 MiB of
+   malloc on `binarytrees` at a 64 MiB heap, measured before the fix and
+   independent of it); one mapped chunk per space and metadata spec; no page
+   return on macOS (every return path is Linux-only). *Open, for speed:*
+   MMTk's per-collection cost at a given heap (a nursery collection goes
+   through the full stop-the-world and work-packet machinery) and the
+   nursery size (a 4 MiB nursery costs 0.4–0.8 s on `binarytrees`). The
+   `matrix_multiplication` GenImmix drop from 48–71 to 27 MiB with a 32 MiB
+   nursery and a large heap says the floor is not static.
+2. **Generational plans lose 2.7–3.3× to Immix on effects-heavy code**
+   (`chameneos_redux`, 1 domain, at the defaults of this sweep; 2.6–3.1× in
+   the first sweep and the panel), and every plan anti-scales with domains
+   there. *Open:* is it continuation stacks (fiber scanning or
+   remembered-set traffic on stack writes) or the promotion path? Needs a
+   profile, not a guess.
 3. **The generational plans segfault instead of raising `Out_of_memory` at
-   too-small heaps** (GH issue 49; Immix fails cleanly at the 32 and 48 MiB heaps).
-   The same signature was first recorded in August, near the true OOM point.
-   **Root-caused:** raising `Out_of_memory` from inside `caml_call_gc` left
-   the saved-register pointer NULL, and a collection started by the raise
-   scanned that frame through it. Every plan is exposed; Immix rarely
-   collects on the retry. Fix on PR 51, pending merge; a correctness bug,
+   too-small heaps** (GH issue 49; Immix fails cleanly at the 32 and 48 MiB
+   heaps). The same 20 points fail in both sweeps. The same signature was
+   first recorded in August, near the true OOM point. **Root-caused:**
+   raising `Out_of_memory` from inside `caml_call_gc` left the saved-register
+   pointer NULL, and a collection started by the raise scanned that frame
+   through it. Every plan is exposed; Immix rarely collects on the retry. Fix
+   on PR 51, pending merge (not in either sweep's build); a correctness bug,
    independent of the performance question.
 4. **Compute-bound controls are flat** (0.99–1.01× time in the panel), so the
    MMTk mutator path costs nothing measurable on allocation-light code.
-   *Open:* none for time; their RSS is still the startup floor.
-5. **Host caveats bound all of the above.** MMTk's RSS on macOS includes
-   ~55 MiB of mmtk-core zero-fill artefact per point (item 1; GenImmix `kb`:
-   91 MiB on the M4, 29 MiB on godel), so the M4 fronts overstate MMTk's
-   memory; a re-sweep is pending. One run per sweep point and no dispersion;
-   cores were not pinned, so the M4's efficiency cores can take a run.
-   *Open:* repeat the sweep on godel with reps before quoting any front
-   crossing.
+   *Open:* none for time; their RSS is the startup floor (9 MiB after the fix).
+5. **Host caveats bound all of the above.** The macOS memset artefact is fixed
+   (below), so the M4 RSS coordinate no longer overstates MMTk's memory by
+   ~50 MiB, but macOS still returns no page to the OS. One run per sweep
+   point and no dispersion; vanilla's default point moved by up to 12 %
+   between the two sweeps with the same binaries; cores were not pinned, so
+   the M4's efficiency cores can take a run. *Open:* repeat the sweep on
+   godel with reps before quoting any front crossing, and to check the
+   residual floor under Linux RSS accounting.
+
+### The macOS memset artefact
+
+Off Linux, mmtk-core's `dzmmap`/`dzmmap_noreplace` zero-filled every heap and
+side-metadata chunk as it mapped it (4 MiB each), so on macOS every mapped
+chunk was fully resident from the start, whether or not it was used. A fresh
+anonymous mapping is already zero, so the memset only made pages resident.
+Measured with `vmmap`, `kb` at a 32 MiB heap was 60 MiB metadata + 12 mature +
+8 nursery + 2.5 malloc = 82.6 MiB, of which 1.4 MiB of metadata was needed.
+The fix is mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not
+memset fresh mappings on macOS"), pinned by ocaml-mmtk PR 53 (pending merge).
+Checked with a `sanity` build (`binarytrees 18` at 64 MiB and `kb 30` at
+32 MiB on GenImmix, Bactrian and Immix: no invalid reference), 12/12
+quick-panel goldens, and wall time unchanged; spot RSS fell from 25 to 9 MiB
+(`nbody`), 90 to 31 (`kb` at 32 MiB), 164 to 119 (`binarytrees` at 64 MiB,
+GenImmix) and 86 to 43 (`kb` at 32 MiB, Immix). Across the sweep each front's
+first point moved 40–66 MiB left (about 60 MiB for GenImmix and Bactrian,
+42–51 for Immix; 14 for GenImmix's 32 MiB-nursery points on
+`matrix_multiplication`), with the same times:
+
+| bench | vanilla | GenImmix | Bactrian | Immix |
+|---|--:|--:|--:|--:|
+| `binarytrees` | 64 → 64 | 156 → 94 | 159 → 101 | 132 → 90 |
+| `kb` | 7 → 7 | 82 → 23 | 82 → 22 | 86 → 44 |
+| `matrix_multiplication` | 19 → 19 | 41 → 27 | 97 → 31 | 77 → 30 |
+| `LU_decomposition` | 17 → 17 | 86 → 26 | 86 → 26 | 98 → 47 |
+| `chameneos_redux` | 37 → 37 | 118 → 58 | 120 → 54 | 117 → 74 |
+
+(Front-start RSS in MiB, first sweep → this sweep, recomputed from the two
+NDJSON files.) The first sweep's files stay on the `benchmarks` branch as the
+record of the artefact:
+[`spacetime-m4.ndjson`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4.ndjson),
+[`spacetime-m4.log`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4.log),
+[`graphs_spacetime_m4/`](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks/quick/graphs_spacetime_m4).
+The Linux cross-check that first pointed at it (`kb` GenImmix 29 MiB on godel
+against 91 on the M4) is in
+[`quick/RESULTS-godel-2026-09-30.md`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/RESULTS-godel-2026-09-30.md);
+the decomposition and the fix are in `gc/mmtk/NOTES.md` 2026-09-30 (evening),
+"macOS RSS floor".
 
 ## Configuration and raw data
 
 - Host: Apple M4 Pro (8 performance + 4 efficiency cores, 24 GiB), macOS 26.6,
   kept quiet during the runs. No core pinning, no `setarch`.
-- Fork: `b714bb86d3`, tree identical to mainline merge `3fbe544984` (PR 41);
-  mmtk-core `95b425a27d`. Vanilla: opam `5.5.0` (released, non-flambda).
+- Fork, this sweep: `d6933f65da` (PR 53: mainline `6bb7a1be36` plus the
+  mmtk-core pin), mmtk-core `5454281016`. Fork, first sweep and panel:
+  `b714bb86d3`, tree identical to mainline merge `3fbe544984` (PR 41);
+  mmtk-core `95b425a27d`. Vanilla, both: opam `5.5.0` (released,
+  non-flambda), the same binaries.
 - Plans: GenImmix (default), Bactrian, Immix. LXR is excluded: it needs a
   pinned heap and its results are provisional.
 - **Sweep** (`quick/spacetime.py`): benches `binarytrees`, `kb`,
@@ -217,17 +299,20 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
   {256k, 1M, 4M} plus default; each MMTk plan `MMTK_HEAP_SIZE_MB` ∈ {32, 48, 64,
   96, 128, 192, 256} plus dynamic × `MMTK_NURSERY` ∈ {default,
   `Fixed:4194304`, `Fixed:33554432`}; `MMTK_THREADS=1`; one run per point; RSS
-  = the child's `ru_maxrss`. Command:
-  `uv run quick/spacetime.py --vanilla quick/build_m4_vanilla --mmtk quick/build_m4_mmtk --plans "GenImmix Bactrian Immix" --benches "binarytrees kb matrix_multiplication LU_decomposition chameneos_redux" --json quick/spacetime-m4.ndjson --graphs quick/graphs_spacetime_m4 --no-setarch --no-pin --resume`.
+  = the child's `ru_maxrss`. Command (the first sweep used `quick/build_m4_mmtk`,
+  `spacetime-m4.ndjson` and `graphs_spacetime_m4`):
+  `uv run quick/spacetime.py --vanilla quick/build_m4_vanilla --mmtk quick/build_m4_mmtk_nz --plans "GenImmix Bactrian Immix" --benches "binarytrees kb matrix_multiplication LU_decomposition chameneos_redux" --json quick/spacetime-m4-nz.ndjson --graphs quick/graphs_spacetime_m4_nz --no-setarch --no-pin --resume`.
 - **Panel** (`quick/quickbench.py`): dynamic heap, `--threads domains` (1 GC
   worker per sequential cell, N for N domains), perf sizes, 3 measured runs
   (median) after 1 warmup, RSS = peak across runs. Command (in `quick/`):
   `uv run quickbench.py all --vanilla build_m4_vanilla --bin-a build_m4_mmtk --plans "GenImmix Bactrian Immix" --heap dynamic --gc --chart --no-pin --no-setarch --json m4-2026-09-30-dynamic.ndjson --graphs graphs_m4`.
-- Raw data, all on the [`benchmarks` branch](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks):
-  sweep [`spacetime-m4.ndjson`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4.ndjson),
-  [`spacetime-m4.log`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4.log),
-  [`graphs_spacetime_m4/`](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks/quick/graphs_spacetime_m4)
+- Raw data, all on the [`benchmarks` branch](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks)
+  (this sweep at `3e150aa0dc`):
+  sweep [`spacetime-m4-nz.ndjson`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4-nz.ndjson),
+  [`spacetime-m4-nz.log`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/spacetime-m4-nz.log),
+  [`graphs_spacetime_m4_nz/`](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks/quick/graphs_spacetime_m4_nz)
   (with `SUMMARY.md`, the per-plan class table and the failed points);
+  first sweep as listed in "The macOS memset artefact";
   panel [`m4-2026-09-30-dynamic.ndjson`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/m4-2026-09-30-dynamic.ndjson),
   [`m4-2026-09-30.log`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/m4-2026-09-30.log),
   [`graphs_m4/`](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks/quick/graphs_m4);
@@ -251,6 +336,13 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
   (before PR 41): [`quick/RESULTS-godel-2026-09-30.md`](https://github.com/fplaunchpad/ocaml-mmtk/blob/benchmarks/quick/RESULTS-godel-2026-09-30.md).
   Time ratios do not transfer across hosts (GenImmix `binarytrees` 1.66× on
   godel vs 0.78× on the M4); vanilla's RSS agrees where the live set dominates
-  (`binarytrees` 92 MiB on both), MMTk's does not (`kb` 29 vs 91 MiB).
-  Compare each host only with its own vanilla.
-- **2026-09-30, M4 Pro panel and first space-time sweep (this page).**
+  (`binarytrees` 92 MiB on both), MMTk's did not (`kb` 29 vs 91 MiB, the macOS
+  memset artefact). Compare each host only with its own vanilla.
+- **2026-09-30, M4 Pro panel and first space-time sweep (superseded for RSS).**
+  The first sweep (`spacetime-m4.ndjson`, `graphs_spacetime_m4/`) found every
+  MMTk front starting 60–90 MiB right of vanilla's and read the gap as a
+  memory floor; about 40–66 MiB of each front start was the macOS memset
+  artefact. Its times and verdict classes stand. The panel on this page is
+  from the same build and still carries the artefact in its RSS column.
+- **2026-09-30, M4 Pro space-time sweep after the memset fix (this page).**
+  Same grid and vanilla binaries, MMTk from mmtk-core `5454281016`.

@@ -319,18 +319,20 @@ defaults rather than copying settings from historical runs.
 GC performance is a space-time curve, so every result pairs wall time with peak
 RSS, and a collector wins only where its front (max RSS against wall, over the
 heap and nursery knobs for MMTk and `space_overhead` × minor-heap size for
-vanilla) lies below and to the left of vanilla's. The first sweep (2026-09-30,
-Apple M4 Pro) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on any
-GC-heavy bench today. The gap is a memory floor: MMTk's lowest RSS sits
-60–90 MiB above vanilla's on every such bench (on macOS about 55 MiB of that
-is mmtk-core zero-filling its side-metadata mappings, a fixable artefact; a
-re-sweep is pending), while its times at that RSS are
-near parity on `kb` and LU and about 2× on `binarytrees`. Where MMTk is faster, it
-is faster only at more memory: Immix beats vanilla on single-domain
-`chameneos_redux` (1.05 s vs 1.37 s) at 3× the RSS (117 vs 37 MiB), and the
-generational plans take 2.6–3.1× Immix's time there.
+vanilla) lies below and to the left of vanilla's. The current sweep
+(2026-09-30, Apple M4 Pro, after removing a macOS artefact in which mmtk-core
+memset every fresh mapping and so made it resident; mmtk-core `5454281016`,
+PR 53 pending merge) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on
+any GC-heavy bench today. On `binarytrees` the gap is collector speed:
+GenImmix's front starts at 94 MiB / 1.64 s beside vanilla's default
+(91 MiB / 1.51 s), but vanilla's curve falls faster, and at equal RSS vanilla
+is 1.15–1.54× faster. On `kb` and LU what remains is a 9–16 MiB memory floor
+and 3–22 % time. Where MMTk is faster, it is faster only at more memory:
+`matrix_multiplication` (0.58 s vs 0.76 s at 27–31 vs 19 MiB) and Immix on
+single-domain `chameneos_redux` (1.02 s vs 1.33 s at 74 vs 37 MiB), where the
+generational plans take 2.7–3.3× Immix's time.
 
-![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/summary.png)
+![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4_nz/summary.png)
 
 Every graph with its reading, the quick-panel tables (sequential and parallel),
 configuration, raw data and history: [`RESULTS.md`](RESULTS.md). Measurement

@@ -4,7 +4,7 @@
 
 The one-sentence rule: **a GC result that is a single number is wrong.** Every comparison is a curve over heap size, every benchmark carries its workload fingerprint, and every claim carries a dispersion estimate.
 
-**Method of record for MMTk-vs-vanilla (from 2026-09-30): space-time fronts.** Each GC-sensitive bench is run once per point of a configuration grid (vanilla: `OCAMLRUNPARAM` `o` × `s`; each MMTk plan: `MMTK_HEAP_SIZE_MB` × `MMTK_NURSERY`, plus the dynamic heap) and plotted as x = max RSS, y = wall, one front per configuration; a plan wins only where its front lies below-and-left of vanilla's. This is the §3.4 time-vs-total-footprint curve, with the heap models' own knobs as the sweep axis. A quick-panel cell at the dynamic heap (wall ratio + RSS) is a *screening* result that locates one point on each curve; it is never quoted as a bare "×-faster". **Results page: [`RESULTS.md`](RESULTS.md)** — the first sweep (2026-09-30, M4 Pro: every graph with its reading and takeaway) and the current screening panel. Sweep design and open questions: ROADMAP workstreams "Space-time curves", `gc/mmtk/NOTES.md` 2026-09-30 (M4).
+**Method of record for MMTk-vs-vanilla (from 2026-09-30): space-time fronts.** Each GC-sensitive bench is run once per point of a configuration grid (vanilla: `OCAMLRUNPARAM` `o` × `s`; each MMTk plan: `MMTK_HEAP_SIZE_MB` × `MMTK_NURSERY`, plus the dynamic heap) and plotted as x = max RSS, y = wall, one front per configuration; a plan wins only where its front lies below-and-left of vanilla's. This is the §3.4 time-vs-total-footprint curve, with the heap models' own knobs as the sweep axis. A quick-panel cell at the dynamic heap (wall ratio + RSS) is a *screening* result that locates one point on each curve; it is never quoted as a bare "×-faster". **Results page: [`RESULTS.md`](RESULTS.md)** — the current sweep (2026-09-30, M4 Pro, after the macOS memset fix: every graph with its reading and takeaway; the first sweep is kept as the record of the artefact) and the current screening panel. Sweep design and open questions: ROADMAP workstreams "Space-time curves", `gc/mmtk/NOTES.md` 2026-09-30 (M4).
 
 The standing order from the maintainer: **find and remove obvious overhead from the allocation + collection fast paths FIRST, then measure with this harness, then iterate.** Section 10 (the ranked backlog, kept in ROADMAP) is the "what to do"; this document is the "how to know it worked."
 
@@ -164,12 +164,15 @@ GC introduces run-to-run nondeterminism (collection timing depends on allocation
   - `MMTK_RELEASE_LOS_PAGES` (return freed large-object pages of 2 MiB or more to the OS) is compiled
     only on Linux (`gc/mmtk-core/src/util/heap/freelistpageresource.rs`). On macOS large-object memory
     is not returned to the OS, so RSS comparisons on the M4 are affected.
-  - **macOS zero-fill (diagnosed 2026-09-30):** `dzmmap`/`dzmmap_noreplace`
-    (`gc/mmtk-core/src/util/memory.rs`) call `zero()` off Linux, and chunks are mapped 4 MiB at a
-    time, so every heap and side-metadata chunk is fully resident once mapped (~55 MiB per point on
-    the M4 space-time sweep; `kb` 91 MiB on the M4 vs 29 on godel). Every page-return path is
-    Linux-only. Until it is removed, do not compare MMTk RSS measured on macOS with Linux figures,
-    and read M4 fronts as overstating MMTk's memory. → ROADMAP workstreams, "Space-time curves";
+  - **macOS zero-fill (diagnosed and fixed 2026-09-30):** `dzmmap`/`dzmmap_noreplace`
+    (`gc/mmtk-core/src/util/memory.rs`) called `zero()` off Linux, and chunks are mapped 4 MiB at a
+    time, so every heap and side-metadata chunk was fully resident once mapped (40–66 MiB per front
+    start on the first M4 space-time sweep; `kb` 91 MiB on the M4 vs 29 on godel). **Fixed** by
+    mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7), pinned by ocaml-mmtk PR 53 (pending merge);
+    the M4 sweep was re-run with it (`RESULTS.md`). MMTk RSS measured on macOS *before* the fix (the
+    first sweep, the 2026-09-30 M4 panel, the LXR metadata tax) overstates MMTk's memory; do not
+    compare it with Linux figures. Every page-return path is still Linux-only, so macOS RSS never
+    shrinks after a peak; a residual 10–20 MiB floor above vanilla remains open. → ROADMAP workstreams, "Space-time curves";
     `gc/mmtk/NOTES.md` 2026-09-30 (evening).
   - `MMTK_TRANSPARENT_HUGEPAGES` defaults to on under Linux only (`gc/mmtk/binding/src/api.rs`).
   - The bump-allocation granule `MMTK_BUMP_BLOCK_KB` defaults to 512 KiB, though the doc comment in

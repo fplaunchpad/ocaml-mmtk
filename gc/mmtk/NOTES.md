@@ -5,7 +5,7 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
-## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused (item 13, fix on PR 51); GH issue 39 root-caused with rr (item 28, fix on PR 52); macOS RSS floor diagnosed; space-time driver review (KNOWN FAILURES)
+## 2026-09-30 (evening) - LXR retention fixes merged (item 21); GH issue 49 root-caused (item 13, fix on PR 51); GH issue 39 root-caused with rr (item 28, fix on PR 52); macOS RSS floor diagnosed and fixed (PR 53), space-time re-sweep; space-time driver review (KNOWN FAILURES)
 
 Evidence labels as in the entries below. Local runs are macOS arm64.
 
@@ -166,8 +166,9 @@ page-return path (`blockpageresource.rs`, `freelistpageresource.rs`,
 - Linux cross-check (already in hand): godel kb GenImmix 29 MiB vs 91 on the
   M4 (predicted 20-25 without the artefact).
 
-*Consequences.* The M4 space-time fronts (entry below, `RESULTS.md`) carry a
-~55 MiB-per-point OS artefact in the RSS coordinate; a re-sweep is pending.
+*Consequences.* The first M4 space-time fronts (entry below) carried a
+40-66 MiB-per-front-start OS artefact in the RSS coordinate (fixed and
+re-swept; next subsection).
 **Correction:** on macOS, the RSS-over-live gap is mostly zero-filled side
 metadata, not Immix fragmentation: about 73 % of kb's RSS is metadata, and
 the binarytrees "RSS ~ 4x live is fragmentation" reading (entry
@@ -176,8 +177,8 @@ metadata tax ~48 MB" (entries 2026-06-30 and 2026-07-01) and its "50-100 MiB RSS
 (later)) were measured on macOS and are likely partly this artefact; to be
 re-measured on Linux.
 
-*Next steps (open, ranked):* (1) drop the explicit `zero()` on macOS in
-mmtk-core and re-run the sweep; (2) `MADV_FREE_REUSABLE` page return on
+*Next steps (ranked):* (1) drop the explicit `zero()` on macOS in
+mmtk-core and re-run the sweep (DONE, next subsection); (2) `MADV_FREE_REUSABLE` page return on
 macOS; (3) GC work-packet memory (bounded or reused packet vectors; vanilla's
 mark stack is bounded and pruned); (4) the nursery `Bounded` maximum as a
 front, not a default; (5) re-measure LXR metadata on Linux.
@@ -185,6 +186,58 @@ front, not a default; (5) re-measure LXR metadata on Linux.
 *Research angle (RQ4-adjacent, claimable only after the OS effect is
 removed):* side-metadata RSS scales with spaces x specs x mmap granularity
 wherever the OS does not demand-zero - a framework-versus-bespoke tax.
+
+### macOS memset fix and space-time re-sweep - FIXED (pending merge), re-swept
+
+*Fix:* mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not
+memset fresh mappings on macOS"), pinned by ocaml-mmtk PR 53 (pending merge;
+fork `d6933f65da` = mainline `6bb7a1be36` + the pin). A fresh anonymous
+mapping is already zero, so the memset only made every mapped chunk resident.
+
+*Verified:* `sanity` build, `binarytrees 18` at 64 MiB and `kb 30` at 32 MiB
+on GenImmix, Bactrian and Immix: 0 invalid references; 12/12 quick-panel
+goldens; wall time unchanged. Spot RSS (MiB, before -> after): nbody 25 -> 9;
+kb at 32 MiB 90 -> 31 (GenImmix), 86 -> 43 (Immix); binarytrees at 64 MiB
+164 -> 119 (GenImmix).
+
+*Re-sweep (verified, one run per point):* same 440-point grid and vanilla
+binaries, MMTk binaries from the fixed build, M4 Pro quiet; `benchmarks`
+branch `3e150aa0dc`, `quick/spacetime-m4-nz.ndjson`, `.log`,
+`graphs_spacetime_m4_nz/`. Front-start RSS (MiB / s), first sweep -> re-sweep,
+recomputed from both NDJSON files:
+
+| bench | vanilla | GenImmix | Bactrian | Immix |
+|---|--:|--:|--:|--:|
+| binarytrees | 64 -> 64 | 156/1.79 -> 94/1.64 | 159/1.86 -> 101/1.74 | 132/2.58 -> 90/2.41 |
+| kb | 7 -> 7 | 82/0.52 -> 23/0.49 | 82/0.51 -> 22/0.48 | 86/0.47 -> 44/0.43 |
+| matrix_multiplication | 19 -> 19 | 41/0.59 -> 27/0.58 | 97/0.59 -> 31/0.58 | 77/0.59 -> 30/0.58 |
+| LU_decomposition | 17 -> 17 | 86/0.86 -> 26/0.84 | 86/0.85 -> 26/0.84 | 98/1.05 -> 47/1.03 |
+| chameneos_redux | 37 -> 37 | 118/3.11 -> 58/2.99 | 120/3.39 -> 54/3.33 | 117/1.05 -> 74/1.02 |
+
+Shift 40-66 MiB (about 60 for GenImmix/Bactrian, 42-51 for Immix, 14 for
+GenImmix's 32 MiB-nursery matmul points); times unchanged within the
+single-run noise (vanilla's own default moved by up to 12 % between the two
+sweeps with the same binaries). Verdict classes unchanged; the same 20 points
+fail (GH issue 49; PR 51 not in this build). What changed is the reading:
+the fronts now meet vanilla's. binarytrees: at 94.5 MiB vanilla (`o=120,s=1M`)
+1.21 s vs GenImmix 1.64 s; at 136 MiB 0.85 vs 1.31; vanilla's best (0.85 s)
+needs 116 MiB and GenImmix never reaches it (best 0.98 s at 176 MiB) - the
+gap is collector speed at a given heap, not memory. kb/LU: 9-16 MiB floor
+(GenImmix/Bactrian) plus 3-22 % time. chameneos: generational plans 2.25x /
+2.51x vanilla's default, 2.7x / 3.3x Immix at defaults. Written up in
+`RESULTS.md`.
+
+*Residual floor (open):* 8-21 MiB above vanilla's front start for
+GenImmix/Bactrian on kb, LU, matmul and chameneos (Immix 11-37; binarytrees
+26-37, where vanilla's own front start is its `o=40` point); startup floor
+9 MiB (nbody) vs vanilla 2. Candidates, none yet measured after the fix:
+(1) the nursery (bounded up to 16 MiB by default, outside the pinned heap,
+counted twice in the heap budget); (2) GC work-packet vectors (29-36 MiB of
+malloc on binarytrees at heap 64, measured before the fix and independent of
+it); (3) one mapped chunk per space and metadata spec; (4) no page return on
+macOS (`MADV_FREE_REUSABLE`); (5) why GenImmix matmul drops from 48-71 to
+27 MiB with a 32 MiB nursery and a heap of 96 MiB or more. Next: a paused
+`vmmap` decomposition on the fixed build, then the godel repeat with reps.
 
 ### Space-time driver review (`quick/spacetime.py`, `benchmarks` branch)
 
@@ -322,7 +375,8 @@ comparison. chameneos: Immix 1.05 s at 117 MiB vs vanilla 1.37 s at 37;
 GenImmix/Bactrian 2.6x/2.9x Immix's time at their defaults. 14 binarytrees points segfaulted
 (6 GenImmix, 8 Bactrian; GH issue 49, root-caused later that day, fix on PR 51 pending merge); 6
 Immix points raised `Out_of_memory`. **Caveat (evening entry above):** on macOS the RSS
-coordinate includes ~55 MiB per point of mmtk-core zero-fill artefact; a re-sweep is pending.
+coordinate includes 40-66 MiB per front start of mmtk-core zero-fill artefact; fixed and re-swept
+the same day (evening entry, "macOS memset fix"), which supersedes these RSS figures.
 Open questions (RSS floor decomposition, generational cost on effects, issue
 49, bracketing compute benches, a godel repeat with reps): ROADMAP
 workstreams, "Space-time curves".

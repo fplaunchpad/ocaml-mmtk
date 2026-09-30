@@ -23,9 +23,10 @@ green, GenCopy included (first time since the September merge), except LXR on it
 **LXR capacity is diagnosed** (item 21) and its **retention fixes are merged** (ocaml-mmtk PR 46,
 merge `6bb7a1be36`; mmtk-core PR 6, `b566d1f5b7`, pinned at `7a36bbb0b5`). **Root-caused the same
 evening, fixes on open PRs pending merge:** the near-OOM root-scan SIGSEGV (item 13, GH issue 49; PR 51)
-and the GC-worker free abort under domain churn (item 28, GH issue 39, with `rr`; PR 52). **The M4 RSS
-coordinate on macOS carries a ~55 MiB/point mmtk-core zero-fill artefact** (workstreams, "Space-time
-curves"). **Open:** items 13 and 28 until PRs 51 and 52 merge, LXR capacity and failures (items 21, 31 =
+and the GC-worker free abort under domain churn (item 28, GH issue 39, with `rr`; PR 52). **The macOS RSS
+artefact (mmtk-core memset every fresh mapping) is fixed** (mmtk-core PR 7, `5454281016`; ocaml-mmtk
+PR 53, pending merge) and the M4 space-time sweep re-run: the fronts moved 40–66 MiB left and now meet
+vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Open:** items 13 and 28 until PRs 51 and 52 merge, LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
 issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28). Order: items 28/13 (merge),
 21/31, 26, 25, 30, 20(c), 32, 23, 24.
@@ -204,7 +205,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
      big-live-set programs — **binarytrees 3.5× → 1.27× slower than stock** (major-GC thrash
      gone; the residual 1.27× is the per-collection copy cost, not the heap). RSS ≈ 4× live was
      read as Immix *fragmentation* (a separate defrag lever) — **corrected 2026-09-30:** on macOS most of
-     that gap is mmtk-core's zero-filled side metadata (workstreams, "Space-time curves"). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**
+     that gap was mmtk-core's zero-filled side metadata (fixed; workstreams, "Space-time curves"). Deeper finding: **MMTk's per-minor-GC cost ≈ 4× stock's**
      (~1.2 ms vs 0.3–0.4 ms/collection at a 2 MiB nursery) — every nursery collection goes
      through the full STW + GC-worker + work-packet machinery vs stock's inline on-mutator
      Cheney copy. Being profiled on turing to attribute the floor. The nursery should be an
@@ -879,8 +880,9 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
       - **Status:** the resume-decrement hook and the sweep-guard fix (the two safe fixes) and a
         4-bit default are **MERGED** (below). Open follow-ups: item 31 (weak references, GH issue 44)
         and item 32 (a kb reference-count anomaly, GH issue 45).
-      - *RSS tax caveat:* measured on macOS, where mmtk-core zero-fills every mapped metadata chunk
-        (workstreams, "Space-time curves"); likely partly that artefact; re-measure on Linux.
+      - *RSS tax caveat:* measured on macOS while mmtk-core zero-filled every mapped metadata chunk
+        (workstreams, "Space-time curves"; fixed by mmtk-core `5454281016`, PR 53 pending merge); likely
+        partly that artefact; re-measure (Linux, or macOS after the fix).
       - **RQ1 consequence:** "barrier ~free" survives (it is mutator-side). "In-place RC wins at
         memory parity" is unproven: the earlier parity was heap-size parity, LXR carries the RSS
         tax, and every effects/queue workload was fiction before GH issue 26. Re-measure at RSS
@@ -1222,8 +1224,8 @@ The active research/measurement threads behind the M8 milestone — the index; d
     chameneos at 1 domain) once per grid point, x = max RSS, y = wall, one front per configuration; vanilla
     `OCAMLRUNPARAM` `o` × `s`, each MMTk plan `MMTK_HEAP_SIZE_MB` {32…256} + dynamic × `MMTK_NURSERY`
     {default, 4 MiB, 32 MiB}. A plan "wins" only where its front lies below-and-left of vanilla's.
-    **First sweep DONE (2026-09-30, M4 Pro, 440 points, one run each; results and every graph in
-    `RESULTS.md`):** no plan dominates vanilla on any GC-heavy bench. binarytrees, kb and LU are dominated
+    **First sweep DONE (2026-09-30, M4 Pro, 440 points, one run each; its RSS carried the macOS memset
+    artefact, see below; the re-sweep in `RESULTS.md` supersedes it):** no plan dominates vanilla on any GC-heavy bench. binarytrees, kb and LU are dominated
     for all three plans (MMTk's lowest RSS is 60–90 MiB above vanilla's; kb/LU times near parity there,
     binarytrees ~2×), and GenImmix/Bactrian on chameneos; matrix_multiplication and Immix on chameneos are "faster only at higher RSS" (2–5×
     and 3× vanilla's RSS). **Open questions it raised:** (a) decompose the RSS floor (side metadata, nursery
@@ -1237,7 +1239,9 @@ The active research/measurement threads behind the M8 milestone — the index; d
     bracketed — vanilla's `o`/`s` do not move matrix_multiplication off 19 MiB and no MMTk configuration reaches it, so
     that comparison is a floor comparison, not a front one; (e) repeat on godel with reps (dispersion,
     Linux RSS accounting).
-    **RSS floor decomposition (question (a)): DONE 2026-09-30 — macOS zero-fill; fix pending.**
+    **RSS floor decomposition (question (a)): DONE 2026-09-30 — macOS zero-fill. macOS memset fix:
+    mmtk-core PR 7 (`5454281016`) / ocaml-mmtk PR 53 (pending merge). Re-sweep DONE 2026-09-30,
+    `RESULTS.md`.**
     *Source reading:* mmtk-core's `dzmmap`/`dzmmap_noreplace` (`src/util/memory.rs`) call `zero()` under
     `#[cfg(not(target_os = "linux"))]` and the chunk mmapper maps whole 4 MiB chunks, so on macOS every
     heap and side-metadata chunk is fully resident once mapped; every page-return path
@@ -1248,20 +1252,33 @@ The active research/measurement threads behind the M8 milestone — the index; d
     malloc 29–36 (GC work-packet vectors) = 174 vs max RSS 172; kb 50 at heap 32 = metadata 60 + mature
     12 + nursery 8 + malloc 2.5 = 82.6 (vanilla 8). Metadata actually needed: 5.7 MiB (binarytrees),
     1.4 MiB (kb). Nursery counted twice in the heap budget; the trigger estimates metadata at ~8 % while
-    RSS pays 60 MiB. Linux cross-check: godel kb GenImmix 29 MiB vs M4 91. **Consequence:** the M4
-    fronts carry a ~55 MiB/point OS artefact in the RSS coordinate (re-sweep pending); the "RSS ≈ 4×
-    live is fragmentation" reading is wrong on macOS (≈73 % of kb's RSS is zero-filled metadata); the
-    LXR metadata/RSS tax figures are to be re-measured on Linux. **Next (ranked):** (1) drop the
-    explicit `zero()` on macOS in mmtk-core and re-run the sweep; (2) `MADV_FREE_REUSABLE` page return on
-    macOS; (3) GC work-packet memory (bounded/reused packet vectors — vanilla's mark stack is bounded
-    and pruned); (4) nursery `Bounded` max as a front, not a default; (5) re-measure LXR metadata on
-    Linux. *Research angle (RQ4-adjacent; claimable only after the OS effect is removed):* side-metadata
-    RSS scales with spaces × specs × mmap granularity wherever the OS does not demand-zero — a
-    framework-vs-bespoke tax. → NOTES 2026-09-30 (evening).
+    RSS pays 60 MiB. Linux cross-check: godel kb GenImmix 29 MiB vs M4 91. **Consequence:** the first M4
+    fronts carried a 40–66 MiB/point OS artefact in the RSS coordinate; the "RSS ≈ 4× live is
+    fragmentation" reading is wrong on macOS (≈73 % of kb's RSS was zero-filled metadata). **Fix:**
+    mmtk-core `5454281016` (fplaunchpad/mmtk-core PR 7, "memory: do not memset fresh mappings on
+    macOS"), pinned by ocaml-mmtk PR 53 (pending merge); `sanity` (binarytrees 18 @ 64 MiB, kb 30 @
+    32 MiB; GenImmix/Bactrian/Immix; 0 invalid), 12/12 quick-panel goldens, wall unchanged; spot RSS
+    nbody 25→9 MiB, kb@32 90→31, binarytrees@64 164→119 (GenImmix), kb@32 Immix 86→43. **Re-sweep
+    (same grid, same vanilla binaries; `benchmarks` `3e150aa0dc`, `quick/spacetime-m4-nz.*`):** front
+    starts moved 40–66 MiB left (binarytrees GenImmix 156→94 MiB, kb 82→23, LU 86→26, matmul 41→27,
+    chameneos 118→58) and the fronts now meet vanilla's; verdict classes unchanged; the same 20 points
+    fail (GH issue 49, PR 51 not in the build). On binarytrees the gap is now collector speed (at equal
+    RSS vanilla is 1.15–1.54× faster; its curve falls faster with memory); on kb/LU a 9–16 MiB floor
+    plus 3–22 % time. **Open (residual floor, 8–21 MiB above vanilla on kb/LU/matmul/chameneos for GenImmix/Bactrian,
+    Immix 11–37):** (1) the nursery (bounded up to 16 MiB, outside the pinned heap, counted twice in the heap
+    budget; nursery `Bounded` max as a front, not a default); (2) GC work-packet memory (29–36 MiB of
+    malloc on binarytrees; bounded/reused packet vectors — vanilla's mark stack is bounded and pruned);
+    (3) one chunk per space/metadata spec; (4) `MADV_FREE_REUSABLE` page return on macOS; (5)
+    GenImmix matrix_multiplication drops 48–71 → 27 MiB with a 32 MiB nursery and a large heap (why?);
+    (6) re-measure LXR metadata (Linux, or macOS after the fix); (7) collector speed at a given heap on
+    binarytrees (per-collection cost; a 4 MiB nursery costs 0.4–0.8 s). *Research angle (RQ4-adjacent;
+    claimable once a Linux cross-check confirms the residual):* side-metadata RSS scales with spaces ×
+    specs × mmap granularity wherever the OS does not demand-zero — a framework-vs-bespoke tax.
+    → NOTES 2026-09-30 (evening).
     **Pending driver fixes (`quick/spacetime.py`, `benchmarks` branch; from a review):** `classify`
     lacks the symmetric "smaller but slower" (lower-memory trade-off) case (no effect on this dataset);
     the front comparison is over common memory budgets (each best point extended rightwards), not
-    matched measured RSS — only binarytrees has raw RSS overlap; results are observed fronts over this
+    matched measured RSS — only binarytrees had raw RSS overlap in the first sweep; results are observed fronts over this
     grid, one run per point, one GC worker, no dispersion; the `t = a + b/(H − c)` fit is a descriptive
     overlay, not a validated model.
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
@@ -1565,9 +1582,12 @@ short-lived-allocation profile favours a copying nursery; see `PERFORMANCE.md`).
 - Architecture: **MMTk owns the entire heap** (all-MMTk). There is no separate OCaml
   minor GC — young objects live in MMTk's own heap; the only stop-the-world is MMTk's.
   The vanilla-minor + MMTk-major intermediate was superseded, not just deferred.
-- RSS on macOS is inflated by mmtk-core itself: `dzmmap` zero-fills every mapped 4 MiB chunk
-  (heap and side metadata) off Linux, and no page is returned to the OS there. Compare memory across
-  hosts only after checking this (workstreams, "Space-time curves").
+- RSS on macOS was inflated by mmtk-core itself: `dzmmap` zero-filled every mapped 4 MiB chunk
+  (heap and side metadata) off Linux. **Fixed** (mmtk-core PR 7, `5454281016`; ocaml-mmtk PR 53,
+  pending merge): fronts moved 40–66 MiB left. **Residual:** a 10–20 MiB floor above vanilla (nursery,
+  GC work-packet vectors, per-space chunks), and no page is returned to the OS on macOS (every return
+  path is Linux-only). Figures measured on macOS before the fix (the first M4 sweep and panel, the LXR
+  metadata tax) overstate MMTk's RSS (workstreams, "Space-time curves").
 - Debugging: `turing` (Linux) has rr + gdb; `sanity` at a small heap for moving-GC
   bugs; `setarch -R` for the ASLR/metadata-mmap flake. See `gc/mmtk/NOTES.md` and
   `CLAUDE.md`.
