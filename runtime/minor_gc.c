@@ -268,13 +268,15 @@ void caml_alloc_small_dispatch (caml_domain_state * dom_st,
                   (void *)dom_st->young_end, (void *)dom_st->young_ptr);
       }
       if (!caml_mmtk_refill_tlab(dom_st, whsize)) {
-        /* MMTk bug #4: this raise happens from inside caml_call_gc's saved-regs
-           window (caml_garbage_collection -> here). Recycle the popped gc_regs
-           bucket back to the free-list first, so the raise (which bypasses
-           caml_call_gc's RESTORE_ALL_REGS) does not leave gc_regs_buckets NULL
-           and crash the next caml_call_gc. See
-           caml_mmtk_recycle_gc_regs_bucket. */
-        caml_mmtk_recycle_gc_regs_bucket();
+        /* MMTk bug #4 / GH issue 49: this raise happens from inside
+           caml_call_gc's saved-regs window (caml_garbage_collection -> here),
+           so RESTORE_ALL_REGS never returns the popped gc_regs bucket. Make
+           sure a free bucket exists for the next caml_call_gc, but keep
+           gc_regs pointing at the in-use one: caml_raise may run a collection
+           (pending-action TLAB refill) before unwinding, and that root scan
+           reads this frame's live registers through gc_regs. See
+           caml_mmtk_ensure_free_gc_regs_bucket. */
+        caml_mmtk_ensure_free_gc_regs_bucket();
         caml_raise_out_of_memory();
       }
     } else {

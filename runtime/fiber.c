@@ -434,37 +434,54 @@ void caml_scan_stack(
 
 #endif /* end BYTE_CODE */
 
-/* MMTk bug #4: re-establish the gc_regs-bucket free-list invariant before an
-   exception is raised from *inside* caml_call_gc's saved-registers window.
+/* MMTk bug #4 / GH issue 49: re-establish the gc_regs-bucket free-list
+   invariant before an exception is raised from *inside* caml_call_gc's
+   saved-registers window.
 
-   caml_call_gc (amd64.S) does SAVE_ALL_REGS, which POPS a bucket from
+   caml_call_gc does SAVE_ALL_REGS, which POPS a bucket from
    Caml_state->gc_regs_buckets (the free-list head) into Caml_state->gc_regs,
    and relies on RESTORE_ALL_REGS pushing it back on return. Under MMTk's TLAB
    nursery the allocation slow path (caml_alloc_small_dispatch) can fail to
-   refill and call caml_raise_out_of_memory() from *within* this window: the
-   raise (caml_raise -> caml_raise_exception) longjmps straight to the OCaml
-   exception handler, never returning to caml_call_gc, so RESTORE_ALL_REGS never
-   runs and the popped bucket is never pushed back. With a single bucket on the
-   free-list (the steady state for a single-domain native program),
-   gc_regs_buckets is then left NULL while OCaml code runs again (if
-   Out_of_memory is caught) -- violating the fiber.h invariant "at least one
-   free bucket whenever running OCaml". The next allocation's caml_call_gc SAVE
-   then dereferences a NULL free-list head and SIGSEGVs.
+   refill and raise Out_of_memory from *within* this window: the raise
+   longjmps to the OCaml handler and RESTORE_ALL_REGS never runs. With a single
+   bucket (the steady state for a single-domain program) gc_regs_buckets is
+   then NULL when OCaml code runs again (if Out_of_memory is caught), and the
+   next caml_call_gc SAVE dereferences a NULL free-list head (bug #4).
 
-   Recycle the in-use bucket (Caml_state->gc_regs) back onto the free-list,
-   exactly as RESTORE_ALL_REGS would have. The saved register values in it are
-   discarded -- correct, since the exception abandons that computation.
-   Idempotent and cheap; a no-op if a free bucket already exists or no bucket is
-   in use. */
-void caml_mmtk_recycle_gc_regs_bucket(void)
+   Fix: push a FRESH bucket onto the free-list, exactly as
+   caml_maybe_expand_stack does before running OCaml code. Do NOT touch
+   Caml_state->gc_regs: until caml_raise_exception resets the stack, the top
+   frame of current_stack is still the caml_call_gc allocation frame, whose live
+   registers are roots held in *gc_regs. caml_raise first runs
+   caml_process_pending_actions (GC poll -> TLAB refill -> collection, signal
+   handlers, finalisers), and any collection there scans that frame through
+   gc_regs. The earlier version recycled the in-use bucket and set gc_regs to
+   NULL; the pending-action refill in caml_raise then started a collection
+   whose root scan dereferenced gc_regs == NULL (GH issue 49, GenImmix/Bactrian
+   near-OOM SIGSEGV in caml_scan_stack). Recycling the in-use bucket is also
+   wrong while it is live: a callback run in that window (caml_start_program
+   saves gc_regs) would pop it and overwrite the outer frame's saved roots, and
+   on arm64 gc_regs points 16 bytes into the bucket, so pushing it as a bucket
+   made the next SAVE_ALL_REGS write 16 bytes past the allocation.
+
+   The abandoned bucket is not reclaimed: it stays in gc_regs until the next
+   SAVE_ALL_REGS overwrites it. This is the same as stock OCaml's handling of
+   an asynchronous exception raised from caml_call_gc (a signal handler raising
+   at an allocation poll leaks one bucket per raise; the callback entry's
+   caml_maybe_expand_stack replaces it). One Wosize_gc_regs block per caught
+   Out_of_memory. */
+void caml_mmtk_ensure_free_gc_regs_bucket(void)
 {
+#ifdef NATIVE_CODE
   caml_domain_state *dom = Caml_state;
-  if (dom->gc_regs_buckets == NULL && dom->gc_regs != NULL) {
-    value *bucket = dom->gc_regs;
-    bucket[0] = (value)NULL;            /* sole free bucket: no next */
+  if (dom->gc_regs_buckets == NULL) {
+    value *bucket = caml_stat_alloc_noexc(sizeof(value) * Wosize_gc_regs);
+    if (bucket == NULL)
+      caml_fatal_error("out of memory while raising Out_of_memory");
+    bucket[0] = 0; /* no next bucket */
     dom->gc_regs_buckets = bucket;
-    dom->gc_regs = NULL;                /* no bucket is in use any more */
   }
+#endif
 }
 
 /*
