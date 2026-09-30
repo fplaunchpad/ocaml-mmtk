@@ -763,6 +763,31 @@ pub extern "C" fn mmtk_ocaml_lxr_keep_alive(addr: *const libc::c_void) -> bool {
     memory_manager::lxr_keep_alive_recursive(mmtk(), object)
 }
 
+/// LXR: the continuation `cont` is being resumed; `targets[0..n]` are the values held by its
+/// suspended stack (collected by the runtime with `caml_scan_stack`; immediates and NULL are
+/// skipped here). Defers one decrement per referent when `cont` was promoted, see
+/// `memory_manager::lxr_continuation_resumed`; `n == 0` just asks whether that is needed.
+/// Returns false for other plans and for a continuation with a zero count.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_lxr_continuation_resumed(
+    cont: *const libc::c_void,
+    targets: *const usize,
+    n: usize,
+) -> bool {
+    let cont = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_ptr(cont)) };
+    let raw: &[usize] = if n == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(targets, n) }
+    };
+    let objs: Vec<ObjectReference> = raw
+        .iter()
+        .filter(|v| **v != 0 && **v & 1 == 0)
+        .map(|v| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(*v)) })
+        .collect();
+    memory_manager::lxr_continuation_resumed(mmtk(), cont, &objs)
+}
+
 /// True iff `addr` is an object currently residing in the generational NURSERY
 /// (young space). False for mature objects and for every non-generational plan
 /// (which has no nursery). Used by the domain-termination path (issue #31) to

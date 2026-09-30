@@ -422,7 +422,7 @@ CAMLprim value caml_get_continuation_callstack (value cont, value max_frames)
   struct stack_info *stack;
   value *sp;
 
-  stack = Ptr_val(caml_continuation_use(cont));
+  stack = Ptr_val(caml_continuation_borrow(cont));
   {
     CAMLnoalloc; /* GC must not see the stack outside the cont */
     sp = stack->sp;

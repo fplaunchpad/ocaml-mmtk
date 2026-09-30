@@ -633,7 +633,8 @@ void caml_free_gc_regs_buckets(value *gc_regs_buckets)
 }
 
 
-CAMLprim value caml_continuation_use_noexc (value cont)
+/* Take the stack out of [cont]; Val_ptr(NULL) if it was already taken. */
+static value continuation_take_noexc (value cont)
 {
   value v;
   value null_stk = Val_ptr(NULL);
@@ -684,6 +685,28 @@ CAMLprim value caml_continuation_use_noexc (value cont)
     caml_mmtk_cont_unlock(cont);
     return null_stk;
   }
+}
+
+/* Take the stack out of [cont] to resume it. Under LXR a promoted
+   continuation's stack referents were counted as its fields; the stack is
+   about to run, so they get their decrements (caml_mmtk_cont_resumed). */
+CAMLprim value caml_continuation_use_noexc (value cont)
+{
+  value v = continuation_take_noexc(cont);
+  if (caml_mmtk_cont_resume_hook && Ptr_val(v) != NULL)
+    caml_mmtk_cont_resumed(cont, v);
+  return v;
+}
+
+/* Take the stack out of [cont] only to put it back with
+   caml_continuation_replace (e.g. to walk it for a backtrace). Not a
+   resume, so no LXR decrements: the stack stays the continuation's. */
+value caml_continuation_borrow (value cont)
+{
+  value v = continuation_take_noexc(cont);
+  if (v == Val_ptr(NULL))
+    caml_raise_continuation_already_resumed();
+  return v;
 }
 
 CAMLprim value caml_continuation_use (value cont)

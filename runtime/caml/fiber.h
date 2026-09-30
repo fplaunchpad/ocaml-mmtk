@@ -280,9 +280,13 @@ caml_rewrite_exception_stack(struct stack_info *old_stack,
 
 value caml_continuation_use (value cont);
 
+/* Like caml_continuation_use, for a stack that will be put back with
+   caml_continuation_replace rather than resumed (no LXR resume decrements). */
+value caml_continuation_borrow (value cont);
+
 /* Replace the stack of a continuation that was previously removed
-   with caml_continuation_use. The GC must not be allowed to run
-   between continuation_use and continuation_replace.
+   with caml_continuation_borrow. The GC must not be allowed to run
+   between continuation_borrow and continuation_replace.
    Used for cloning continuations and continuation backtraces. */
 void caml_continuation_replace(value cont, struct stack_info* stack);
 
