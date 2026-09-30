@@ -35,7 +35,7 @@
 #include <execinfo.h>   /* backtrace: RUNNING-set detector diagnostics */
 #endif
 #ifndef _WIN32
-#include <pthread.h>    /* pthread_self: RUNNING-set detector diagnostics */
+#include <pthread.h>    /* pthread_self, pthread_atfork */
 #endif
 
 /* The MMTk glue is compiled into both the bytecode and native runtimes. The few
@@ -126,6 +126,29 @@ static int caml_mmtk_concurrent = 0;
    inc/dec. */
 static int caml_mmtk_field_log = 0;
 static int caml_mmtk_collection_started = 0;
+
+/* Set in the child of a fork() (any fork: Unix.fork, the AFL fork server,
+   the debugger's checkpoint fork, or a fork from C code), by a pthread_atfork
+   handler registered in caml_mmtk_init. MMTk's GC worker threads do not
+   survive fork, so the child can never run a collection (GH issue 33). Until
+   fork is supported, explicit Gc requests in the child return without
+   collecting and without touching MMTk's scheduler (a worker may have held
+   its lock at the fork). The child's heap stays usable up to its current
+   size; it just never collects. Written once, in the child, before fork()
+   returns there. */
+static atomic_uintnat caml_mmtk_forked_child = 0;
+
+#ifndef _WIN32
+static void caml_mmtk_atfork_child(void)
+{
+  atomic_store_relaxed(&caml_mmtk_forked_child, 1);
+}
+#endif
+
+int caml_mmtk_in_forked_child(void)
+{
+  return atomic_load_relaxed(&caml_mmtk_forked_child);
+}
 
 /* M6: MMTk-native weak-reference / ephemeron / finaliser processing via the
    binding's Scanning::process_weak_refs (weak refs clear, ephemeron data
@@ -386,6 +409,10 @@ void caml_mmtk_init(void)
   caml_mmtk_initialised = 1;
   caml_mmtk_check_running_init();
   caml_mmtk_collects = (strcmp(plan, "NoGC") != 0);
+#ifndef _WIN32
+  if (pthread_atfork(NULL, NULL, caml_mmtk_atfork_child) != 0)
+    caml_fatal_error("MMTk: pthread_atfork failed");
+#endif
   /* Bactrian (RQ7) is BOTH: a copying nursery (generational barrier) and a
      concurrently-marked mature space (SATB deletion barrier + continuation
      snapshot/lock machinery). Both flags on arms both halves of
@@ -1249,11 +1276,11 @@ uintnat caml_mmtk_heap_size_bytes(void)
    must NOT run -- it operates on the bypassed stock shared heap and corrupts
    state (observed: channel/custom-block corruption -> crash under a moving
    plan). Instead trigger a real MMTk collection on the calling domain and block
-   until it completes. No-op for NoGC (cannot collect) and when MMTk is
-   disabled. */
+   until it completes. No-op for NoGC (cannot collect) and in a forked child
+   (GH issue 33, see caml_mmtk_forked_child). */
 void caml_mmtk_collect(void)
 {
-  if (caml_mmtk_collects)
+  if (caml_mmtk_collects && !caml_mmtk_in_forked_child())
     mmtk_ocaml_handle_user_collection_request((uintptr_t) Caml_state);
 }
 
@@ -1266,7 +1293,7 @@ void caml_mmtk_collect(void)
    (SCALABILITY.md UPDATE 4/5). */
 void caml_mmtk_collect_minor(void)
 {
-  if (caml_mmtk_collects)
+  if (caml_mmtk_collects && !caml_mmtk_in_forked_child())
     mmtk_ocaml_handle_user_minor_collection_request((uintptr_t) Caml_state);
 }
 
