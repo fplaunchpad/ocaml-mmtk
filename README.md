@@ -292,38 +292,24 @@ defaults rather than copying settings from historical runs.
 
 ## Performance evidence
 
-The quick benchmark suite lives on the separate
-[`benchmarks` branch](https://github.com/fplaunchpad/ocaml-mmtk/tree/benchmarks).
-Historical Apple M4 Pro runs from **2026-07-02** found that collector choice changed
-both throughput and memory use: LXR performed well on allocation-heavy,
-acyclic `binarytrees`, taking 0.76× vanilla's time with **309 MiB RSS**, versus
-**92 MiB** for vanilla and **213 MiB** for GenImmix. Per-domain nursery scaling
-substantially improved parallel `binarytrees`; continuation-heavy
-`chameneos_redux` exposed promotion and scanning costs.
+GC performance is a space-time curve, so every result pairs wall time with peak
+RSS, and a collector wins only where its front (max RSS against wall, over the
+heap and nursery knobs for MMTk and `space_overhead` × minor-heap size for
+vanilla) lies below and to the left of vanilla's. The first sweep (2026-09-30,
+Apple M4 Pro) finds that no MMTk plan dominates vanilla OCaml 5.5.0 on any
+GC-heavy bench today. The gap is a memory floor: MMTk's lowest RSS sits
+60–90 MiB above vanilla's on every such bench, while its times at that RSS are
+near parity on `kb` and LU and about 2× on `binarytrees`. Where MMTk is faster, it
+is faster only at more memory: Immix beats vanilla on single-domain
+`chameneos_redux` (1.05 s vs 1.37 s) at 3× the RSS (117 vs 37 MiB), and the
+generational plans take 2.6–3.1× Immix's time there.
 
-Those results predate the current nursery default, Bactrian's sliced marking and
-incremental sweep, and later runtime fixes. Dynamic heaps and pinned LXR heaps
-also produced different RSS values. They motivate the research questions;
-they are not current-default or equal-memory performance claims.
-Every LXR time and RSS figure, including the `binarytrees` numbers above, predates
-the 2026-09-29 wrong-results fix and must be re-measured: the fix changes how
-much memory LXR retains. Its earlier `chameneos_redux` measurements are invalid,
-because that run silently dropped most reference-count increments.
+![Space-time fronts, vanilla vs MMTk plans](https://raw.githubusercontent.com/fplaunchpad/ocaml-mmtk/benchmarks/quick/graphs_spacetime_m4/summary.png)
 
-The **2026-08-12** [SHAPE round 28](gc/mmtk/SHAPE.md#round-28-d5-pareto--the-honest-frontier-front-to-front-2026-08-12)
-compared memory/time frontiers after sweeping heap sizing and nursery settings
-for both collectors. Vanilla dominated Bactrian on `binarytrees`, Knuth–Bendix
-(`kb`), LU, and `spectralnorm`: it offered better time/memory trade-offs than
-those Bactrian configurations.
-This stronger comparison also predates the September merge and later policy
-changes; it is historical evidence, not a current-default result.
-
-[`SCALABILITY.md`](SCALABILITY.md) preserves the scaling experiments and controls.
-[`PERFORMANCE.md`](PERFORMANCE.md) describes the broader measurement methodology,
-including heap sweeps and reporting wall time alongside memory; some setup
-assumptions there are historical. Use the configuration above for current
-defaults and record compiler revisions, heap/nursery settings, domains, GC workers,
-and both time and RSS for a comparison.
+Every graph with its reading, the quick-panel tables (sequential and parallel),
+configuration, raw data and history: [`RESULTS.md`](RESULTS.md). Measurement
+method: [`PERFORMANCE.md`](PERFORMANCE.md); scaling experiments:
+[`SCALABILITY.md`](SCALABILITY.md).
 
 ## Source and further reading
 
