@@ -1,4 +1,8 @@
-(* MMTk DISABLED: "lifetime" finaliser flag not flipped on the test's Gc.full_major (deferred) [semantic-timing]. *)
+(* MMTk DISABLED: on ConcurrentImmix and LXR, "lifetime" finaliser flag not
+   flipped on the test's Gc.full_major [semantic-timing]. An explicit
+   collection there completes one pause, not a whole marking cycle or backup
+   trace. Passes on the stop-the-world plans since explicit collections wait
+   for their pause (GH issue 21). *)
 
 let[@inline never] float_unboxing s f =
   let x = Sys.opaque_identity (s +. 1.) in

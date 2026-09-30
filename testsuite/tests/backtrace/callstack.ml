@@ -1,4 +1,4 @@
-(* MMTk DISABLED: finaliser backtrace differs (runs from another stack site than stock's sync point) [semantic-timing]. *)
+(* MMTk DISABLED: ConcurrentImmix/LXR only: finaliser runs after Gc.full_major, not in it (GH issue 21) [semantic-timing]. *)
 (* Blank lines added here to preserve locations. *)
 
 
