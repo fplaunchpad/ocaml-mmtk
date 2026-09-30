@@ -171,6 +171,7 @@ bool mmtk_ocaml_is_in_mmtk_spaces(const void* addr);
  * domain-termination result handoff (issue #31) to confirm the result was
  * promoted before publishing it to the joiner. */
 bool mmtk_ocaml_is_in_nursery(const void* addr);
+void mmtk_ocaml_nursery_range(size_t* start, size_t* extent);
 
 /** Pin a block so a moving collection won't relocate it (interim weak/ephemeron
  * support). Returns false for non-MMTk addresses / inert under non-moving plans. */

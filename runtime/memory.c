@@ -203,7 +203,14 @@ Caml_inline void write_barrier(
      filter stock's caml_modify applies before touching the ref table. (The
      SATB barrier below is NOT gated on it: SATB greys the OLD referent,
      which exists regardless of what is being stored.) */
-  if (Is_block(new_val)) caml_mmtk_region_barrier(Op_val(obj) + field, 1);
+  /* Young-target filter (stock's Is_young(val)): only a store of a NURSERY
+     value can create an old->young edge; mature-to-mature stores are the bulk
+     of a mutation-heavy program's caml_modify traffic and cost nothing here,
+     as in stock. extent 0 = plan without one contiguous nursery: record all. */
+  if (Is_block(new_val)
+      && (caml_mmtk_nursery_extent == 0
+          || (uintnat) new_val - caml_mmtk_nursery_lo < caml_mmtk_nursery_extent))
+    caml_mmtk_region_barrier(Op_val(obj) + field, 1);
 
   /* SATB deletion barrier for the concurrent plan (ConcurrentImmix).
      write_barrier runs BEFORE the actual store (see caml_modify), so the slot
@@ -224,9 +231,6 @@ CAMLexport CAMLweakdef void caml_modify (volatile value *fp, value val)
   caml_tsan_func_entry(__builtin_return_address(0));
 #endif
 
-  /* E1: pointer-mutation counter (runtime/mmtk.c) */
-  extern unsigned long caml_e1_modify;
-  caml_e1_modify++;
   write_barrier((value)fp, 0, *fp, val);
 
   /* See Note [MM] above */
@@ -353,9 +357,6 @@ CAMLexport CAMLweakdef void caml_initialize (volatile value *fp, value val)
      *fp is an arbitrary stale word, so the previous-value check must be dropped
      entirely. GH#17.) */
 #endif
-  /* E1: mature-init-write counter (runtime/mmtk.c) */
-  extern unsigned long caml_e1_init;
-  caml_e1_init++;
   *fp = val;
   /* Initialising write into a possibly-mature block: record the slot for MMTk's
      generational plans (no-op otherwise). Replaces the stock minor

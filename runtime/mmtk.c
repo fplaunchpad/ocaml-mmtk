@@ -115,6 +115,12 @@ static int caml_mmtk_collects = 0;
 /* Whether the active plan is generational (needs the mutator write barrier).
    Read on every mutable pointer write, so keep it a plain int. */
 static int caml_mmtk_generational = 0;
+/* Nursery virtual range for write_barrier's young-target filter (stock's
+   Is_young(val)): a store of a value outside [lo, lo+extent) into a mature
+   object creates no old->young edge, so it is not recorded. extent 0 = no
+   filter (plans without one contiguous nursery). Set once at init. */
+uintnat caml_mmtk_nursery_lo = 0;
+uintnat caml_mmtk_nursery_extent = 0;
 /* Whether the active plan is the concurrent collector (ConcurrentImmix), which
    needs the SATB (snapshot-at-the-beginning) deletion write barrier. Read on
    every mutable pointer write, so keep it a plain int. */
@@ -376,7 +382,6 @@ static void caml_mmtk_check_note_stopped(uintnat dom, void *pc);
 #else
 #define CAML_MMTK_CALLER_PC NULL
 #endif
-static void caml_e1_dump(void);  /* E1 write-barrier counter dump (atexit) */
 static void caml_mmtk_dump_pause_log(void);  /* #R1 per-pause dump (atexit) */
 /* Held from init to atexit; points into the environment, so it stays valid. */
 static const char *caml_mmtk_pause_log_path;
@@ -431,6 +436,12 @@ void caml_mmtk_init(void)
   caml_mmtk_concurrent = (strcmp(plan, "ConcurrentImmix") == 0
                           || strcmp(plan, "Bactrian") == 0);
   caml_mmtk_field_log = (strcmp(plan, "LXR") == 0);
+  if (caml_mmtk_generational && !getenv("MMTK_NO_YOUNG_FILTER")) {
+    size_t lo = 0, ext = 0;
+    mmtk_ocaml_nursery_range(&lo, &ext);
+    caml_mmtk_nursery_lo = lo;
+    caml_mmtk_nursery_extent = ext;
+  }
   caml_mmtk_cont_resume_hook = caml_mmtk_field_log;
 
   /* RQ8 (ocaml-mmtk): turn OFF allocation-time zero-fill UNIVERSALLY, for every
@@ -483,8 +494,6 @@ void caml_mmtk_init(void)
     atexit(caml_mmtk_report_copied);
   }
 
-  if (getenv("MMTK_BARRIER_COUNT") != NULL)
-    atexit(caml_e1_dump);
 
   {
     /* Shape experiments: large-object placement (see caml_mmtk_semantics). */
@@ -1391,32 +1400,12 @@ void caml_mmtk_cont_resumed(value cont, value stk)
    scans them. Called from caml_modify/write_barrier (count 1, slot-based --
    OCaml hands a field address, not the object), caml_initialize, and array
    blits. Self-gated: a no-op unless an MMTk generational plan is active. */
-/* E1 (RQ1 finding 1): plan-independent write-barrier instrumentation. Counts
-   the program's intrinsic pointer-mutation volume (the LXR field-log barrier
-   fires exactly on these) vs init writes, to evidence "OCaml is
-   init-write-dominated -> the barrier rarely fires". Plain (non-atomic) longs:
-   single-domain measurement only. Dumped at exit when MMTK_BARRIER_COUNT is
-   set. caml_e1_modify/caml_e1_init are bumped from runtime/memory.c
-   (caml_modify / caml_initialize). */
-/* satb_barrier invocations (all mutation paths) */
-unsigned long caml_e1_satb_calls = 0;
-/* mutated slots = LXR barrier fires (sum of count) */
-unsigned long caml_e1_satb_slots = 0;
-/* caml_modify calls (the generic pointer-mutation) */
-unsigned long caml_e1_modify = 0;
-/* caml_initialize calls (mature init writes) */
-unsigned long caml_e1_init = 0;
-
-/* Registered via atexit under MMTK_BARRIER_COUNT (a destructor attribute gets
-   dead-stripped out of the static libasmrun archive; atexit does not). */
-static void caml_e1_dump(void)
-{
-  fprintf(stderr,
-          "[E1-BARRIER] satb_fires=%lu satb_calls=%lu "
-          "caml_modify=%lu caml_initialize=%lu\n",
-          caml_e1_satb_slots, caml_e1_satb_calls, caml_e1_modify, caml_e1_init);
-}
-
+/* The E1 write-barrier counters (RQ1's mutation-vs-init study) used to live
+   here: four plain globals bumped on every caml_modify / caml_initialize /
+   barrier call. On multi-domain programs those increments were a cross-domain
+   cache-line ping-pong on the hottest write paths (chameneos_redux at 8
+   domains: 2.1x wall, 160 -> 68 CPU-seconds once removed). Removed 2026-09-30;
+   the study's numbers are in NOTES (2026-06-3x, RQ1). */
 void caml_mmtk_region_barrier(volatile value *start, mlsize_t count)
 {
   uint64_t t0 = 0;
@@ -1448,10 +1437,6 @@ void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count)
   uint64_t t0 = 0;
   int timed = caml_mut_gc_timing;
   if (timed) t0 = MUT_GC_TSC();
-  /* E1: count every mutation-barrier entry (plan-independent) */
-  caml_e1_satb_calls++;
-  /* E1: total mutated slots = LXR field-log barrier fires */
-  caml_e1_satb_slots += count;
   if (caml_mmtk_concurrent || caml_mmtk_field_log)
     mmtk_ocaml_satb_barrier(Caml_state->mmtk_mutator, (uintptr_t) start,
                             (size_t) count);

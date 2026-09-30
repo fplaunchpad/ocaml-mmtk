@@ -796,6 +796,25 @@ pub extern "C" fn mmtk_ocaml_lxr_continuation_resumed(
 /// -- the user collection request can coalesce onto an in-flight GC that already
 /// passed its root scan of this domain, returning without promoting the result;
 /// the C side loops collect-then-recheck until this returns false.
+/// The nursery space's contiguous virtual range, for the runtime's inline
+/// "is this value young" write-barrier filter (stock's `Is_young(val)`). Writes
+/// `(start, extent)`; extent 0 means "no single contiguous nursery" (StickyImmix,
+/// Bactrian's aged spaces, non-generational plans) and the runtime then records
+/// every mature store as before.
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_nursery_range(start: *mut usize, extent: *mut usize) {
+    let r = crate::mmtk()
+        .get_plan()
+        .generational()
+        .and_then(|g| g.nursery_range());
+    unsafe {
+        match r {
+            Some((s, e)) => { *start = s.as_usize(); *extent = e; }
+            None => { *start = 0; *extent = 0; }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn mmtk_ocaml_is_in_nursery(addr: *const libc::c_void) -> bool {
     let object =

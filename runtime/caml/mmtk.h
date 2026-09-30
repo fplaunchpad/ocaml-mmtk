@@ -91,6 +91,7 @@ extern value caml_mmtk_alloc_shr(mlsize_t wosize, tag_t tag,
 extern value caml_mmtk_try_alloc_shr(mlsize_t wosize, tag_t tag);
 /* 1 if a caml_mmtk_alloc_shr block of this size is born outside the nursery
    under a generational plan (its unbarriered pointer fields need
+
    caml_mmtk_region_barrier). */
 extern int caml_mmtk_alloc_shr_is_mature(mlsize_t wosize);
 
@@ -220,6 +221,10 @@ extern uintnat caml_mmtk_heap_size_bytes(void);
  * may now point into the nursery. Self-gated (no-op unless a generational plan
  * is active). Called from write_barrier, caml_initialize, and array blits. */
 extern void caml_mmtk_region_barrier(volatile value *start, mlsize_t count);
+/* Nursery virtual range for write_barrier's young-target filter (extent 0 =
+   no filter). Set once at MMTk init; read on every caml_modify. */
+extern uintnat caml_mmtk_nursery_lo;
+extern uintnat caml_mmtk_nursery_extent;
 /* Rust-side mature-direct pacing tick (pretenure/LOS bytes; SHAPE round 30). */
 extern void mmtk_ocaml_mature_alloc_tick(size_t bytes);
 /* Rust-side off-heap accounting: credited bytes count toward reserved pages
