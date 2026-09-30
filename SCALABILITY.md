@@ -1,8 +1,9 @@
 # Multi-domain GC scalability of `mmtk-ocaml` — findings
 
-> ## ✅ UPDATE 7 (2026-09-30, night; newest, read first) — the multi-domain gap is PER-PAUSE COST, not the rendezvous: one `malloc` per copied object in the nursery pipeline, plus the E1 counters. Corrects "STW-bound".
+> ## ✅ UPDATE 7 (2026-09-30, night; mechanism corrected and first lever added late; newest, read first) — the multi-domain gap is PER-PAUSE COST, not the rendezvous: the per-copied-object nursery cost, plus the E1 counters. Corrects "STW-bound".
 >
-> Full decomposition, commands and evidence labels: `gc/mmtk/NOTES.md` 2026-09-30 (night); ROADMAP item 35.
+> Full decomposition, commands and evidence labels: `gc/mmtk/NOTES.md` 2026-09-30 (night); the packet
+> census and the local nursery closure: 2026-09-30 (late); ROADMAP item 35.
 > godel (14 cores of one NUMA node, GenImmix, `MMTK_THREADS` = domains, medians of 3):
 >
 > - **Scaling shape is fine; absolute pause cost is not.** `par_binarytrees 20` d=1 → 8: mutator
@@ -12,14 +13,20 @@
 >   674 ms of pause at d=8. The stop-the-world framing of updates 3–5 should be read as "bound by the cost of
 >   each pause", not by the stop-the-world rendezvous (update 5's "rendezvous floor" is superseded).
 > - **Per-object nursery cost:** ≈ 1.36 µs per copied object on chameneos (0.63 µs binarytrees) at the same
->   copied volume as stock; **one `malloc` per copied object** (`LD_PRELOAD` counter: 7,837,307 copies,
->   7,861,077 mallocs; vanilla 110) from mmtk-core allocating a `VectorQueue` per work packet on a
->   pipeline that carries ≈ 1 item per packet on OCaml nursery graphs.
+>   copied volume as stock. On chameneos, **one `malloc` per copied object** (`LD_PRELOAD` counter:
+>   7,837,308 copies, 7,861,282 mallocs; vanilla 110) from several allocations per narrow work packet —
+>   scan packets average 3.001 objects, 99.95 % of width 2–4 (a packet census by an independent review;
+>   the first reading, one item per packet, was wrong). binarytrees is different: 2,759 objects per scan
+>   packet, 0.0027 malloc per copy, so its cost is the per-copy metadata writes, not packets.
 > - **chameneos anti-scaling was mostly the E1 barrier-study counters** (non-atomic globals bumped by
->   every domain in the write barrier; 68 % of d=8 CPU in the barrier). Removed by PR 58 (pending merge):
+>   every domain in the write barrier; 68 % of d=8 CPU in the barrier). Removed by PR 58 (merged `ee744db495`):
 >   d=8 21.8 → 10.3 s, speedup 1.9× → 4.0×.
-> - **Fix direction:** a worker-local, allocation-free nursery trace loop in the mmtk-core fork
->   (generalising the opt-in UP-oldify path), with a spill threshold as the parallelism knob.
+> - **First lever, landed opt-in (late):** a worker-local nursery closure in the mmtk-core fork
+>   (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix; `MMTK_LOCAL_NURSERY_SPILL` = the parallelism knob, default
+>   4096). godel, 3 reps: chameneos_redux 500000 GC 27.8 → 19.6 s at d=1 (−29 %), 8.6 → 7.5 s at d=8
+>   (−12 %); par_binarytrees 20 d=8 4.35 → 4.0 s (−8 %); binarytrees 20 −4 %. Full GenImmix
+>   testsuite with it on: 1444 passed, 5 host-speed timeouts (godel). Next lever: the per-copy
+>   writes (binarytrees).
 
 > ## ⚠️ UPDATE (2026-06-25) — the anti-scaling headline below is SUBSTANTIALLY REVISED
 >
