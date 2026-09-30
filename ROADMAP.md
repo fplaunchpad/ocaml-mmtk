@@ -5,12 +5,19 @@ The living plan for `ocaml-mmtk`, meant to be picked up cold in a fresh session.
 done; **M8 (benchmark + optimise) is the open milestone.** The correctness/perf tail
 below is deferrable engineering; the agenda in
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) drives priority.
-**Correctness status (2026-09-29).** Four fixes merged on 2026-09-29: the default plan's silent
+**Correctness status (2026-09-30).** Five fixes merged on 2026-09-29/30: the default plan's silent
 corruption from native `Array.fill` and `No_sharing` unmarshalling (item 18, GH issue 28; present since
 2026-06-24) is fixed on mainline as of `240b6c8f62`; LXR's wrong results (item 17, GH issue 26), the
-systhreads RUNNING-set bug (item 19, GH issue 24) and the dynamic heap's pending-demand growth
-(item 20(a)) are fixed too. Each fix was verified on its own branch; a combined run on `724ca4068a` is
-pending. Open correctness work, in order: items 21, 25, 22, 26, 15/20, 23, 24, 27.
+systhreads RUNNING-set bug (item 19, GH issue 24), the dynamic heap's pending-demand growth
+(item 20(a)) and the domain-creation interrupt-word race (item 29, GH issue 37, `6865b559ed`) are fixed
+too. **Combined run** (re-run independently, macOS arm64, dynamic heap, tree built in place at
+`da5f51ffba`): full testsuite GenImmix 1446 / 0, Bactrian 1446 / 0, Immix 1446 / 0; CI on `da5f51ffba`:
+Build green including both debug jobs, all-plans green for GenImmix, Immix, StickyImmix, SemiSpace and
+ConcurrentImmix, red for Bactrian (item 26), GenCopy (item 15) and LXR (item 21). **Open:** a GC-worker
+free abort under domain churn (item 28, GH issue 39; memory safety, default plan), LXR capacity and
+failures (item 21), fork (item 25, GH issue 33), explicit `Gc` requests (item 22), the Bactrian CI
+out-of-memory (item 26, GH issue 36), one-off multi-domain crashes on CI (item 30). Order: items 28,
+21, 25, 22, 26, 30, 15/20, 23, 24.
 
 Companion docs: [`README.md`](README.md) (overview + build/run),
 [`RESEARCH_QUESTIONS.md`](RESEARCH_QUESTIONS.md) (what this platform is *for*),
@@ -542,7 +549,10 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     36569985297, 36570516849). A topic-branch run between them (36569800854) failed it.
     Repro: `env MMTK_PLAN=GenCopy MMTK_HEAP_SIZE_MB=4096 make -C testsuite one
     TEST=tests/misc/darkening_work.ml TIMEOUT=120`, then the built binary under `MMTK_PACE_DEBUG=1`.
-    → NOTES 2026-09-29.
+    **CI update (2026-09-30, from the run logs):** of the later runs it failed on the PR 35 branch
+    (`7383bb3c93`) and on mainline `da5f51ffba`, and passed on `e351966d59` and the PR 38 branch
+    (`d963811a74`). (On `e351966d59` GenCopy failed a different test, `parallel/tak.ml`: item 30.)
+    → NOTES 2026-09-29, 2026-09-30.
 
 16. **Immix / ConcurrentImmix: `weak-ephe-final/weaklifetime.ml` times out at CI's fixed 4 GiB heap
     (pre-existing, not caused by the merge) — FIXED 2026-09-29 by ocaml-mmtk PR 27 (merge `69b81065c7`).** Exit -9 (ocamltest's 120 s SIGKILL) in run
@@ -586,15 +596,18 @@ Correctness before performance; dependencies noted. **Depth for every item is in
     until item 21 is resolved and they are re-measured. (An earlier version of this item said an explicit `Gc.full_major ()` produces no
     collection under LXR; that was wrong — see item 22.) → NOTES 2026-09-29.
 
-**Items 18-27 (added 2026-09-29).** Items 17, 18, 19 and 20(a) were fixed and merged the same day
-(each verified on its own branch; a combined run on `724ca4068a` is pending). The OPEN work, in
-priority order: (1) item 21, LXR capacity and the remaining LXR failures (they keep LXR's results
-provisional); (2) item 25, GH issue 33, a forked child cannot run a collection (it blocks item 22);
-(3) item 22, explicit `Gc` request semantics (a fix exists but is not mergeable); (4) item 26, the
-intermittent Bactrian out-of-memory in Linux CI (cause unknown); (5) the reserved-pages pacing class:
-GenCopy `darkening_work` (items 15 and 20(b)) and the unexplained July growth (20(c)); (6) item 23, a
-possible concurrent-marking infix race; (7) item 24, two pre-existing side findings from the
-store-path audit; (8) item 27, the all-plans CI path filter. Evidence is labelled
+**Items 18-27 (added 2026-09-29), 28-30 (added 2026-09-30).** Items 17, 18, 19 and 20(a) were fixed
+and merged on 2026-09-29, item 27 with the docs of PR 35, and item 29 on 2026-09-30. The combined
+run on mainline is in the intro. The OPEN work, in priority order: (1) item 28, GH issue 39, a GC
+worker frees a pointer it does not own under domain churn: ranked first because it is a
+memory-safety bug on the default plan, while item 21 limits an experimental plan; (2) item 21, LXR
+capacity and the remaining LXR failures (they keep LXR's results provisional); (3) item 25, GH issue
+33, a forked child cannot run a collection (it blocks item 22); (4) item 22, explicit `Gc` request
+semantics (a fix exists but is not mergeable); (5) item 26, GH issue 36, the intermittent Bactrian
+out-of-memory in Linux CI (cause unknown); (6) item 30, one-off multi-domain crashes on Linux CI
+(possibly item 28); (7) the reserved-pages pacing class: GenCopy `darkening_work` (items 15 and
+20(b)) and the unexplained July growth (20(c)); (8) item 23, a possible concurrent-marking infix
+race; (9) item 24, two pre-existing side findings from the store-path audit. Evidence is labelled
 *verified* (reproduced by running), *source reading*, *inferred* or *unknown*.
 
 18. **Two bulk-store paths skipped the generational barrier: silent corruption under the generational
@@ -738,7 +751,7 @@ store-path audit; (8) item 27, the all-plans CI path filter. Evidence is labelle
       bytes.
     → NOTES 2026-09-29; RESEARCH_QUESTIONS RQ7.
 
-21. **LXR capacity, and the remaining LXR failures (open; first priority).** The capacity problem was
+21. **LXR capacity, and the remaining LXR failures (open; second priority, after item 28).** The capacity problem was
     exposed by the item-17 fix (merged 2026-09-29); the capacity figures below are as reported by the
     fix's author, not re-run independently.
     - With increments applied, the item-17 probe runs out of memory at 32 MiB with a ~0.5 MiB live
@@ -774,7 +787,9 @@ store-path audit; (8) item 27, the all-plans CI path filter. Evidence is labelle
       `lib-systhreads/gh24_running_set_stress.ml` on the PR 32 branch).
     - **Process consequence:** the LXR job is a gating job and is red on every PR. A red LXR job is
       treated as explained only when all its failing tests are within the set above; any other
-      failure needs triage.
+      failure needs triage. The same rule applies to Bactrian (item 26): a red Bactrian job counts as
+      explained only if its only failures are `ocamlopt.opt` `Out of memory` compile failures (GH issue
+      36); anything else, including a test program's own `Out of memory`, needs triage.
     → NOTES 2026-09-29.
 
 22. **Explicit `Gc` requests return before the collection runs (open; likely GH issue 21; a fix exists
@@ -804,8 +819,15 @@ store-path audit; (8) item 27, the all-plans CI path filter. Evidence is labelle
       process (fails 1/1; passes on the base). This is GH issue 33 (item 25), which the fix exposes.
     - `lib-dynlink-domains/main.ml`: the native run is killed by the timeout (fails 3/3 under
       `make one`; passes 3/3 on the base). The built binary run by hand exited normally. Cause unknown.
-    **Status: blocked** on those two failures and on GH issue 33. Both commits also need rebasing
-    (mmtk-core is now at `44d02b65a9`, mainline at `724ca4068a`).
+      **Correction (2026-09-30): UNCONFIRMED.** The tree used for this result linked the test
+      programs against another tree's `otherlibs`: its test driver had been copied from a different
+      build tree and kept that tree's include paths (`ocamltest/ocamltest_config.ml`; `OCAMLSRCDIR`
+      does not override them). The result must be re-run in a tree built in place. This test also
+      failed once on mainline CI for an unrelated reason (item 29, GH issue 37). The `testfork`
+      regression stands.
+    **Status: blocked** on `testfork` (GH issue 33), pending a clean re-run of
+    `lib-dynlink-domains/main.ml`. Both commits also need rebasing (mmtk-core is now at `44d02b65a9`,
+    mainline at `6865b559ed`).
     → NOTES 2026-09-29.
 
 23. **Possible concurrent-marking infix race (open question; inferred, not probed).** Under
@@ -838,33 +860,91 @@ store-path audit; (8) item 27, the all-plans CI path filter. Evidence is labelle
     collection request. Blocks item 22; `fork` was out of scope of the item-19 fix.
     → NOTES 2026-09-29 (landings entry).
 
-26. **Intermittent Bactrian out-of-memory in the native compiler on Linux CI (open; added 2026-09-29;
-    cause unknown).** In the all-plans testsuite workflow (4 GiB pinned heap), `ocamlopt.opt`, itself
+26. **GH issue 36: intermittent Bactrian out-of-memory on Linux CI (open; added 2026-09-29; cause
+    unknown).** In the all-plans testsuite workflow (4 GiB pinned heap), `ocamlopt.opt`, itself
     running under `MMTK_PLAN=Bactrian`, stops with `Fatal error: exception Out of memory` (exit 2) while
-    compiling a test; the test is then counted as failed. *Verified from the run logs of 2026-09-29:*
+    compiling a test; the test is then counted as failed. *Verified from the run logs:*
     - Failed: `lib-string/test_string.ml` (run 36542738150, mainline `89d0602e12`), `misc/sorts.ml`
       (36558162128, mainline `358ea7958c`), `lib-format/tformat.ml` and `lib-scanf/tscanf.ml`
       (36563475743, PR 29's branch, i.e. mainline code at `69b81065c7`), `tformat.ml` (36563792450,
-      PR 30's branch), `test_string.ml` (36569800854, PR 32's branch, based on `cd162e8496`).
-    - Passed: 36534216189 and 36537448938 (the first two post-merge runs), 36565968550 (`cd162e8496`),
-      36569985297 (`c59f7851c3`), and both runs containing the item-18 fix: 36563812717 (PR 31's
-      branch) and 36570516849 (`240b6c8f62`).
-    So it failed 5 of the 9 runs without the item-18 fix and 0 of the 2 with it. *Hypothesis,
-    unverified:* the item-18 bugs (native `Array.fill` and `No_sharing` unmarshalling both corrupt
-    Bactrian; the compiler is native code), with a corrupted value producing a bogus allocation
-    request. Two green runs do not establish it. Not reproduced locally (full Bactrian runs on macOS:
-    1443 / 0). **What would settle it:** several consecutive green Bactrian CI runs on mainline after
-    `240b6c8f62`, or a local reproduction of the out-of-memory with the failing compile command under
-    `MMTK_PLAN=Bactrian MMTK_HEAP_SIZE_MB=4096` on a pre-fix tree, then the same on the fix.
-    → NOTES 2026-09-29 (landings entry).
+      PR 30's branch), `test_string.ml` (36569800854, PR 32's branch, based on `cd162e8496`),
+      `memory-model/forbidden.ml` (36579401670, mainline `e351966d59`), `tscanf.ml` (36581329531, PR
+      35's branch), `tformat.ml` (36583101914, mainline `da5f51ffba`), `sorts.ml` (36595437886, PR 38's
+      branch).
+    - **Not only the compiler:** on `e351966d59` the bytecode test program `parallel/churn.ml` itself
+      died with `Fatal error: exception Out of memory` (exit 2) under Bactrian, besides the
+      `forbidden.ml` compile failure.
+    - Passed: 36534216189 and 36537448938 (the first two post-merge runs), 36563812717 (PR 31's
+      branch), 36565968550 (`cd162e8496`), 36569985297 (`c59f7851c3`), 36570516849 (`240b6c8f62`).
+    **Refuted (2026-09-30):** the earlier hypothesis that the item-18 bugs caused this. The failure
+    recurs on `e351966d59`, `da5f51ffba` and the PR 38 branch, all of which contain the item-18 fix.
+    Only Bactrian shows it; the other gating plans pass on the same commits. *Unknown:* the cause (a
+    compiler out of memory in a 4 GiB heap suggests pacing or accounting — a collection not
+    triggered, or reserved pages not returned — more than a live-set problem, but nothing is
+    measured), and whether it depends on the GC worker count or the runner's memory. Not reproduced
+    locally (full Bactrian on macOS arm64, 512 MiB and dynamic heap: 1446 / 0 on `da5f51ffba`).
+    **Next:** run `ocamlopt.opt` on `tformat.ml` repeatedly under `MMTK_PLAN=Bactrian
+    MMTK_HEAP_SIZE_MB=4096` on Linux with `MMTK_VERBOSE=1` and `BACTRIAN_TRACE=1`, and record heap
+    occupancy and the size of the failing request. The CI triage rule is in item 21.
+    → NOTES 2026-09-29 (landings entry), 2026-09-30.
 
-27. **The all-plans testsuite workflow does not run on a submodule bump (open; small; added
-    2026-09-29).** `.github/workflows/testsuite-plans.yml` runs on `push` with `paths:` `gc/mmtk/**`,
-    `runtime/**` and the workflow file. The mmtk-core submodule is the gitlink `gc/mmtk-core`, which
-    `gc/mmtk/**` does not match, so a pure pin bump gets no all-plans run: PR 34 (`e788d8bdb5`, merged
-    as `724ca4068a`, only `gc/mmtk-core` changed) had none, and mmtk-core's fork has no CI on pull
-    requests. Conversely, docs-only edits to `gc/mmtk/*.md` do trigger it. **Fix:** add
-    `'gc/mmtk-core'` to the `paths:` list (and optionally exclude `gc/mmtk/**/*.md`).
+27. **The all-plans testsuite workflow did not run on a submodule bump — FIXED 2026-09-29** by
+    `7383bb3c93` (merged with PR 35, `da5f51ffba`). `.github/workflows/testsuite-plans.yml` ran on
+    `push` with `paths:` `gc/mmtk/**`, `runtime/**` and the workflow file; the mmtk-core submodule is
+    the gitlink `gc/mmtk-core`, which `gc/mmtk/**` does not match, so a pure pin bump got no all-plans
+    run: PR 34 (`e788d8bdb5`, merged as `724ca4068a`, only `gc/mmtk-core` changed) had none, and
+    mmtk-core's fork has no CI on pull requests. **Fix:** `'gc/mmtk-core'` added to `paths:`. Not yet
+    exercised by a pin bump. (Docs-only edits to `gc/mmtk/*.md` still trigger the workflow.)
+
+28. **GH issue 39: a GC worker aborts freeing a work packet under domain churn (open; added
+    2026-09-30; high priority — memory safety on the default plan).** *Symptom:* SIGABRT (exit 134),
+    no output. The macOS crash report shows thread `mmtk-gc-worker` in `abort` <- `malloc_report`
+    (`pointer being freed was not allocated`) <- `drop_in_place<Box<dyn GCWork<OCamlVM>>>` <-
+    `GCWorker::run` <- `start_worker` <- `VMCollection::spawn_gc_thread` (one crash report's stack read
+    independently). *Reproduction:* debug runtime, bytecode, default plan, `OCAMLRUNPARAM=v=0`, macOS
+    arm64; 200 rounds, each spawning 6 domains that each allocate, spawn a child domain and join it,
+    while one more domain allocates throughout. *As reported by the investigation that found it:*
+    about 1-3% of runs (5 aborts in roughly 500), on `358ea7958c`, on `da5f51ffba` and with the item-29
+    fix applied, so independent of GH issue 37; at the abort, domains were parked for a collection,
+    some terminating, others in `caml_mmtk_domain_terminate`. *Unknown:* the cause (a double free of a
+    work packet or corruption of its box); whether it occurs on the release runtime, in native code or
+    on Linux (see item 30 for Linux CI crashes that may or may not be the same bug); whether it
+    involves mutator deregistration at domain termination (the remembered-set flush at deregister,
+    or packets that reference a terminated mutator). **Next:** `rr record -c <N>` on Linux, varying N.
+    → NOTES 2026-09-30.
+
+29. **GH issue 37: a new domain's interrupt word was published after the bind loop — FIXED
+    2026-09-30** by ocaml-mmtk PR 38 (merge `6865b559ed`, fix `d963811a74`; `runtime/domain.c`). GH issue
+    37 is closed. *Symptom:* `Assertion failed: has_interrupt_word` (`runtime/domain.c:201`,
+    `check_stw_domains`), seen once on CI in job `extra (debug)`, test `lib-dynlink-domains/main.ml`,
+    on `724ca4068a`. *Cause:* `domain_create` parks a slot under `all_domains_lock`; since `eb7d21a683`
+    (2026-09-28, "Domain creation no longer overlaps MMTk collections") it may drop that lock in the
+    MMTk bind loop while a collection is active, and it published the slot's `interrupt_word` only
+    after the loop. A second creator could then park and activate a later slot, putting an active
+    domain above a slot with no interrupt word and breaking the prefix invariant that
+    `check_stw_domains` asserts. Not caused by the item-19 fix: it reproduces on `358ea7958c`.
+    *Release-runtime effect during the window (source reading):* `caml_interrupt_all_signal_safe`
+    stops at the unpublished slot, so signal handling is delayed for domains above it (domains below,
+    including domain 0, are still interrupted); `caml_find_index_of_running_domain` returns -1 for a
+    running domain above the slot, so `caml_c_thread_register_in_domain` can fail spuriously; MMTk
+    pauses are unaffected (pause poisoning goes through the mutator registry). **Fix:** publish the
+    interrupt word in the same lock hold that parks the slot, as upstream effectively does.
+    *Verified (re-run independently, macOS arm64, debug runtime, domain spawn/join stress under load):*
+    10 assertion hits in 80 runs on `358ea7958c`, 0 in 40 on the fix run at the same time; full
+    testsuite on the fix GenImmix 1446 / 0, debug runtime 1446 / 0. CI on the PR: `extra (debug)`,
+    `extra (debug-s4096)` and `normal` pass. *As reported by the fix's author:* 10/100 and 7/50 hits
+    before, 0/200 after. → NOTES 2026-09-30.
+
+30. **One-off multi-domain crashes on Linux CI (open; added 2026-09-30; cause unknown; possibly item
+    28).** *Verified from the all-plans run logs of 2026-09-29* (release runtime, 4 GiB pinned heap),
+    each seen once:
+    - ConcurrentImmix, `parallel/prodcons_domains.ml` (bytecode), run 36581329531 on the PR 35 branch
+      (`7383bb3c93`, same code as `e351966d59`): glibc `double free or corruption (!prev)`, exit -6.
+    - GenCopy, `parallel/tak.ml` (native, built by `ocamlopt.byte`), run 36579401670 on mainline
+      `e351966d59`: SIGSEGV (exit -11), no output.
+    *Inferred, not established:* the `double free` is the same class as item 28 (a free of memory the
+    allocator does not own, in a multi-domain program), which would place item 28 on Linux and the
+    release runtime. The two logs do not identify the freeing thread. → NOTES 2026-09-30.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

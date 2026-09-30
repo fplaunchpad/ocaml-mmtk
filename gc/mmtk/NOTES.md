@@ -5,6 +5,157 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-30 - combined verification of the 2026-09-29 fixes; GH issue 37 fixed; GH issue 39 (GC worker free abort) and multi-domain CI crashes; GH issue 36 hypothesis refuted; verification trees must be built in place (KNOWN FAILURES)
+
+Evidence labels as in the 2026-09-29 entries (*verified* = reproduced by
+running; *source reading*; *inferred*; *unknown*). "Re-run independently"
+means reproduced by someone other than the author of the fix or finding.
+Local runs are macOS arm64.
+
+### Combined result on mainline
+
+Re-run independently in a tree built in place at `da5f51ffba` (all of the
+2026-09-29 fixes plus the item-27 CI change), dynamic heap: full testsuite
+GenImmix 1446 passed / 0 failed, Bactrian 1446 / 0, Immix 1446 / 0. This
+closes the "combined run pending" note of the landings entry.
+
+CI on `da5f51ffba` (runs 36583101993, 36583101914): Build workflow green,
+including `extra (debug)` and `extra (debug-s4096)` (the RUNNING-set check
+aborts on any violation there). All-plans workflow: GenImmix, Immix,
+StickyImmix, SemiSpace and ConcurrentImmix green; Bactrian red on one
+`ocamlopt.opt` out-of-memory (`tformat.ml`, GH issue 36); GenCopy red on
+`misc/darkening_work.ml` (ROADMAP item 15, intermittent); LXR red on its
+known set (item 21).
+
+### GH issue 37 (ROADMAP item 29): interrupt word published too late - FIXED
+
+- *Symptom:* `Assertion failed: has_interrupt_word`, `runtime/domain.c:201`
+  (`check_stw_domains`), once on CI: job `extra (debug)`, test
+  `lib-dynlink-domains/main.ml` (bytecode), on `724ca4068a`. Intermittent;
+  the job passed on the commits before and after. Failing stack:
+  `check_stw_domains <- activate_parked_domain <- domain_create <-
+  domain_thread_func`.
+- *Cause:* `domain_create` parks a slot under `all_domains_lock`. Since
+  `eb7d21a683` (2026-09-28, "Domain creation no longer overlaps MMTk
+  collections") it may drop that lock in the MMTk bind loop while a
+  collection is active, and it published the slot's `interrupt_word` only
+  after the loop. Interleaving: creator A parks slot i and drops the lock in
+  the bind loop; creator B parks slot i+1, binds and activates it; slot i+1
+  is now active above slot i, which has no interrupt word. That breaks the
+  prefix invariant (slots with an interrupt word form a prefix covering the
+  active domains). Upstream keeps park, publication and activation in one
+  lock hold.
+- Not caused by the GH issue 24 fix: it reproduces on `358ea7958c`, which
+  predates it.
+- *Release-runtime effect while the window is open (source reading):*
+  `caml_interrupt_all_signal_safe` stops at the unpublished slot, so running
+  domains above it are not interrupted for that signal; domains below it,
+  including domain 0, still are, so handling is delayed rather than lost.
+  `caml_find_index_of_running_domain` returns -1 for a running domain above
+  the slot, so `caml_c_thread_register_in_domain` can fail spuriously. MMTk
+  pauses are unaffected: pause poisoning goes through the mutator registry,
+  not `interrupt_word`.
+- *Fix:* ocaml-mmtk PR 38 (merge `6865b559ed`, fix `d963811a74`): publish the
+  interrupt word in the same lock hold that parks the slot.
+- *Verified, re-run independently* (debug runtime, `OCAMLRUNPARAM=v=0`, a
+  stress of 200 rounds each spawning 6 domains that each spawn a child,
+  while another domain allocates, under load): 10 assertion hits in 80 runs
+  on `358ea7958c`, 0 in 40 with the fix, run at the same time. Full
+  testsuite on the fix: GenImmix 1446 / 0, debug runtime 1446 / 0. CI on the
+  PR: `extra (debug)`, `extra (debug-s4096)` and `normal` pass. *As reported
+  by the fix's author:* 1/20, 1/50 and 10/100 on `358ea7958c`, 1/20 and 7/50
+  on `da5f51ffba`, 0/200 with the fix. The CI test itself did not reproduce
+  locally (0/40 per tree).
+
+### KNOWN FAILURE: GH issue 39 (ROADMAP item 28): GC worker aborts freeing a work packet
+
+- *Symptom:* SIGABRT (exit 134), no output, under the same spawn/join stress
+  as above (debug runtime, bytecode, default plan, macOS arm64). Stack of
+  thread `mmtk-gc-worker` from the crash report (one report read
+  independently):
+  `abort <- malloc_vreport <- malloc_report <-
+  ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED <-
+  drop_in_place<Box<dyn GCWork<OCamlVM>>> <- GCWorker<VM>::run <-
+  memory_manager::start_worker <- VMCollection::spawn_gc_thread::{{closure}}`.
+- *As reported by the investigation that found it:* about 1-3% of runs (5
+  aborts in roughly 500), on `358ea7958c`, on `da5f51ffba`, and with the
+  GH issue 37 fix applied (so independent of it). At the abort, domains were
+  parked for a collection, some terminating, others in
+  `caml_mmtk_domain_terminate`.
+- *Unknown:* the cause (a double free of a work packet, or corruption of the
+  packet's box); whether it happens on the release runtime, in native code or
+  on Linux; whether mutator deregistration at domain termination is
+  involved (the remembered-set flush at deregister, or packets that reference
+  a terminated mutator).
+- A memory-safety bug in the collector under multi-domain churn, on the
+  default plan. Next step: `rr record -c <N>` on Linux, varying N.
+
+### KNOWN FAILURE: one-off multi-domain crashes on Linux CI (ROADMAP item 30)
+
+Found by reading the logs of every all-plans run of 2026-09-29 for the
+gating plans (release runtime, 4 GiB pinned heap); each seen once:
+- ConcurrentImmix, `parallel/prodcons_domains.ml` (bytecode), run
+  36581329531 (PR 35 branch, `7383bb3c93`, same code as `e351966d59`):
+  glibc `double free or corruption (!prev)`, exit -6.
+- GenCopy, `parallel/tak.ml` (native, built by `ocamlopt.byte`), run
+  36579401670 (mainline `e351966d59`): SIGSEGV, exit -11, no output.
+*Inferred, not established:* the `double free` is the same class as GH issue
+39, which would put that bug on Linux and on the release runtime. The logs
+do not show the freeing thread.
+
+### GH issue 36 (ROADMAP item 26): the bulk-store hypothesis is refuted
+
+The landings entry below guessed that the Bactrian out-of-memory came from
+the GH issue 28 bugs (5 of 9 runs failed without that fix, 0 of 2 with it).
+Refuted: it recurred on runs whose tree contains the fix. *Verified from the
+logs:*
+
+| run | tree | Bactrian result |
+|---|---|---|
+| 36579401670 | `e351966d59` (mainline) | `memory-model/forbidden.ml` compile; `parallel/churn.ml` (bytecode) run |
+| 36581329531 | PR 35 branch (`7383bb3c93`) | `lib-scanf/tscanf.ml` |
+| 36583101914 | `da5f51ffba` (mainline) | `lib-format/tformat.ml` |
+| 36595437886 | PR 38 branch (`d963811a74`) | `misc/sorts.ml` |
+
+New: on `e351966d59` the test program `parallel/churn.ml` (bytecode) itself
+died with `Fatal error: exception Out of memory` (exit 2), so it is not only
+the native compiler (the GH issue 36 text says the test programs are not what
+fails; that is no longer accurate). Cause unknown; only Bactrian shows it.
+Not reproduced locally (full Bactrian at 512 MiB and with the dynamic heap:
+1446 / 0 on `da5f51ffba`).
+
+CI triage rule (ROADMAP item 21): a red Bactrian job counts as explained
+only if its only failures are `ocamlopt.opt` `Out of memory` compile failures;
+anything else, including a test program's own `Out of memory`, needs triage.
+
+### Correction: the explicit-Gc fix's `lib-dynlink-domains/main.ml` regression is UNCONFIRMED (ROADMAP item 22)
+
+The landings entry below reports that the unmerged explicit-Gc fix makes
+`lib-dynlink-domains/main.ml` (native) time out 3/3. The verification tree
+used for that result linked the test programs against another tree's
+`otherlibs`: its test driver had been copied from a different build tree and
+kept that tree's include paths. The result is downgraded to UNCONFIRMED and
+needs re-running in a tree built in place. That test also failed once on
+mainline CI for the unrelated GH issue 37 (above). The `testfork` regression
+stands: the hang is in the child's `Gc.minor ()` (GH issue 33).
+
+**Lesson (verification trees).** A test tree populated by copying build
+products keeps the source tree's paths in `ocamltest/ocamltest_config.ml`,
+and setting `OCAMLSRCDIR` does not override the `-I` paths used for
+`otherlibs`. So such a tree can silently test another tree's libraries.
+Build verification trees in place (configure and `make` in the tree itself).
+
+### Other
+
+- ROADMAP item 27 (all-plans CI path filter) is fixed by `7383bb3c93`
+  (merged with PR 35): `gc/mmtk-core` added to `paths:`. Not yet exercised by
+  a pin bump.
+- GenCopy `darkening_work.ml` after the last entry: failed on the PR 35
+  branch and on `da5f51ffba`, passed on `e351966d59` and the PR 38 branch
+  (ROADMAP item 15).
+
+---
+
 ## 2026-09-29 - landings: GH issues 24, 26 and 28 and the pending-demand fix merged; fork (GH issue 33), explicit-Gc fix blocked, CI findings (KNOWN FAILURES)
 
 Evidence labels as in the entry below. "Re-run independently" means the
@@ -12,6 +163,10 @@ result was reproduced by someone other than the fix's author; figures only
 the author measured say so. Each fix was verified on its own branch; a
 combined run on `724ca4068a` (all of them together) is pending, so no
 combined result is claimed here. Local runs are macOS arm64.
+
+**UPDATE (2026-09-30):** the combined run was done on `da5f51ffba`; see the
+2026-09-30 entry. It also corrects the `lib-dynlink-domains/main.ml` result
+and refutes the Bactrian hypothesis below.
 
 ### What merged (checked with `git log 358ea7958c..mmtk/5.5+mmtk` and `gh`)
 
@@ -132,6 +287,10 @@ ConcurrentImmix, but the full GenImmix testsuite gives 1441 passed /
 Blocked on those two and on GH issue 33. Both commits need rebasing onto
 mmtk-core `44d02b65a9` and mainline `724ca4068a`.
 
+**UPDATE (2026-09-30):** the `lib-dynlink-domains/main.ml` result is
+UNCONFIRMED (the verification tree used another tree's `otherlibs`); see the
+2026-09-30 entry. The `testfork` result stands.
+
 ### KNOWN FAILURE: intermittent Bactrian out-of-memory in the native compiler on Linux CI (ROADMAP item 26; cause unknown)
 
 Read from the all-plans run logs of 2026-09-29 (4 GiB pinned heap). Every
@@ -159,6 +318,10 @@ both corrupt Bactrian; the compiler is native code). Two green runs do not
 establish it. Not reproduced locally (full Bactrian on macOS: 1443 / 0).
 Settled by several consecutive green Bactrian runs on mainline after
 `240b6c8f62`, or by reproducing the out-of-memory on a pre-fix tree.
+
+**UPDATE (2026-09-30): hypothesis REFUTED** - the failure recurred on
+`e351966d59`, `da5f51ffba` and the PR 38 branch, all containing the fix; now
+GH issue 36. See the 2026-09-30 entry.
 
 ### LXR on Linux CI (ROADMAP item 21)
 
@@ -191,6 +354,7 @@ failing tests are within this set.
   `push` with `paths:` `gc/mmtk/**`, `runtime/**` and the workflow file. The
   submodule gitlink `gc/mmtk-core` does not match `gc/mmtk/**`, so PR 34 (a
   pure pin bump) got no all-plans run. Fix: add `gc/mmtk-core` to `paths:`.
+  **UPDATE (2026-09-30):** done in `7383bb3c93` (merged with PR 35).
 
 ---
 
@@ -410,6 +574,8 @@ open.
 **UPDATE: NOT mergeable yet.** It breaks `lib-systhreads/testfork.ml`
 (GH issue 33) and `lib-dynlink-domains/main.ml` (native timeout, cause
 unknown) under GenImmix. See the entry above, "landings".
+**UPDATE (2026-09-30):** the `lib-dynlink-domains/main.ml` part is
+UNCONFIRMED; see the 2026-09-30 entry.
 
 ### GH issue 24 confirmed by running (ROADMAP item 19)
 
