@@ -134,8 +134,12 @@ defaults, all within 64–75 MiB, the generational plans take 2.7× (GenImmix)
 and 3.3× (Bactrian) Immix's time. Before the fix, all three fronts started at
 117–120 MiB, with the same times.
 
-**Takeaway: on continuation- and effects-heavy code, generationality itself is
-the cost; plain Immix beats vanilla's default by 23 % at twice the memory.**
+**Takeaway: on continuation- and effects-heavy code, the generational plans'
+nursery is the cost; plain Immix beats vanilla's default by 23 % at twice the
+memory.** Diagnosed on 2026-09-30 (night): not the continuation stacks but
+MMTk's per-object nursery cost, ≈ 1.36 µs per copied object at the same
+copied volume as stock, dominated by one `malloc` per copied object in the
+work-packet pipeline (item 2 of "What the curves say"; ROADMAP item 35).
 
 ## Quick panel (screening)
 
@@ -191,7 +195,10 @@ workers for N domains).
 
 Reading: `chameneos_redux` anti-scales on every MMTk plan (GenImmix 3016 ms at
 1 domain to 13372 ms at 8, while vanilla goes 1421 → 419 ms; 369 vs 295 MiB at
-8 domains). The other benches gain speed with domains but less than vanilla:
+8 domains). Most of that anti-scaling was the E1 barrier-study
+counters, bumped from every domain on every write barrier (removed by PR 58,
+pending merge; measured on godel, not re-run on the M4); see "What the curves
+say", item 2. The other benches gain speed with domains but less than vanilla:
 3.2–3.4× vs 5.2× on `par_spectralnorm`, 5.0–5.2× vs 6.1× on `par_matmul`, and
 GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
 561 MiB at 8 domains); Immix anti-scales on `par_binarytrees`.
@@ -220,9 +227,18 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
 2. **Generational plans lose 2.7–3.3× to Immix on effects-heavy code**
    (`chameneos_redux`, 1 domain, at the defaults of this sweep; 2.6–3.1× in
    the first sweep and the panel), and every plan anti-scales with domains
-   there. *Open:* is it continuation stacks (fiber scanning or
-   remembered-set traffic on stack writes) or the promotion path? Needs a
-   profile, not a guess.
+   there. **Diagnosed (2026-09-30 night, godel; NOTES entry of that
+   date, ROADMAP item 35):** neither continuation stacks nor a larger
+   promoted volume. MMTk copies the same volume as stock (20.2 M objects at
+   1 domain), but its nursery pause costs ≈ 1.36 µs per copied object,
+   dominated by one `malloc` per copied object in mmtk-core's work-packet
+   pipeline, plus side-metadata traffic; full GCs are cheap (68 pauses,
+   0.7 s of 27.5 s of pause). Plain Immix has no nursery and pays none of
+   it. The anti-scaling at 8 domains was mostly the E1 barrier-study
+   counters contending across domains (removed by PR 58, pending merge:
+   godel d=8 21.8 → 10.3 s, speedup 1.9× → 4.0×); the stop-the-world
+   rendezvous is not a factor (26 of 674 ms of pause at 8 domains on
+   `par_binarytrees`, M4). The numbers above predate both findings.
 3. **The generational plans segfault instead of raising `Out_of_memory` at
    too-small heaps** (GH issue 49; Immix fails cleanly at the 32 and 48 MiB
    heaps). The same 20 points fail in both sweeps. The same signature was
