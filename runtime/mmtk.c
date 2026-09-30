@@ -558,7 +558,15 @@ void caml_mmtk_init(void)
      the pause path itself free of any I/O: records accumulate in memory and are
      written once at exit. */
   caml_mmtk_pause_log_path = getenv("MMTK_PAUSE_LOG");
-  if (caml_mmtk_pause_log_path != NULL && caml_mmtk_pause_log_path[0] != '\0') {
+  if (caml_mmtk_pause_log_path != NULL
+      && strcmp(caml_mmtk_pause_log_path, "1") == 0) {
+    /* MMTK_PAUSE_LOG=1: a [mmtk-pause] line per pause on stderr (written by
+       the GC worker after the wake-up, outside the measured span) and a
+       [mmtk-pause-summary] line at exit. */
+    mmtk_ocaml_pause_log_enable_stderr();
+    atexit(mmtk_ocaml_pause_log_summary);
+  } else if (caml_mmtk_pause_log_path != NULL
+             && caml_mmtk_pause_log_path[0] != '\0') {
     mmtk_ocaml_pause_log_enable();
     atexit(caml_mmtk_dump_pause_log);
   }

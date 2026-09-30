@@ -275,7 +275,7 @@ Environment variables apply at process startup. Sizes ending in `_MB` are MiB;
 | `MMTK_NURSERY_PER_DOMAIN` | Enabled | Set to `0` to disable domain scaling of the default nursery. When the heap cannot grow, the scaled minimum is constrained to preserve mature-heap space. |
 | `MMTK_THREADS` | Logical CPU count | GC workers. Try `1` for single-domain experiments; record the worker count when comparing results. |
 | `MMTK_VERBOSE` | Unset | Any value, including `0`, enables initialization details and an exit summary; unset it to disable. |
-| `MMTK_PAUSE_LOG` | Unset | Path for per-pause stop-the-world records, useful while GC-event emission through `runtime_events` is unimplemented. |
+| `MMTK_PAUSE_LOG` | Unset | `1`: one `[mmtk-pause] n= kind= stw_us= ttsp_us= gc_us= domains= epoch=` line per stop-the-world pause on stderr and a `[mmtk-pause-summary]` line at exit (count, full count, total, mean, p50/p95/p99, max in µs). Any other value: a path; the pauses are written there as NDJSON at exit. Useful while GC-event emission through `runtime_events` is unimplemented. Off costs one flag test per pause. |
 | `MMTK_TRANSPARENT_HUGEPAGES` | `true` on Linux; off elsewhere | Request transparent hugepages on Linux. Record this setting in memory comparisons. |
 | `MMTK_RC_RETAIN` | Unset | LXR only. Any value prints one `[RC-RETAIN]` line per pause (held vs live memory, continuation-resume decrements, dead-cycle counts) and `[RC-SANITY]` lines for traced objects with a zero count. Diagnostic. |
 | `MMTK_ALLOC_JITTER` | `6` | Vary placement before bump allocations of at least 2 KiB, using up to 63 cache-line pads. `0` disables this padding. |
