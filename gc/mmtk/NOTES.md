@@ -5,6 +5,105 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-09-30 (M4) - M4 re-baseline (quick panel, dynamic heap); space-time curves as the method of record
+
+Evidence labels as in the entries below. This supersedes the 2026-07-02 M4
+quick panel for the tracing plans (LXR was not re-run).
+
+### Configuration
+
+- Host: Apple M4 Pro (8 performance + 4 efficiency cores, 24 GiB), macOS 26.6;
+  machine quiet (other sessions paused, browser closed).
+- Fork: `b714bb86d3`, tree identical to mainline merge `3fbe544984` (PR 41),
+  mmtk-core `95b425a27d`, built in a separate worktree. Vanilla: opam `5.5.0`
+  (released, non-flambda).
+- Plans GenImmix (default), Bactrian, Immix; dynamic (space-overhead) heap;
+  `--threads domains` (1 GC worker per sequential cell, N for an N-domain
+  cell); `--no-pin --no-setarch`; perf sizes; 3 measured reps (median) + 1
+  warmup; RSS = peak across reps.
+- Command (in `quick/` on the `benchmarks` branch):
+  `uv run quickbench.py all --vanilla build_m4_vanilla --bin-a build_m4_mmtk
+  --plans "GenImmix Bactrian Immix" --heap dynamic --gc --chart --no-pin
+  --no-setarch --json m4-2026-09-30-dynamic.ndjson --graphs graphs_m4`.
+- Raw: `benchmarks` branch `quick/m4-2026-09-30-dynamic.ndjson` (96 records),
+  `quick/m4-2026-09-30.log`, `quick/graphs_m4/`.
+
+### Sequential (*verified*, one panel run)
+
+Median wall ms (ratio vs vanilla) / max RSS MiB.
+
+| bench | vanilla | GenImmix | Bactrian | Immix |
+|---|--:|--:|--:|--:|
+| binarytrees | 1653 / 92 | 1289 (0.78x) / 238 | 1390 (0.84x) / 249 | 2756 (1.67x) / 197 |
+| nbody | 674 / 2 | 673 (1.00x) / 26 | 674 (1.00x) / 26 | 682 (1.01x) / 41 |
+| fannkuchredux | 1550 / 2 | 1557 (1.00x) / 26 | 1559 (1.01x) / 26 | 1557 (1.00x) / 42 |
+| spectralnorm | 671 / 5 | 668 (1.00x) / 74 | 672 (1.00x) / 74 | 794 (1.18x) / 94 |
+| mandelbrot | 768 / 2 | 756 (0.99x) / 26 | 756 (0.99x) / 26 | 758 (0.99x) / 41 |
+| matrix_multiplication | 751 / 19 | 654 (0.87x) / 112 | 611 (0.81x) / 98 | 618 (0.82x) / 78 |
+| LU_decomposition | 803 / 17 | 825 (1.03x) / 91 | 825 (1.03x) / 91 | 1050 (1.31x) / 98 |
+| kb | 426 / 8 | 490 (1.15x) / 91 | 477 (1.12x) / 87 | 464 (1.09x) / 103 |
+
+### Parallel (*verified*; wall ms / RSS MiB at 1 and 8 domains, T(1)/T(8))
+
+- par_spectralnorm: vanilla 1302/5 -> 251/21 (5.19x); GenImmix 1279/74 ->
+  379/92 (3.37x); Bactrian 3.37x; Immix 3.19x.
+- par_matmul: vanilla 770/19 -> 127/20 (6.08x); GenImmix 709/112 -> 137/111
+  (5.17x); Bactrian 5.01x; Immix 4.97x.
+- par_binarytrees: vanilla 1644/92 -> 378/561 (4.35x); GenImmix 1359/241 ->
+  548/623 (2.48x); Bactrian 2.83x; Immix 2766/192 -> 7537/398 (0.37x,
+  anti-scales).
+- chameneos_redux: vanilla 1421/37 -> 419/295 (3.39x); GenImmix 3016/131 ->
+  13372/369 (0.23x); Bactrian 3313/128 -> 15694/370 (0.21x); Immix 1067/118
+  -> 5423/335 (0.20x). Every MMTk plan anti-scales.
+
+The 2 and 4 domain cells are in the README table and the log.
+
+### Reading it as a space-time screening
+
+- Compute-bound controls are flat in time (0.99-1.01x); their RSS is each
+  plan's startup floor (26 MiB GenImmix/Bactrian, 41-42 Immix, 2 vanilla),
+  the same floors as in July.
+- No plan wins on both coordinates on a GC-heavy bench: binarytrees GenImmix
+  is 0.78x the time at 2.6x the RSS, matrix_multiplication 0.87x at 5.9x, kb
+  1.15x at 11x (91 vs 8 MiB). Each is a different point on the curve, not a
+  win or a loss; the dynamic heap (live x 2.2 plus the nursery) picks the point.
+- Against July (median of 5 reps, pre-PR 23 build): binarytrees GenImmix
+  1.40x / 213 MiB -> 0.78x / 238; kb 1.20x / 95 -> 1.15x / 91;
+  matrix_multiplication 0.87x at 38 MiB -> 0.87x at 112 (RSS up 3x,
+  unexplained; *unknown*); Bactrian binarytrees 1.08x / 257 -> 0.84x / 249.
+
+### godel comparison
+
+The godel run (entry below; fork `6865b559ed`, before PR 41) does not
+transfer in time: binarytrees GenImmix 1.66x on godel vs 0.78x on the M4, kb
+1.47x vs 1.15x, matrix_multiplication 1.13x vs 0.87x. Its regressions vs
+July and its 404 MiB Bactrian binarytrees do not appear on the M4; whether
+they are host effects or were fixed between the two fork revisions is not
+separated. Vanilla's RSS agrees where the live set dominates (binarytrees 92
+MiB on both, LU 17 on both), but MMTk's does not (GenImmix binarytrees 187 vs
+238 MiB, kb 29 vs 91, nbody 15 vs 26): the startup floor visible on macOS is
+not visible in godel's RSS, and the builds differ. *Inferred:* compare each
+host only against its own vanilla, and compare fronts, not cells.
+
+### Space-time sweep (method of record; pending)
+
+A single dynamic-heap cell is a screening result. The verdict is the
+front-to-front sweep (ROADMAP workstreams, "Space-time curves"), after Jane
+Street's allocator showdown method:
+
+- Benches: binarytrees, kb, matrix_multiplication, LU_decomposition,
+  chameneos_redux at 1 domain.
+- Vanilla grid: `OCAMLRUNPARAM` `o` (space_overhead) in {40, 80, 120, 200,
+  320} x `s` (minor heap) in {256k, 1M, 4M}.
+- MMTk grid, per plan: `MMTK_HEAP_SIZE_MB` in {32, 48, 64, 96, 128, 192,
+  256} plus dynamic x `MMTK_NURSERY` in {default, `Fixed:4194304`,
+  `Fixed:33554432`}.
+- One run per grid point; plot x = max RSS, y = wall, one front per
+  configuration. A plan wins only where its front lies below and to the left
+  of vanilla's. First on the M4, godel as the cross-check.
+
+---
+
 ## 2026-09-30 (later) - explicit Gc requests synchronous (item 22 FIXED); GenCopy copy buffers (item 15 FIXED); LXR capacity diagnosed (items 21, 31, 32); GH issue 36 progress; godel re-baseline (KNOWN FAILURES)
 
 Evidence labels as in the entries below. Local runs are macOS arm64.
@@ -220,8 +319,9 @@ records `quick/godel-2026-09-30-dynamic.ndjson`. Headlines (wall ratio vs
 vanilla): binarytrees GenImmix 1.66x, Bactrian 1.50x, Immix 2.87x; kb 1.47x,
 1.46x, 1.28x; compute-bound controls flat; `chameneos_redux` at 8 domains
 GenImmix 17.2 s vs vanilla 4.3 s. Cross-check host only: the M4 Pro is the
-representative host and its like-for-like run is pending. Method note: a first
-attempt was discarded because a runaway process on the host was swapping.
+representative host; its like-for-like run is the 2026-09-30 (M4) entry
+above. Method note: a first attempt was discarded because a runaway process on
+the host was swapping.
 
 ---
 

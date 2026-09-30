@@ -4,6 +4,8 @@
 
 The one-sentence rule: **a GC result that is a single number is wrong.** Every comparison is a curve over heap size, every benchmark carries its workload fingerprint, and every claim carries a dispersion estimate.
 
+**Method of record for MMTk-vs-vanilla (from 2026-09-30): space-time fronts.** Each GC-sensitive bench is run once per point of a configuration grid (vanilla: `OCAMLRUNPARAM` `o` × `s`; each MMTk plan: `MMTK_HEAP_SIZE_MB` × `MMTK_NURSERY`, plus the dynamic heap) and plotted as x = max RSS, y = wall, one front per configuration; a plan wins only where its front lies below-and-left of vanilla's. This is the §3.4 time-vs-total-footprint curve, with the heap models' own knobs as the sweep axis. A quick-panel cell at the dynamic heap (wall ratio + RSS) is a *screening* result that locates one point on each curve; it is never quoted as a bare "×-faster". Current screening: the 2026-09-30 M4 panel (`README.md` "Performance evidence"); sweep design and status: ROADMAP workstreams "Space-time curves", `gc/mmtk/NOTES.md` 2026-09-30 (M4).
+
 The standing order from the maintainer: **find and remove obvious overhead from the allocation + collection fast paths FIRST, then measure with this harness, then iterate.** Section 10 (the ranked backlog, kept in ROADMAP) is the "what to do"; this document is the "how to know it worked."
 
 ---

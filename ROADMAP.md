@@ -76,7 +76,7 @@ mmtk-core's own `MMTK_*` options are honoured (`MMTK_THREADS`, `MMTK_STRESS_FACT
 | M5 | **Native-code integration** — all-MMTk via TLAB/nursery-aliasing (`Immix`/`StickyImmix`), single- and multi-domain (`Domain.spawn` clean); staticlib auto-linked via configure global-link | ✅ done |
 | M6 | **Weak arrays, ephemerons, finalisers** — `process_weak_refs` on by default (`MMTK_WEAK_REFS=0` opts out to the memory-safe never-clear interim). Weak-clear, ephemeron-release, `Gc.finalise`/`finalise_last`, custom-block finalisers (incl. unmarshalled blocks), cross-domain orphaned-finaliser adoption. `pr3612`+`pr5233` pass. Bar #11 (resurrection ordering + orphaned ephemerons). | 🟢 done (default-on) |
 | M7 | **Pass the OCaml testsuite** — full bytecode suite ~1450/1547 pass under Immix/StickyImmix (`setarch -R`, per-test timeout). Non-pass are known-unsupported (statmemprof, runtime-events, `Gc.stat`-pacing) or the bug #3b intermittent multidomain hang — none are MMTk correctness diffs (output byte-identical to stock). | 🟢 done |
-| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. (These first-sweep figures are historical. In the 2026-07-02 quick panel (last in `README.md` at `358ea7958c`, section "Performance (quick panel)"; a 2026-07-02 build, before PR 23 and the 16 MiB nursery default, not re-measured since), spectralnorm was 0.96× vanilla under GenImmix.) | 🟡 **open milestone** |
+| M8 | **Benchmark + optimise** vs. the stock GC — **the open milestone.** First native sweep: parity-or-better on 5 of 6 CLBG benchmarks (~1.5× faster on parallel alloc-heavy), one structural outlier (spectralnorm ~1.74× — MMTk's eager zero-fill double-write). Obvious-removal levers ~neutral (only C1-sftbound ~+1%); GenImmix-default validated. Method: `PERFORMANCE.md`. (These first-sweep figures are historical. In the 2026-07-02 quick panel (in `README.md` up to `358ea7958c`, section "Performance (quick panel)"; a 2026-07-02 build, before PR 23 and the 16 MiB nursery default), spectralnorm was 0.96× vanilla under GenImmix; in the 2026-09-30 M4 re-baseline (README "Performance evidence") it is 1.00× the time at 74 vs 5 MiB RSS.) | 🟡 **open milestone** |
 | M9 | **MMTk-only: excise the stock GC** — always-on; stock minor + major GC deleted; `shared_heap.c`/`.h` deleted (−1665 lines, live colour-machinery relocated to `major_gc.{c,h}`); per-domain minor-heap arena removed; `Gc.stat` reimplemented on MMTk stats; `Is_young` reservation retired. `ocaml-mmtk` is a single-GC runtime. **Complete** bar #11 (weak-clear semantics) + the flagged `memprof.c` colour read. Stage/bug depth: `gc/mmtk/NOTES.md`. | 🟢 done |
 | — | Parallel collection: verified correct; marking scales ~8.4× on 16 threads (parallel-friendly heaps) | ✅ |
 | — | **GC plans:** 12 wired (bytecode: 10 stock mmtk-core plans + our `Bactrian` and `LXR`), 9 native, 1 deferred (Compressor) — see the GC plans table below | 🟢 |
@@ -1093,9 +1093,10 @@ The active research/measurement threads behind the M8 milestone — the index; d
     heap; not in the byte-identical CLBG gate). **Parallel finding:** RC does *not* rescue the multi-domain
     anti-scaling — LXR scales like the tracing plans (on par with GenImmix on compute benches, weak on
     alloc-heavy par_binarytrees), well short of stock OCaml; the bottleneck is the MMTk↔OCaml integration, not
-    the collector algorithm (see `gc/mmtk/NOTES.md` 2026-07-01 and the 2026-07-02 quick panel, last in `README.md` at
+    the collector algorithm (see `gc/mmtk/NOTES.md` 2026-07-01 and the 2026-07-02 quick panel, in `README.md` up to
     `358ea7958c`, section "Performance (quick panel)" — a 2026-07-02 build, before PR 23 and the 16 MiB
-    nursery default, not re-measured since). These LXR numbers are also
+    nursery default). The tracing plans were re-measured on 2026-09-30 (M4 re-baseline below); LXR was
+    not, so its quick-panel figures are still the July ones. These LXR numbers are also
     provisional: they predate the item-17 fix (merged 2026-09-29) and the capacity problem it exposed
     (open item 21), so they must be re-measured — at RSS parity, not heap-size parity (item 21's RQ1
     consequence).
@@ -1113,7 +1114,35 @@ The active research/measurement threads behind the M8 milestone — the index; d
     result (GenImmix 1.75x vanilla at 1 domain and 4x at 8; Immix is fastest at 1 domain, 0.44x, but
     anti-scales). A worker-count check (`MMTK_THREADS` 4/14/56, binarytrees and kb, GenImmix) showed
     no improvement. LXR was excluded (it needs a pinned heap and its results are provisional). The
-    like-for-like run on the M4 Pro, the representative host, is pending.
+    like-for-like M4 Pro run (next bullet) does not reproduce the regression vs July or the Bactrian
+    RSS, so both are godel-specific or fixed between `6865b559ed` and `3fbe544984` (not separated).
+  - **M4 re-baseline (2026-09-30; the representative host).** The same panel on the Apple M4 Pro (8P+4E
+    cores, 24 GiB, macOS, machine quiet), vanilla 5.5.0 (released, non-flambda) vs GenImmix, Bactrian and
+    Immix, dynamic heap, fork `b714bb86d3` (tree identical to mainline merge `3fbe544984`, PR 41) /
+    mmtk-core `95b425a27d`, 1 GC worker per sequential cell (N for an N-domain cell), no pinning, 3 reps
+    (median) + 1 warmup. Table and caveats: `README.md` "Performance evidence"; raw:
+    `benchmarks` branch `quick/m4-2026-09-30-dynamic.ndjson`, `quick/m4-2026-09-30.log`,
+    `quick/graphs_m4/`. It supersedes the 2026-07-02 panel for the tracing plans. *Verified on that
+    host; a dynamic-heap screening, not a verdict (next bullet):* compute-bound controls flat (0.99-1.01x
+    time; RSS = each plan's startup floor, 26 MiB GenImmix/Bactrian vs 2 vanilla); no plan wins on both
+    coordinates on a GC-heavy bench — binarytrees GenImmix 0.78x the time at 2.6x the RSS (238 vs 92 MiB),
+    matrix_multiplication 0.87x at 5.9x (112 vs 19), kb 1.15x at 91 vs 8 MiB; `chameneos_redux`
+    anti-scales on every MMTk plan (GenImmix 3016 ms at 1 domain vs vanilla 1421, 13372 at 8 vs 419;
+    Immix fastest at 1 domain, 1067 ms, then 5423 at 8); par_spectralnorm and par_matmul scale less than
+    vanilla (3.2-3.4x vs 5.2x; 5.0-5.2x vs 6.1x at 8 domains); Immix anti-scales on par_binarytrees.
+    Versus godel, time ratios do not transfer (binarytrees GenImmix 1.66x vs 0.78x, kb 1.47x vs 1.15x,
+    matrix_multiplication 1.13x vs 0.87x); vanilla's RSS matches where the live set dominates (binarytrees
+    92 MiB on both) but MMTk's does not (GenImmix binarytrees 187 vs 238 MiB, kb 29 vs 91), so each
+    host is compared only with its own vanilla.
+  - **Space-time curves (method of record from 2026-09-30).** GC performance is a space-time curve, so a
+    single dynamic-heap cell (wall ratio + RSS) is a *screening* result, not a verdict — e.g. the 2026-09-30 M4
+    panel has GenImmix at 0.78× vanilla's time on binarytrees at 2.6× its RSS, a different point on the curve,
+    not a win. **Open:** a sweep driver next to `quick/quickbench.py` that, after Jane Street's allocator
+    showdown method, runs each GC-sensitive bench (binarytrees, kb, matrix_multiplication, LU_decomposition,
+    chameneos at 1 domain) once per grid point and plots x = max RSS, y = wall, one front per configuration:
+    vanilla `OCAMLRUNPARAM` `o` (space_overhead) × `s` (minor heap); each MMTk plan `MMTK_HEAP_SIZE_MB`
+    {32…256} + dynamic × `MMTK_NURSERY` {default, 4 MiB, 32 MiB}. A plan "wins" only where its front lies
+    below-and-left of vanilla's. First run on the M4; godel as the cross-check.
 - **RQ8 — no-zero allocation (CONFIRMED + LANDED on mainline, ~15–22% on alloc-bound code).** MMTk's eager
   zero-fill is redundant for OCaml (vanilla's minor heap is never zeroed); removing it recovers ~15–22%
   (spectralnorm +21.9%) with GC count/time/copies unchanged — a pure mutator win. **LANDED** via a **runtime
