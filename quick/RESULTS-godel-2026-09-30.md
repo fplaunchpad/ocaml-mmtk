@@ -20,12 +20,13 @@ the host caveats at the end.
 | sizes | the panel's perf sizes (the harness default; the records do not store sizes) |
 | GC workers | `--threads domains`, as recorded in every record: by the harness source, 1 worker per sequential cell and workers = domains in the parallel sweep |
 
-On the GC workers: an earlier description of this run gave the MMTk default
-(nproc = 56) for the sequential cells. The records say `domains`, which the
-harness maps to 1 worker there; which of the two actually ran is not
-established. A separate worker-count check (`MMTK_THREADS` 4, 14 and 56 on
-`binarytrees` and `kb` under GenImmix) showed no improvement, so worker
-provisioning does not explain the sequential ratios either way.
+On the GC workers: every record carries `"threads": "domains"`, the harness
+default; `effective_threads` in `quickbench.py` maps that to `MMTK_THREADS=1`
+for a sequential cell and to the domain count in the parallel sweep, so the
+sequential cells ran with one GC worker. A separate worker-count check
+(`MMTK_THREADS` 4, 14 and 56 on `binarytrees` and `kb` under GenImmix, same
+binaries and pinning) gave the same ratios within noise, so the worker count
+does not explain the sequential results.
 
 ## Sequential
 
