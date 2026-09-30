@@ -1,0 +1,109 @@
+============================================================
+quick GC panel  —  mode=all  link=native  sizes=perf
+plans=GenImmix Bactrian Immix  heap=dynamic  reps=3  warmup=1  gc-workers=domains
+vanilla=build_m4_vanilla
+A=mmtk (build_m4_mmtk)   B=b ()
+variants: vanilla mmtk:GenImmix mmtk:Bactrian mmtk:Immix
+============================================================
+
+## sequential   (cells: median-ms | ratio-vs-baseline // maxRSS-MiB))
+bench                 vanilla                 mmtk:GenImmix           mmtk:Bactrian           mmtk:Immix              
+----------            ----------------------  ----------------------  ----------------------  ----------------------  
+binarytrees           1653 | 1.00x // 92M     1289 | 0.78x // 238M    1390 | 0.84x // 249M    2756 | 1.67x // 197M    
+nbody                 674 | 1.00x // 2M       673 | 1.00x // 26M      674 | 1.00x // 26M      682 | 1.01x // 41M      
+fannkuchredux         1550 | 1.00x // 2M      1557 | 1.00x // 26M     1559 | 1.01x // 26M     1557 | 1.00x // 42M     
+spectralnorm          671 | 1.00x // 5M       668 | 1.00x // 74M      672 | 1.00x // 74M      794 | 1.18x // 94M      
+mandelbrot            768 | 1.00x // 2M       756 | 0.99x // 26M      756 | 0.99x // 26M      758 | 0.99x // 41M      
+matrix_multiplication 751 | 1.00x // 19M      654 | 0.87x // 112M     611 | 0.81x // 98M      618 | 0.82x // 78M      
+LU_decomposition      803 | 1.00x // 17M      825 | 1.03x // 91M      825 | 1.03x // 91M      1050 | 1.31x // 98M     
+kb                    426 | 1.00x // 8M       490 | 1.15x // 91M      477 | 1.12x // 87M      464 | 1.09x // 103M     
+(ratio is vs the first variant: vanilla = 1.00x; maxRSS = peak RSS across reps, MiB)
+
+## parallel (domain sweep: 1,2,4,8)
+
+### par_spectralnorm  (args: 4000)
+variant         d=1 (ms | spd)    d=2 (ms | spd)    d=4 (ms | spd)    d=8 (ms | spd)    
+vanilla         1302 | 1.00x      711 | 1.83x       357 | 3.65x       251 | 5.19x       
+mmtk:GenImmix   1279 | 1.00x      658 | 1.94x       419 | 3.05x       379 | 3.37x       
+mmtk:Bactrian   1287 | 1.00x      667 | 1.93x       418 | 3.08x       382 | 3.37x       
+mmtk:Immix      1492 | 1.00x      788 | 1.89x       433 | 3.44x       467 | 3.19x       
+(spd = T(first domains)/T(N); ideal ~ linear. MMTk GC workers = domains per cell.)
+
+### par_matmul  (args: 768)
+variant         d=1 (ms | spd)    d=2 (ms | spd)    d=4 (ms | spd)    d=8 (ms | spd)    
+vanilla         770 | 1.00x       456 | 1.69x       265 | 2.91x       127 | 6.08x       
+mmtk:GenImmix   709 | 1.00x       488 | 1.45x       308 | 2.30x       137 | 5.17x       
+mmtk:Bactrian   651 | 1.00x       365 | 1.78x       209 | 3.11x       130 | 5.01x       
+mmtk:Immix      641 | 1.00x       362 | 1.77x       194 | 3.30x       129 | 4.97x       
+(spd = T(first domains)/T(N); ideal ~ linear. MMTk GC workers = domains per cell.)
+
+### par_binarytrees  (args: 20)
+variant         d=1 (ms | spd)    d=2 (ms | spd)    d=4 (ms | spd)    d=8 (ms | spd)    
+vanilla         1644 | 1.00x      819 | 2.01x       570 | 2.88x       378 | 4.35x       
+mmtk:GenImmix   1359 | 1.00x      896 | 1.52x       576 | 2.36x       548 | 2.48x       
+mmtk:Bactrian   1459 | 1.00x      958 | 1.52x       641 | 2.27x       515 | 2.83x       
+mmtk:Immix      2766 | 1.00x      2984 | 0.93x      3989 | 0.69x      7537 | 0.37x      
+(spd = T(first domains)/T(N); ideal ~ linear. MMTk GC workers = domains per cell.)
+
+### chameneos_redux  (args: 500000)
+variant         d=1 (ms | spd)    d=2 (ms | spd)    d=4 (ms | spd)    d=8 (ms | spd)    
+vanilla         1421 | 1.00x      697 | 2.04x       542 | 2.62x       419 | 3.39x       
+mmtk:GenImmix   3016 | 1.00x      6688 | 0.45x      9153 | 0.33x      13372 | 0.23x     
+mmtk:Bactrian   3313 | 1.00x      7305 | 0.45x      11204 | 0.30x     15694 | 0.21x     
+mmtk:Immix      1067 | 1.00x      2070 | 0.52x      2753 | 0.39x      5423 | 0.20x      
+(spd = T(first domains)/T(N); ideal ~ linear. MMTk GC workers = domains per cell.)
+
+## sequential — ASCII bar chart (longer = slower; scaled per bench)
+
+binarytrees:
+  vanilla       ████████████████████████ 1653ms
+  mmtk:GenImmix ███████████████████ 1289ms
+  mmtk:Bactrian ████████████████████ 1390ms
+  mmtk:Immix    ████████████████████████████████████████ 2756ms
+
+nbody:
+  vanilla       ████████████████████████████████████████ 674ms
+  mmtk:GenImmix ███████████████████████████████████████ 673ms
+  mmtk:Bactrian ████████████████████████████████████████ 674ms
+  mmtk:Immix    ████████████████████████████████████████ 682ms
+
+fannkuchredux:
+  vanilla       ████████████████████████████████████████ 1550ms
+  mmtk:GenImmix ████████████████████████████████████████ 1557ms
+  mmtk:Bactrian ████████████████████████████████████████ 1559ms
+  mmtk:Immix    ████████████████████████████████████████ 1557ms
+
+spectralnorm:
+  vanilla       ██████████████████████████████████ 671ms
+  mmtk:GenImmix ██████████████████████████████████ 668ms
+  mmtk:Bactrian ██████████████████████████████████ 672ms
+  mmtk:Immix    ████████████████████████████████████████ 794ms
+
+mandelbrot:
+  vanilla       ████████████████████████████████████████ 768ms
+  mmtk:GenImmix ███████████████████████████████████████ 756ms
+  mmtk:Bactrian ███████████████████████████████████████ 756ms
+  mmtk:Immix    ███████████████████████████████████████ 758ms
+
+matrix_multiplication:
+  vanilla       ████████████████████████████████████████ 751ms
+  mmtk:GenImmix ███████████████████████████████████ 654ms
+  mmtk:Bactrian █████████████████████████████████ 611ms
+  mmtk:Immix    █████████████████████████████████ 618ms
+
+LU_decomposition:
+  vanilla       ███████████████████████████████ 803ms
+  mmtk:GenImmix ███████████████████████████████ 825ms
+  mmtk:Bactrian ███████████████████████████████ 825ms
+  mmtk:Immix    ████████████████████████████████████████ 1050ms
+
+kb:
+  vanilla       ███████████████████████████████████ 426ms
+  mmtk:GenImmix ████████████████████████████████████████ 490ms
+  mmtk:Bactrian ███████████████████████████████████████ 477ms
+  mmtk:Immix    ██████████████████████████████████████ 464ms
+
+wrote results JSON: m4-2026-09-30-dynamic.ndjson
+wrote graphs_m4/seq_ratio.png
+wrote graphs_m4/seq_rss.png
+wrote graphs_m4/speedup_domains.png
