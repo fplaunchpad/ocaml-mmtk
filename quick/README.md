@@ -206,6 +206,58 @@ Recorded runs beyond the committed panel: [`RESULTS-godel-2026-09-30.md`](RESULT
 — a cross-check re-baseline on godel (Linux Xeon) against vanilla 5.5.0, with
 its configuration and caveats (raw: `godel-2026-09-30-dynamic.ndjson`).
 
+## Space-time sweep — `spacetime.py`
+
+GC performance is a **space-time curve**: a single wall ratio at whatever heap a
+plan's sizing policy picks is not a verdict (the panel above can make a plan look
+faster simply because it ran at 10x the memory). `spacetime.py` follows Jane
+Street's [memory allocator showdown](https://blog.janestreet.com/memory-allocator-showdown/)
+method: sweep the space knobs, **one run per grid point**, plot **x = peak RSS,
+y = wall**, one series per configuration, and compare the **lower-left fronts**
+(sort by RSS, keep points whose wall strictly decreases). Jane Street fitted
+`H = b/(t - a) + c` (a = asymptotic minimum time, c = asymptotic minimum space ~
+live data + fragmentation); the plots overlay the same model, as
+`t = a + b/(H - c)`, dashed — the points and fronts are the result, the fit is a
+visual aid and is skipped silently when ill-conditioned.
+
+Grids (all overridable):
+
+| variant | knobs | default grid |
+|---|---|---|
+| `vanilla` | `OCAMLRUNPARAM=o=<O>,s=<S>` (`s` in words, `k`/`M` suffixes) | `--vanilla-o "40 80 120 200 320"` x `--vanilla-s "256k 1M 4M"` + one `default` point (no `OCAMLRUNPARAM`) |
+| `mmtk:<plan>` | `MMTK_HEAP_SIZE_MB` x `MMTK_NURSERY`, `MMTK_THREADS=1` | `--heaps "32 48 64 96 128 192 256 dynamic"` x `--nurseries "default Fixed:4194304 Fixed:33554432"` (`dynamic`/`default` = unset; `(dynamic, default)` is the plan's `default` point) |
+
+Inherited `OCAMLRUNPARAM`/`MMTK_*` variables are stripped from the child env,
+so each NDJSON row's `env` fully determines its GC configuration. Wall =
+`perf_counter` around the child, RSS = the child's `ru_maxrss` (as
+`quickbench.py`); with `--reps N` a point keeps min wall / max RSS. A non-zero
+exit or a `--timeout` (default 600 s) is recorded as a failed point (exit code +
+last stderr line), never dropped; failed points are omitted from the plot but
+counted in the legend and listed in `SUMMARY.md`. The NDJSON is appended to per
+point, so a crashed sweep resumes with `--resume`; `--plot-only` re-renders from
+an existing file. Single-domain throughout (`chameneos_redux` gets `1` domain).
+
+Outputs in `--graphs`: `spacetime_<bench>.png` (hollow ring = default config),
+`summary.png` (small multiples), and `SUMMARY.md` (also printed): per bench and
+MMTk variant, the front point nearest in RSS to vanilla's default, its time
+ratio, and whether the MMTk front **dominates / is dominated by / crosses**
+vanilla's (step-function comparison over the overlapping RSS range, ties within
+2%).
+
+```sh
+# full M4 sweep (5 benches x (16 vanilla + 3 plans x 24) = 440 runs), on a quiet machine:
+uv run quick/spacetime.py --vanilla quick/build_m4_vanilla --mmtk quick/build_m4_mmtk \
+    --plans "GenImmix Bactrian Immix" \
+    --benches "binarytrees kb matrix_multiplication LU_decomposition chameneos_redux" \
+    --json quick/spacetime-m4.ndjson --graphs quick/graphs_spacetime_m4 \
+    --no-setarch --no-pin --resume
+
+# smoke (tiny sizes, tiny grid):
+uv run quick/spacetime.py --quick --vanilla quick/build_m4_vanilla --mmtk quick/build_m4_mmtk \
+    --vanilla-o 80 --vanilla-s 1M --heaps 64 --nurseries default \
+    --benches "binarytrees kb" --json /tmp/st.ndjson --graphs /tmp/st --no-setarch --no-pin
+```
+
 ## Deciding on the no-zero allocation change
 
 The no-zero change (skip zero-fill on fresh allocation) is a **compile-time**
