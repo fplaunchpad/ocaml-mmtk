@@ -27,7 +27,11 @@ evening and FIXED (merged; GH issues closed):** the near-OOM root-scan SIGSEGV (
 `0015fbf179`). **The macOS RSS
 artefact (mmtk-core memset every fresh mapping) is fixed** (mmtk-core PR 7, `5454281016`, merged as `69b5ddf663`;
 ocaml-mmtk PR 53, merged, `3846019997`) and the M4 space-time sweep re-run: the fronts moved 40–66 MiB left and now meet
-vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Open:** LXR capacity and failures (items 21, 31 =
+vanilla's; verdicts unchanged (workstreams, "Space-time curves"; `RESULTS.md`). **Multi-domain scaling
+diagnosed (2026-09-30 night, item 35):** the gap is per-pause cost, not the STW rendezvous — one `malloc`
+per copied object in MMTk's nursery work-packet pipeline (≈ 1.36 µs per copied object on chameneos,
+≥ 2× stock), plus the E1 barrier-study counters contending across domains (removed by PR 58, pending
+merge: chameneos d=8 21.8 → 10.3 s); the trace-loop fix is not started. **Open:** LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
 issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28), and item 28's
 process-exit residual. Order: items 21/31, 26, 25, 30, 20(c), 32, 23, 24.
@@ -216,7 +220,7 @@ Correctness before performance; dependencies noted. **Depth for every item is in
    - **GC worker pool — default is `nproc` (force-1 tried 2026-06-24, then REVERTED).** The `nproc` default
      makes every worker park/wake on every collection (~82% of GC-worker CPU in futex contention), and forcing
      **1 worker** is ~1.37× faster on single-domain minor GC — but that was reverted as a band-aid: worker
-     count does **not** fix multi-domain throughput scaling (STW-bound, not pool-bound), so the default stays
+     count does **not** fix multi-domain throughput scaling (per-pause cost, not pool-bound; item 35), so the default stays
      mmtk-core's `nproc` (`api.rs:147`). Set `MMTK_THREADS=1` yourself for the lowest-overhead single-domain
      runs. Intended policy "workers = running domains" is a gc/mmtk-core-fork follow-up (the pool is fixed at
      init). Also pending: **#G1** (the binding does full major-root scanning every
@@ -653,7 +657,7 @@ line reuse (together they keep LXR's results provisional); (3) item 26, GH issue
 intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
 rest is open); (4) item 25, GH issue 33, a forked child cannot run a collection (explicit requests
 are now no-ops there; an allocation-triggered collection spins); (5) item 30, one-off multi-domain
-crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling decomposition, the two headline gaps after the macOS memset fix, sharing item 33's per-pause instrumentation; (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
+crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling gap, the two headline gaps after the macOS memset fix; item 35 is DIAGNOSED (one `malloc` per copied object in the nursery work-packet pipeline; the E1 counters, PR 58) and its fix, a worker-local nursery trace loop, is the next performance lever and also item 34's binarytrees time lever; item 33's per-pause log is done (PR 57); (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
 reference-count anomaly in kb; (8) item 23, a possible concurrent-marking infix race; (9) item 24,
 two pre-existing side findings from the store-path audit. Evidence is labelled *verified*
 (reproduced by running), *source reading*, *inferred* or *unknown*.
@@ -1167,10 +1171,10 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     domains, equal at 8), so throughput does not justify a second plan; but Bactrian's claim is pause
     time (stock's sliced marking inside nursery pauses, incremental sweep), and pause time has not been
     measured — the panel and sweep report wall and RSS only, `MMTK_VERBOSE` prints totals. Task:
-    (1) a per-pause start/end log in the binding behind `MMTK_PAUSE_LOG=1` (`BACTRIAN_TRACE` has the
-    hook points) and a `--pauses` mode in `quick/quickbench.py` / `spacetime.py` reporting max, p99,
-    mean, count and the number of Full-heap pauses, with vanilla's per-GC timing alongside
-    (`OCAMLRUNPARAM=v=0x400`); (2) GenImmix vs Bactrian vs vanilla on binarytrees, kb, par_binarytrees
+    (1) **DONE (2026-09-30 night):** a per-pause log in the binding behind `MMTK_PAUSE_LOG=1` (PR 57,
+    pending merge) and a `--pauses` mode in the quick drivers (`benchmarks` PR 59, merged `b316229cc1`)
+    reporting max, p99, mean, count and the number of Full-heap pauses; vanilla's
+    `OCAMLRUNPARAM=v=0x400` gives counts only, not per-GC times; (2) GenImmix vs Bactrian vs vanilla on binarytrees, kb, par_binarytrees
     d=8 and chameneos_redux at matched heaps (the sweep's front points), 3 reps, M4 and godel;
     (3) decide: a materially lower max/p99 pause at equal RSS answers RQ7 yes — Bactrian stays and
     item 26 (issue 36) and its residual bugs get fixed; otherwise RQ7 is answered no with a number (a
@@ -1191,21 +1195,57 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     front point on the fixed build; (2) three levers, each plotted as a space-time front rather than
     adopted as a default: nursery bound 16→8→4→2 MiB per domain, bounded/reused work packets, page return;
     (3) the matmul drop (GenImmix 48–71 MiB, 0.62–0.66 s everywhere except a 32 MiB nursery with heap
-    ≥96 MiB: 27 MiB / 0.58 s) explained. Godel with reps for the Linux cross-check.
-35. **Multi-domain scaling decomposition (open; added 2026-09-30; the second headline gap).** The
-    2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs vanilla 4.4×; par_spectralnorm 3.4×
-    vs 5.2×; par_matmul 5.2× vs 6.1×; chameneos_redux anti-scales, 3.0 s at 1 domain → 13.4 s at 8 (vanilla
-    1.4 → 0.4 s). NOTES calls it STW-bound rather than thread-pool-bound, but the per-pause cost has never
-    been decomposed. Research question: as domains grow, where does the cost go — the all-domain
-    rendezvous (park/wake of every domain per nursery pause), a serial phase inside the pause (root
-    scanning, per-mutator buffer flushes, promotion), or mutator-side contention (region barrier, mutator
-    registry / domain locks, fiber-stack allocation under MMTk)? chameneos is the sharpest probe
-    (effects-heavy; continuation stacks are the prime suspect). Task: (1) the per-pause log of item 33
-    (`MMTK_PAUSE_LOG=1`) so wall splits into mutator time and pause time = count × mean pause, GenImmix
-    vs vanilla (`OCAMLRUNPARAM=v=0x400`), d = 1..8, M4; (2) `perf` / lock profiling of the dominant term
-    on godel (56 cores; `rr -c` if it is a scheduling effect); (3) one lever per finding, measured as a
-    domain-sweep speedup curve with RSS. → SCALABILITY.md; NOTES 2026-07-01 (MMTk↔OCaml integration
-    bottleneck); RESULTS.md parallel table.
+    ≥96 MiB: 27 MiB / 0.58 s) explained. Godel with reps for the Linux cross-check. **Note (2026-09-30
+    night):** binarytrees' residual is the same per-object nursery cost that item 35 diagnoses (0.63 µs
+    per copied object, one `malloc` per copied object; NOTES 2026-09-30 night), so item 35's fix is also
+    this item's time lever — a slower collector needs more heap for the same time.
+35. **Multi-domain scaling decomposition (DIAGNOSED 2026-09-30 night; added 2026-09-30; the second
+    headline gap; fix not started).** The 2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs
+    vanilla 4.4×; par_spectralnorm 3.4× vs 5.2×; par_matmul 5.2× vs 6.1×; chameneos_redux anti-scales, 3.0 s
+    at 1 domain → 13.4 s at 8 (vanilla 1.4 → 0.4 s). Decomposed on godel (14 cores of one NUMA node,
+    GenImmix, `MMTK_THREADS` = domains, medians of 3) and cross-checked on the M4 with the new pause log;
+    full tables, commands and the chain of evidence: NOTES 2026-09-30 (night). **The gap is per-pause cost,
+    not the rendezvous and not the scaling shape.** On par_binarytrees 20 the mutator scales 8.9 → 1.9 s
+    (4.7×) and the pause 12.3 → 4.5 s (2.8×, vanilla's whole-program ratio is 2.85×), but 242 pauses cost
+    12.3 s at d=1 while vanilla's entire run is 10.35 s. Three terms, ranked:
+    1. **Per-object nursery cost — one `malloc` per copied object** (*verified*). A nursery pause costs
+       ≈ 1.36 µs per copied object on chameneos (20.2 M copies, 27.5 s) and 0.63 µs on binarytrees, vs at
+       most ≈ 0.6 µs for vanilla's whole chameneos run, mutator included, at the same promoted volume.
+       An `LD_PRELOAD` counter shows one malloc per copied object (chameneos 200000: 7,837,307 copies,
+       7,861,077 mallocs; vanilla 110): `VectorQueue` buffers are allocated per work packet, and on
+       OCaml's nursery graphs (tiny objects, low fan-out, most edges to old objects) the
+       ProcessEdges → ScanObjects → ProcessEdges pipeline hands ≈ 1 item per packet. Profile share
+       (chameneos d=1, 1 worker): copying 17 %, packet machinery 25–30 %, side-metadata traffic next;
+       `EDGES_WORK_BUFFER_SIZE` 4096 → 65536 changes nothing (packets are never full). Also explains why
+       more GC workers slow single-domain binarytrees (M4: 1790 ms of pause with 12 workers vs 630 with 1).
+       After term 2, chameneos is 68 % (d=1) to 82 % (d=8) pause, almost all in nursery pauses (420 ×
+       64 ms at d=1; 68 full pauses total 0.7 s).
+    2. **The E1 barrier-study counters** (*verified*; **fixed by PR 58, pending merge**). Plain
+       non-atomic global counters bumped from every domain on every `caml_modify` / `caml_initialize` /
+       barrier call: 68 % of chameneos d=8 CPU was in the write barrier. Removed: chameneos d=8 21.8 →
+       10.3 s, 160 → 68 CPU-s, speedup 1.9× → 4.0×; d=1 and par_binarytrees unchanged. Most of the
+       panel's chameneos anti-scaling was this (*inferred* for the M4 panel, not re-run there).
+    3. **The STW rendezvous** (*verified*, M4, single rep): time-to-stop 0.04 → 26 ms of a 674 ms pause
+       total at d=8. Not a factor; the "STW-bound" reading (SCALABILITY.md updates 3 and 5) is
+       corrected to "per-pause cost".
+
+    **Fix direction (not started):** a worker-local nursery trace loop in the mmtk-core fork — trace a
+    slot and, if the object was copied, scan it into the same local buffer (Cheney/oldify-style),
+    spilling to a packet only above a threshold (the parallelism knob); zero allocation per object. The
+    opt-in UP-oldify path (`MMTK_UP_OLDIFY=1`, `Scanning::up_oldify_packet`, SHAPE.md round 30) already
+    does this for eligible single-worker Bactrian pauses; generalising it to GenImmix and to several
+    workers is the first form to try. The residual per-object side-metadata traffic is the second lever.
+    Measured as a domain-sweep speedup curve with RSS, and on item 34's binarytrees front.
+    - (a) *Quick partial test:* pooled `VectorQueue` buffers, or mimalloc as the Rust global allocator,
+      to size the malloc share alone before the trace-loop work.
+    - (b) *Young-target barrier filter* (branch `exp/barrier-filter`, **not landed**): the generational
+      post-write barrier (mmtk-core's region path, `memory_region_copy_post`) records every mature store
+      without checking the stored value, where stock's `caml_modify` checks `Is_young(val)`. A
+      stock-style filter (binding exports the nursery range via `GenerationalPlan::nursery_range`;
+      GenImmix/GenCopy; `MMTK_NO_YOUNG_FILTER=1` opt-out) is `sanity`-clean but had no measurable effect
+      on chameneos (its mature stores are of young values, which stock records too). Kept as an unproven,
+      stock-faithful option pending a mature-mutation workload; not merged.
+    → NOTES 2026-09-30 (night); SCALABILITY.md update 7; RESEARCH_QUESTIONS RQ7; RESULTS.md.
 
 ### Research & measurement workstreams (M8 / RQ-driven)
 

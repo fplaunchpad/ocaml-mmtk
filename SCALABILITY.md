@@ -1,5 +1,26 @@
 # Multi-domain GC scalability of `mmtk-ocaml` — findings
 
+> ## ✅ UPDATE 7 (2026-09-30, night; newest, read first) — the multi-domain gap is PER-PAUSE COST, not the rendezvous: one `malloc` per copied object in the nursery pipeline, plus the E1 counters. Corrects "STW-bound".
+>
+> Full decomposition, commands and evidence labels: `gc/mmtk/NOTES.md` 2026-09-30 (night); ROADMAP item 35.
+> godel (14 cores of one NUMA node, GenImmix, `MMTK_THREADS` = domains, medians of 3):
+>
+> - **Scaling shape is fine; absolute pause cost is not.** `par_binarytrees 20` d=1 → 8: mutator
+>   (wall − pause) 8.9 → 1.9 s (4.7×), pause 12.3 → 4.5 s (2.8×, vanilla's whole program 2.85×). But 242
+>   pauses cost 12.3 s at d=1, more than vanilla's entire run (10.35 s).
+> - **The rendezvous is not a factor** (M4, pause log `MMTK_PAUSE_LOG=1`, PR 57): time-to-stop 26 ms of
+>   674 ms of pause at d=8. The stop-the-world framing of updates 3–5 should be read as "bound by the cost of
+>   each pause", not by the stop-the-world rendezvous (update 5's "rendezvous floor" is superseded).
+> - **Per-object nursery cost:** ≈ 1.36 µs per copied object on chameneos (0.63 µs binarytrees) at the same
+>   copied volume as stock; **one `malloc` per copied object** (`LD_PRELOAD` counter: 7,837,307 copies,
+>   7,861,077 mallocs; vanilla 110) from mmtk-core allocating a `VectorQueue` per work packet on a
+>   pipeline that carries ≈ 1 item per packet on OCaml nursery graphs.
+> - **chameneos anti-scaling was mostly the E1 barrier-study counters** (non-atomic globals bumped by
+>   every domain in the write barrier; 68 % of d=8 CPU in the barrier). Removed by PR 58 (pending merge):
+>   d=8 21.8 → 10.3 s, speedup 1.9× → 4.0×.
+> - **Fix direction:** a worker-local, allocation-free nursery trace loop in the mmtk-core fork
+>   (generalising the opt-in UP-oldify path), with a spill threshold as the parallelism knob.
+
 > ## ⚠️ UPDATE (2026-06-25) — the anti-scaling headline below is SUBSTANTIALLY REVISED
 >
 > A **controlled re-run** (core-pinned, **`MMTK_THREADS=domains`** so domains + GC workers ≤ cores, and
