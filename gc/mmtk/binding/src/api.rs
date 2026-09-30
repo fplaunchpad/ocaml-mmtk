@@ -673,7 +673,26 @@ pub extern "C" fn mmtk_ocaml_handle_user_collection_request(domain_state_addr: u
     // mature object then never gets reclaimed and its weak ref never clears (e.g.
     // regression/pr5233). Immix is non-generational so every GC is already full; this
     // makes StickyImmix match.
-    mmtk().handle_user_collection_request(tls, true, true);
+    //
+    // The request returns once a pause that stopped this domain has completed
+    // (block_for_gc -> park_until_resumed). On a generational STW plan that
+    // pause can still be a NURSERY collection: if another domain's request was
+    // already scheduled and its pause kind decided, ours coalesces onto it, and
+    // end_of_gc then overwrites the full-heap request. Repeat until a full-heap
+    // pause has completed. The count is read while this domain is RUNNING, so
+    // no pause has passed its stop barrier yet and any later increment is a
+    // full-heap pause that stopped the world after this call. Concurrent plans
+    // are excluded: their full count moves only when a whole cycle ends, which
+    // can take many pauses; for them (and for every non-generational plan) one
+    // completed pause is what this returns after.
+    let plan = mmtk().get_plan();
+    let retry = plan.generational().is_some() && plan.concurrent().is_none();
+    let full_before = crate::collection::mmtk_ocaml_gc_count();
+    while mmtk().handle_user_collection_request(tls, true, true)
+        && retry
+        && !crate::collection::in_forked_child()
+        && crate::collection::mmtk_ocaml_gc_count() == full_before
+    {}
 }
 
 /// Like `mmtk_ocaml_handle_user_collection_request`, but NON-exhaustive: request a

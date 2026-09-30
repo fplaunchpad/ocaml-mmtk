@@ -1,4 +1,8 @@
-(* MMTk DISABLED: finalise_last flag not flipped on the test's Gc.full_major; deferred not sync [semantic-timing]. *)
+(* MMTk DISABLED: on ConcurrentImmix and LXR, finalise_last flag not flipped on
+   the test's Gc.full_major [semantic-timing]. An explicit collection there
+   completes one pause, not a whole marking cycle or backup trace. Passes on
+   the stop-the-world plans since explicit collections wait for their pause
+   (GH issue 21). *)
 
 (** This test weak table by application to the memoization of collatz
     (also known as syracuse) algorithm suite computation *)

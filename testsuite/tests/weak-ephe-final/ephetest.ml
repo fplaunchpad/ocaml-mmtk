@@ -1,4 +1,8 @@
-(* MMTk DISABLED: finalise_last/weak clearing deferred past Gc.full_major (fires under later allocation) [semantic-timing]. *)
+(* MMTk DISABLED: on ConcurrentImmix and LXR, finalise_last/weak clearing not
+   done by the test's Gc.full_major [semantic-timing]. An explicit collection
+   there completes one pause, not a whole marking cycle or backup trace. Passes
+   on the stop-the-world plans since explicit collections wait for their pause
+   (GH issue 21). *)
 
 let debug = false
 

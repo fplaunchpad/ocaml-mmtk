@@ -99,6 +99,11 @@ struct StwState {
     /// granted while no collection is active, and `stop_all_mutators` waits for
     /// the count to drain along with the RUNNING set.
     binding: usize,
+    /// Completed pauses, bumped by `resume_mutators` in the same critical
+    /// section that clears `gc_active`. A parker snapshots it on entry and
+    /// returns once it moves, so a wait is bounded by the first pause that
+    /// completes after the park began (see `park_until_resumed`).
+    epoch: u64,
 }
 lazy_static! {
     // `HashSet::new` is not const, so the STW state is lazily initialised (the
@@ -107,6 +112,7 @@ lazy_static! {
         gc_active: false,
         running: HashSet::new(),
         binding: 0,
+        epoch: 0,
     });
 }
 static STW_COND: Condvar = Condvar::new();
@@ -631,6 +637,10 @@ extern "C" {
     /// around critical sections that must not see a GC — notably `intern_rec`
     /// (the unmarshaller fills a half-built structure through raw C pointers).
     fn caml_mmtk_collection_enabled() -> i32;
+    /// Non-zero in a process created by fork() from an OCaml process. MMTk's
+    /// GC worker threads do not survive fork, so no collection can run there
+    /// (GH issue 33).
+    fn caml_mmtk_in_forked_child() -> i32;
 }
 
 /// Mark domain `addr` as STOPPED (no longer running OCaml). Idempotent.
@@ -655,24 +665,55 @@ pub fn remove_running(addr: usize) {
     mark_stopped(addr);
 }
 
-/// Park the calling domain (`addr`) until no collection is in progress: mark it
-/// STOPPED and wait while `gc_active`. Does NOT re-mark RUNNING — the caller does
-/// that via caml_mmtk_become_running once it has re-acquired the domain lock and
-/// re-entered OCaml (so RUNNING and the gc_active check stay atomic w.r.t. the next
-/// collection).
+/// True in a forked child, where no collection can run (GH issue 33).
+pub(crate) fn in_forked_child() -> bool {
+    unsafe { caml_mmtk_in_forked_child() != 0 }
+}
+
+/// Park the calling domain (`addr`): remove it from RUNNING and wait until no
+/// collection is pending or in progress, or until a pause that was pending or
+/// in progress when the park began has completed, whichever comes first. Does
+/// NOT re-mark RUNNING -- the caller does that via caml_mmtk_become_running
+/// once it has re-acquired the domain lock and re-entered OCaml (so RUNNING
+/// and the gc_active check stay atomic w.r.t. the next collection).
 ///
-/// Waiting on `gc_active` (the authoritative flag, under the lock) rather than an
-/// epoch counter is what makes this race-free against a collection that resumes
-/// before the parker arrives: if the collection already finished (gc_active ==
-/// false) we return immediately instead of waiting for a resume that already fired
-/// (the old epoch-equality wait lost that wakeup and hung — the native burn
-/// deadlock). If a collection then (re)starts, stop_all_mutators has poisoned this
-/// domain's young_limit, so it traps to its next safepoint and parks again.
+/// "Pending" is MMTk's request flag (`is_collection_requested`): it is set
+/// before the collection is scheduled and cleared only after
+/// stop_all_mutators has returned, i.e. after `gc_active` was set under this
+/// lock. So `requested || gc_active` has no gap between a request and its
+/// pause. Waiting on `gc_active` alone returned from block_for_gc before a
+/// just-requested collection had started: Gc.major/full_major/compact came
+/// back with the collection still to run.
+///
+/// Why this completes, and cannot lose a wakeup:
+///  - If the caller was RUNNING when it took the lock (every mutator that
+///    requests or triggers a collection is), no pause can have passed its
+///    `running.is_empty()` barrier yet, so a set request flag or `gc_active`
+///    means a pause that will pass the barrier after we leave RUNNING here,
+///    then bump `epoch` and notify in resume_mutators.
+///  - If nothing is pending or active (a pause already finished before we
+///    got here), both predicates are false and we return at once. An
+///    epoch-equality wait captured too late would instead wait forever for a
+///    pause that is never requested (the old native burn deadlock).
+///  - The `epoch` bound makes the wait end at the first pause that completes
+///    after the park began, so a domain is not held back by a stream of new
+///    requests made by other domains after that pause.
+///
+/// If a collection then (re)starts, stop_all_mutators poisons this domain's
+/// young_limit, so it traps to its next safepoint and parks again.
+///
+/// In a forked child (GH issue 33) no GC worker exists, so a pending request
+/// never becomes a pause: the request flag is ignored there and only
+/// `gc_active` is waited on, as before this wait was added. Explicit requests
+/// return without collecting in a forked child.
 fn park_until_resumed(addr: usize) {
+    let forked = in_forked_child();
     let mut s = STW.lock().unwrap();
+    let start = s.epoch;
     s.running.remove(&addr);
     STW_COND.notify_all();
-    while s.gc_active {
+    while s.epoch == start && (s.gc_active || (!forked && crate::mmtk().is_collection_requested()))
+    {
         s = STW_COND.wait(s).unwrap();
     }
 }
@@ -1074,7 +1115,12 @@ impl Collection<OCamlVM> for VMCollection {
         for domain in crate::active_plan::domain_addrs() {
             unsafe { caml_mmtk_uninterrupt(domain) };
         }
+        // Count the pause before any parked mutator can return (as with
+        // FULL_GC_COUNT above), so a caller of an explicit Gc request reads
+        // the updated count as soon as the request returns.
+        GC_COUNT.fetch_add(1, Ordering::Relaxed);
         let mut s = STW.lock().unwrap();
+        s.epoch = s.epoch.wrapping_add(1);
         s.gc_active = false;
         GC_ACTIVE.store(false, Ordering::SeqCst);
         STW_COND.notify_all();
@@ -1082,7 +1128,6 @@ impl Collection<OCamlVM> for VMCollection {
         if let Some(start) = GC_PAUSE_START.lock().unwrap().take() {
             let dur = start.elapsed();
             GC_NANOS.fetch_add(dur.as_nanos() as u64, Ordering::Relaxed);
-            GC_COUNT.fetch_add(1, Ordering::Relaxed);
             // Keep the individual pause too, not just the running sum (#R1).
             if PAUSE_LOG_ON.load(Ordering::Relaxed) {
                 let mut t0 = PAUSE_LOG_T0.lock().unwrap();

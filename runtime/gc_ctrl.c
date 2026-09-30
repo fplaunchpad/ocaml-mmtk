@@ -282,6 +282,12 @@ CAMLprim value caml_gc_minor(value v)
   Caml_check_caml_state();
   CAML_EV_BEGIN(EV_EXPLICIT_GC_MINOR);
   CAMLassert (v == Val_unit);
+  /* Under MMTk caml_minor_collection only does a stock minor GC's per-domain
+     bookkeeping (in bytecode: reset the young region, count the minor GC);
+     it collects nothing. Request a forced non-exhaustive MMTk collection and
+     wait for it: a nursery collection on the generational plans, a
+     whole-heap one on the others. */
+  caml_mmtk_collect_minor();
   caml_minor_collection ();
   caml_result result = caml_process_pending_actions_res();
   CAML_EV_END(EV_EXPLICIT_GC_MINOR);

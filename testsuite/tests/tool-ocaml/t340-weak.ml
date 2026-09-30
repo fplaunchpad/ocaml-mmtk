@@ -1,4 +1,8 @@
-(* MMTk DISABLED: dead weak keys not cleared on Gc.full_major (deferred to allocation pressure) -> Not_found [semantic-timing]. *)
+(* MMTk DISABLED: on ConcurrentImmix and LXR, dead weak keys not cleared on
+   Gc.full_major -> Not_found [semantic-timing]. An explicit collection there
+   completes one pause, not a whole marking cycle or backup trace. Passes on
+   the stop-the-world plans since explicit collections wait for their pause
+   (GH issue 21). *)
 
 open Lib;;
 let x = Array.make 20 "" in

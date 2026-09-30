@@ -1,4 +1,8 @@
-(* MMTk DISABLED: custom-block finalize not run on the test's Gc.full_major; counter 1000001 vs stock -1 [semantic-timing]. *)
+(* MMTk DISABLED: on ConcurrentImmix and LXR, custom-block finalize not run on
+   the test's Gc.full_major; counter 1000001 vs stock -1 [semantic-timing]. An
+   explicit collection there completes one pause, not a whole marking cycle or
+   backup trace. Passes on the stop-the-world plans since explicit collections
+   wait for their pause (GH issue 21). *)
 
 type t
 
