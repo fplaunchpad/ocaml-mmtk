@@ -40,12 +40,14 @@ extern int caml_mmtk_refill_tlab(caml_domain_state *dom, mlsize_t whsize);
 
 /* Service an explicit Gc.major/full_major/compact request by triggering a real
  * MMTk collection (rather than the stock major-GC machinery, which is bypassed
- * under MMTk). No-op for NoGC and in a forked child (GH issue 33). */
+ * under MMTk) and waiting for it: on return a stop-the-world pause that
+ * stopped the calling domain after the call has completed. No-op for NoGC and
+ * in a forked child (GH issue 33). */
 extern void caml_mmtk_collect(void);
 /* Forced MINOR (non-exhaustive) collection: promotes young objects without a
    whole-heap trace. For the domain-termination result-promotion path (GH#3);
-   a no-op when MMTk cannot collect. Non-generational plans collect whole-heap
-   on any GC, so this degrades to caml_mmtk_collect there. */
+   waits like caml_mmtk_collect; a no-op when MMTk cannot collect.
+   Non-generational plans collect whole-heap on any GC. */
 extern void caml_mmtk_collect_minor(void);
 /* Non-zero in the child of a fork(): no collection can run there (MMTk's GC
    workers do not survive fork, GH issue 33). */

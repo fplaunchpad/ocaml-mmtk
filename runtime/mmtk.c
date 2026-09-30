@@ -133,9 +133,12 @@ static int caml_mmtk_collection_started = 0;
    survive fork, so the child can never run a collection (GH issue 33). Until
    fork is supported, explicit Gc requests in the child return without
    collecting and without touching MMTk's scheduler (a worker may have held
-   its lock at the fork). The child's heap stays usable up to its current
-   size; it just never collects. Written once, in the child, before fork()
-   returns there. */
+   its lock at the fork), and block_for_gc does not wait for a pending request
+   (the binding's park_until_resumed reads this flag): such a request never
+   becomes a pause, so waiting for it would hang the child at its first
+   allocation-triggered collection. The child's heap stays usable up to its
+   current size; it just never collects. Written once, in the child, before
+   fork() returns there. */
 static atomic_uintnat caml_mmtk_forked_child = 0;
 
 #ifndef _WIN32
@@ -1276,8 +1279,9 @@ uintnat caml_mmtk_heap_size_bytes(void)
    must NOT run -- it operates on the bypassed stock shared heap and corrupts
    state (observed: channel/custom-block corruption -> crash under a moving
    plan). Instead trigger a real MMTk collection on the calling domain and block
-   until it completes. No-op for NoGC (cannot collect) and in a forked child
-   (GH issue 33, see caml_mmtk_forked_child). */
+   until it completes: on return, a stop-the-world pause that stopped this
+   domain after the call has finished. No-op for NoGC (cannot collect) and in
+   a forked child (GH issue 33, see caml_mmtk_forked_child). */
 void caml_mmtk_collect(void)
 {
   if (caml_mmtk_collects && !caml_mmtk_in_forked_child())
