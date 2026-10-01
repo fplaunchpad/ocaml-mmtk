@@ -22,7 +22,7 @@ use mmtk::vm::SlotVisitor;
 use mmtk::vm::{ObjectTracer, ObjectTracerContext, RootsWorkFactory, Scanning};
 use mmtk::Mutator;
 
-use mmtk_ocaml_common::scanning::{continuation_stack, scan_ocaml_object};
+use mmtk_ocaml_common::scanning::{continuation_stack, scan_ocaml_object, scan_slot_upper_bound};
 
 /// Collect visited slots into a Vec (up_oldify's continuation delegation).
 struct CollectSlots<'a>(&'a mut Vec<FieldSlot>);
@@ -455,6 +455,13 @@ impl Scanning<OCamlVM> for VMScanning {
                 .fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
         }
         true
+    }
+
+    fn scan_object_slot_upper_bound(
+        _tls: VMWorkerThread,
+        object: ObjectReference,
+    ) -> Option<usize> {
+        scan_slot_upper_bound(object)
     }
 
     /// Trace all pointer fields of a live OCaml heap block.

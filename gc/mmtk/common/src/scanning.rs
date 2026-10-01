@@ -14,6 +14,25 @@ use crate::header::{
 };
 use crate::slot::FieldSlot;
 
+/// Bound the slots emitted by the binding's complete object scan using only
+/// the OCaml header. Continuation fiber stacks have variable width and must use
+/// the ordinary scan packet, including its continuation lock protocol.
+///
+/// Infix references emit no slots here: FieldSlot normalizes them to their
+/// parent closure before tracing. A parent's header therefore supplies its own
+/// size. Closure environments and forwarding blocks emit at most `wosize`
+/// slots; using the full size avoids reading closure fields for this guard.
+#[inline(always)]
+pub fn scan_slot_upper_bound(object: ObjectReference) -> Option<usize> {
+    let header: usize = unsafe { (object.to_raw_address() - WORD_SIZE).load() };
+    match tag_of(header) {
+        TAG_CONTINUATION => None,
+        TAG_INFIX => Some(0),
+        tag if tag >= TAG_NO_SCAN => Some(0),
+        _ => Some(wosize_of(header)),
+    }
+}
+
 /// If `object` is a continuation block (Cont_tag), return the address of the
 /// suspended fiber `stack_info` it holds in field 0 (`Val_ptr(stack) = stack + 1`),
 /// or `None` if it is not a continuation or the stack has been consumed
@@ -160,5 +179,55 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
             // SKIP_IMMEDIATE_SLOTS is on, else filtered by FieldSlot::load().
             visit_fields(base, 0, wosize, slot_visitor);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::header::make_header;
+
+    struct CountSlots(usize);
+    impl SlotVisitor<FieldSlot> for CountSlots {
+        fn visit_slot(&mut self, _slot: FieldSlot) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn header_width_bounds_complete_ordinary_scan() {
+        // Synthetic null fields are non-immediate, so the visitor emits them
+        // with filtering on or off. FieldSlot classifies null without consulting
+        // the uninitialized MMTk SFT. This tests visitor counts, not a live graph;
+        // runtime regressions separately exercise real pointer-valued graphs.
+        let pointer = 0;
+        for (tag, fields, expected_bound, expected_slots) in [
+            (0, vec![pointer; 65], 65, 65),
+            (TAG_CLOSURE, vec![0, (2 << 1) | 1, pointer, pointer], 4, 2),
+            (TAG_FORWARD, vec![pointer], 1, 1),
+            (TAG_INFIX, vec![pointer; 4], 0, 0),
+            (TAG_NO_SCAN, vec![pointer; 65], 0, 0),
+        ] {
+            let mut block = vec![make_header(fields.len(), tag)];
+            block.extend(fields);
+            let object = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_ptr(block.as_ptr().add(1)))
+            };
+            let bound = scan_slot_upper_bound(object).unwrap();
+            assert_eq!(bound, expected_bound);
+            let mut count = CountSlots(0);
+            scan_ocaml_object(object, &mut count);
+            assert_eq!(count.0, expected_slots);
+            assert!(count.0 <= bound);
+        }
+    }
+
+    #[test]
+    fn continuation_width_is_unknown_even_with_small_header() {
+        let block = [make_header(1, TAG_CONTINUATION), 1];
+        let object = unsafe {
+            ObjectReference::from_raw_address_unchecked(Address::from_ptr(block.as_ptr().add(1)))
+        };
+        assert_eq!(scan_slot_upper_bound(object), None);
     }
 }

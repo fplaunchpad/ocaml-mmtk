@@ -1253,12 +1253,22 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
        total at d=8. Not a factor; the "STW-bound" reading (SCALABILITY.md updates 3 and 5) is
        corrected to "per-pause cost".
 
+    **T15 width guard, verified build/timing/sanity:** a VM scanning hook bounds per-object local slot
+    buffering before scanning. OCaml uses its header size; wider objects and every continuation
+    use the ordinary packet path. 36 validated timing runs: eight-worker median
+    pauses improve 25.76% on chameneos (short of the nominal 30% reference) and 45.89% on
+    binarytrees; peak RSS rises 5.64% and 9.78%, respectively, with differing GC counts.
+    Wide-object three-run pause/RSS ranges overlap off/on. These are dynamic-policy results;
+    no memory-parity claim. Sanity at 32 MiB passes six focused tests at one/two workers
+    (12/12) plus both width-boundary probes; evidence in NOTES 2026-10-01 T15.
+    The opt-in flag remains off by default.
+
     **First lever — LANDED, opt-in (2026-09-30 late; mmtk-core `3acfce3465`, pinned `441a0b80b3`).** A
     worker-local nursery closure: with `MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix's
     `GenNurseryProcessEdges::flush` scans each copied object into one worker-local slot buffer and
     processes those slots until the frontier is empty, reusing the frontier and slot vectors across waves;
-    above `MMTK_LOCAL_NURSERY_SPILL` (default 4096, min 2) half the frontier is published as a scan packet
-    for stealing; continuations still go through the ordinary packet; line marks (`post_scan_object`)
+    above `MMTK_LOCAL_NURSERY_SPILL` (then default 4096, now 64 via T15; min 2) half the frontier is published as a scan packet
+    for stealing; with T15, continuations go through the ordinary packet; line marks (`post_scan_object`)
     preserved; off under `extreme_assertions`, `count_live_bytes_in_gc` and non-GenImmix plans. godel,
     3 reps, `MMTK_THREADS` = domains: chameneos_redux 500000 d=1 GC 27.8 → 19.6 s (−29 %, wall 40.9 →
     32.7), d=8 8.6 → 7.5 s (−12 %); binarytrees 20 12.0 → 11.5 s (−4 %); par_binarytrees 20 d=8 4.35 →
@@ -1269,7 +1279,7 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     - (i) *Research question:* when should tracing stay local versus publish work, given the frontier
       width? The spill threshold is the local-vs-parallel knob, set by hand; chameneos (narrow) and
       binarytrees (wide) bracket it.
-    - (ii) Default-on after the testsuite run; (iii) extend to GenCopy and Bactrian (UP-oldify,
+    - (ii) Default-on awaits width/performance and memory acceptance plus correctness validation; (iii) extend to GenCopy and Bactrian (UP-oldify,
       `MMTK_UP_OLDIFY=1`, SHAPE.md round 30, is the single-worker Bactrian precedent).
     - (iv) **Next lever: the per-copy writes (T12 list)**, especially for binarytrees — *inferred*,
       risk-scoped candidates: skip the unlog-byte store per copy when the object barrier is unused
