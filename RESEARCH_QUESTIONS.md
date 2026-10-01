@@ -581,6 +581,20 @@ below GenImmix's, RQ7 is answered *yes* and the plan stays; if not, RQ7 is answe
 stock's incremental-marking architecture buys nothing on MMTk's generational Immix, a publishable
 negative — and Bactrian is frozen (kept as the record, dropped from the default panel and CI gating).
 
+**Status 2026-10-01 — measured; RQ7 is a *qualified yes*; the keep/freeze decision is the owner's
+(open).** godel, matched pinned heaps (the sweep's front points), 3 reps, `MMTK_PAUSE_LOG=1`
+(NOTES 2026-10-01, ROADMAP item 33). Max pause GenImmix → Bactrian: binarytrees 569 → 326 ms (−43 %), kb
+42 → 31 ms (−27 %), chameneos_redux 113 → 109 ms, par_binarytrees d=8 402 → 425 ms. The price: the
+median pause rises (binarytrees 2.6 → 11.3 ms, par_binarytrees 1.4 → 11.6 ms) because the marking quanta
+run inside nursery pauses; wall rises 20–29 % on binarytrees and chameneos_redux; RSS is equal except at
+8 domains (609 vs 386 MiB, 1.6×). So stock's architecture does cap the worst pause on MMTk — the
+decision rule's "materially lower max" holds on two of four benches — but the equal-RSS condition fails
+at 8 domains, and Bactrian's best max pause is still set by the same per-object nursery cost as
+GenImmix's (the framework tax below), because its marking slices stop the world too. It cannot approach
+stock latency without taking marking off the pause. Vanilla gives minor/major counts only (binarytrees
+1778 / 61, kb 942 / 126, chameneos_redux 2439 / 1216, par_binarytrees d=8 387 / 18); its per-pause
+durations need `runtime_events` and are the missing column.
+
 **An expressiveness observation (not yet a result).** Matching stock's *minor* collector closely enough
 to close the per-promotion cost gap needed a new, opt-in VM-side hook in mmtk-core —
 `Scanning::up_oldify_packet` + `UpOldifyOps` (mmtk-core `32d8057efa`, used by `MMTK_UP_OLDIFY=1`) — which
@@ -614,7 +628,11 @@ versus publish work, given the frontier width? The work-packet model makes paral
 cost; the closure makes it a knob (the spill threshold), but the right setting depends on a frontier
 width that ranges from 3 (chameneos) to thousands (binarytrees) and is not known in advance. The
 remaining per-copy writes — metadata a framework keeps for plans and barriers the host does not use —
-are the second finding for the RQ4/RQ7 write-up. This also retires the "STW-bound" reading of the
+are the second finding for the RQ4/RQ7 write-up. **2026-10-01:** the unlog byte is the first of them
+removed — an opt-in VM contract hook in the mmtk-core fork lets a region-barrier VM skip it on nursery
+promotion (`MMTK_PROMOTION_SKIP_UNLOG=1`; binarytrees pause −9.1 % at 8 workers, ranges overlapping);
+suppressing line-mark stores gained 1.4 % and was not landed, and its parallel form needs an
+exclusive-line ownership proof the framework's side-metadata access rules do not give. This also retires the "STW-bound" reading of the
 multi-domain gap (RQ10): the rendezvous is 26 of 674 ms of pause at 8 domains on the M4. ROADMAP item 35;
 NOTES 2026-09-30 (night) and (late).
 

@@ -218,7 +218,8 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
    counted twice in the heap budget); GC work-packet vectors (29–36 MiB of
    malloc on `binarytrees` at a 64 MiB heap, measured before the fix and
    independent of it); one mapped chunk per space and metadata spec; no page
-   return on macOS (every return path is Linux-only). *Open, for speed:*
+   return on macOS at the time (since landed, 2026-10-01: it lowers mean RSS,
+   not max RSS — NOTES of that date). *Open, for speed:*
    MMTk's per-collection cost at a given heap (a nursery collection goes
    through the full stop-the-world and work-packet machinery) and the
    nursery size (a 4 MiB nursery costs 0.4–0.8 s on `binarytrees`). The
@@ -242,7 +243,10 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
    **First lever (2026-09-30 late, opt-in, godel):** a worker-local
    nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix) cuts
    `chameneos_redux` nursery pause time 29 % at 1 domain (27.8 → 19.6 s)
-   and 12 % at 8; it is not in these sweeps (NOTES 2026-09-30 late).
+   and 12 % at 8; it is not in these sweeps (NOTES 2026-09-30 late). It
+   stays opt-in: its one-domain RSS rise is glibc arena retention, not managed
+   memory, but `par_binarytrees` at 8 domains still shows +27 % median peak
+   RSS (NOTES 2026-10-01).
 3. **The generational plans segfault instead of raising `Out_of_memory` at
    too-small heaps** (GH issue 49; Immix fails cleanly at the 32 and 48 MiB
    heaps). The same 20 points fail in both sweeps. The same signature was
@@ -257,12 +261,24 @@ GenImmix 2.5× vs 4.35× on `par_binarytrees` (548 ms / 623 MiB vs 378 ms /
    *Open:* none for time; their RSS is the startup floor (9 MiB after the fix).
 5. **Host caveats bound all of the above.** The macOS memset artefact is fixed
    (below), so the M4 RSS coordinate no longer overstates MMTk's memory by
-   ~50 MiB, but macOS still returns no page to the OS. One run per sweep
+   ~50 MiB; page return on macOS landed after these sweeps (2026-10-01) and
+   moves mean, not max, RSS. One run per sweep
    point and no dispersion; vanilla's default point moved by up to 12 %
    between the two sweeps with the same binaries; cores were not pinned, so
    the M4's efficiency cores can take a run. *Open:* repeat the sweep on
    godel with reps before quoting any front crossing, and to check the
    residual floor under Linux RSS accounting.
+6. **Pause distributions (2026-10-01, godel, matched pinned heaps, 3 reps;
+   not on these fronts; ROADMAP item 33).** Bactrian's worst pause is 43 %
+   below GenImmix's on `binarytrees` (569 → 326 ms) and 27 % on `kb` (42 → 31
+   ms), and close on `chameneos_redux` (113 → 109 ms) and `par_binarytrees`
+   d=8 (402 → 425 ms); its median
+   pause is 4–8× higher where it marks (the quanta run inside nursery pauses),
+   its wall 20–29 % higher on `binarytrees` and `chameneos_redux`, its RSS 1.6×
+   at 8 domains. Its lowest max pause (326 ms) is still set by the nursery's
+   per-object cost, since its marking slices also stop the world.
+   *Open:* vanilla's per-pause durations (counts only so far; they need
+   `runtime_events`), and the owner's keep/freeze decision on Bactrian.
 
 ### The macOS memset artefact
 
