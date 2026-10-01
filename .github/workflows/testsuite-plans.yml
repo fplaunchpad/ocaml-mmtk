@@ -93,6 +93,8 @@ jobs:
       # setarch -R disables ASLR (the MMTk fixed-address metadata mmap flake — needed for
       # every MMTk process). MMTK_PLAN/HEAP are inherited by make and every test process.
       # TIMEOUT is ocamltest's per-test SIGKILL deadline — several tests hang under MMTk.
+      # 180 s: memory-model/forbidden.ml (a litmus loop) takes ~60 s per variant on a
+      # quiet host and timed out at 120 s on three PRs in a row on the loaded runner.
       # Capture the run to a log. We deliberately do NOT trust make's exit code:
       # `make -C testsuite parallel` runs the `report` target (summarize.awk) whose
       # non-zero exit only fires when summarize.awk counts failed/unexpected tests.
@@ -109,7 +111,7 @@ jobs:
           MMTK_HEAP_SIZE_MB: 4096
         run: |
           set +e
-          setarch "$(uname -m)" -R make -C testsuite parallel TIMEOUT=120 2>&1 \
+          setarch "$(uname -m)" -R make -C testsuite parallel TIMEOUT=180 2>&1 \
             | tee "/tmp/testsuite-${{ matrix.plan }}.log"
           echo "make pipeline exit (untrusted): ${PIPESTATUS[0]}"
           exit 0
