@@ -5,6 +5,59 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-10-01 - T15 width guard for the opt-in local nursery closure
+
+**Verified build, timings and sanity; source rationale below.** Based on superproject
+`1176b111a1` and mmtk-core `873721f7fe`. `Scanning::scan_object_slot_upper_bound`
+returns a cheap conservative bound or `None`. The local closure checks this
+before scanning or growing its slot vector, and creates an ordinary scan packet
+for unknown widths or bounds above the spill threshold (now default 64).
+ObjectsClosure's bounded slot packets recover pipelining for singleton wide
+objects. The fallback object is already traced; only its newly discovered
+children may enter the local closure, so it does not repeatedly fall back on
+itself. The fallback keeps `start_or_dispatch_scan_work`'s baseline immediate
+scan optimization: ObjectsClosure only enqueues edge packets, so edges are not
+processed inline while the continuation scan holds its lock.
+
+OCaml reads only the header: ordinary blocks, closure environments and
+forwarding blocks emit at most `wosize` slots. No-scan and infix layouts emit
+zero; FieldSlot normalizes infix references to the parent closure, whose own
+header supplies its size. All continuation blocks return unknown, even consumed
+ones, preserving the existing lock/fiber scan and post-scan protocol in the
+ordinary packet. No object layout, forwarding, locks or GC scheduling protocol
+is replaced. The flag stays opt-in. Width tests cover ordinary/closure/forward,
+infix/no-scan and continuation discrimination.
+
+**Verified, 36 timing runs with output/pause validation:** 12 workload timings
+at eight GC workers plus 24 wide-object controls at one/eight workers, three
+repetitions per cell, godel CPUs 14–27 with ASLR disabled and the same binary
+OFF/ON. Corrected baseline-immediate fallback, spill 64 when enabled. Chameneos median total pause 28.6472 → 21.2676 s
+(−25.76%, short of the nominal 30% reference), wall 41.9879 → 34.6779 s,
+peak RSS 45.5742 → 48.1445 MiB (+5.64%). Binarytrees median total pause
+8.67595 → 4.69432 s (−45.89%), wall 17.7969 → 13.2390 s, peak RSS
+169.5586 → 186.1445 MiB (+9.78%). GC counts differ; these are dynamic-policy
+outcomes, not memory-parity measurements. All wide-object OFF/ON three-run
+pause and RSS ranges overlap; overlap is not statistical equivalence. T14 used
+an earlier baseline without immediate-slot filtering and a different spill
+default, so differences from T14 cannot isolate continuation fallback alone.
+Keep the flag opt-in: continuation fallback
+retains a useful chameneos gain but does not meet the nominal 30% reference.
+
+**Verified correctness:** the initial candidate completed a full world build; the
+corrected immediate-fallback candidate rebuilt the changed core/staticlib/runtime
+and relinked the compilers. A separate sanity runtime and ocamltest build ran
+GenImmix at 32 MiB, local tracing enabled, spill unset (default 64). Six cases
+(`resume_counts`, `nested_fiber`, `ephe_infix`, `weaklifetime2`, `finaliser`,
+`old_to_young_bulk_stores`) at one and two workers each passed: 12 logs, each
+1 pass/0 skipped/0 failed/0 unexpected. Both boundary probes produced their four
+expected output lines and empty stderr; the bytecode runtime and native probe
+contain SanityGC symbols. Timing records and raw sanity evidence live at
+`/private/tmp/t15-results/` (also `/home/kc/t15-results/` on godel); rerun script
+`/private/tmp/t15-sanity-rerun.sh`, sanity logs in the `sanity/` subdirectory.
+The two common scanner unit tests passed before runtime verification.
+
+---
+
 ## 2026-10-01 - macOS page return lands; it lowers mean RSS, not max RSS
 
 ROADMAP item 34, lever (2c) "page return". mmtk-core `873721f7fe`
@@ -261,12 +314,14 @@ frontier again), and repeats until the frontier is empty.
 
 - The two frontier vectors and the slot vector are reused across waves
   within a packet; new packets, vector growth and spills still allocate.
-- When the frontier exceeds `MMTK_LOCAL_NURSERY_SPILL` (default 4096,
-  minimum 2) half of it is published as an ordinary scan packet so other
+- When the frontier exceeds `MMTK_LOCAL_NURSERY_SPILL` (then default 4096,
+  now 64 via T15; minimum 2) half of it is published as an ordinary scan packet so other
   workers can steal. Spilled objects are scanned by that packet, never
   retraced.
-- Objects without slot-enqueuing support (continuations) still go through
-  the ordinary packet; `post_scan_object` (line marks) is preserved.
+- Objects without slot-enqueuing support still go through the ordinary
+  packet; `post_scan_object` (line marks) is preserved. OCaml supports slot
+  enqueuing for continuations too; T15 explicitly routes them through the
+  ordinary packet because their fiber stack width is not header-bounded.
 - Disabled automatically under `extreme_assertions`,
   `count_live_bytes_in_gc`, and for every plan other than GenImmix.
 - Off by default.
@@ -311,8 +366,8 @@ writes of section 2, not in packets.
 
 - When should tracing stay local versus publish work, given the frontier
   width? The spill threshold is the local-vs-parallel knob; it is set by
-  hand (4096), not derived from the frontier or the idle-worker count.
-- Default-on after the testsuite run.
+  hand (then 4096, now 64 via T15), not derived from the frontier or the idle-worker count.
+- Default-on awaits width/performance and memory acceptance plus correctness validation.
 - Extend to GenCopy and Bactrian (Bactrian's UP-oldify path is the
   single-worker precedent).
 - The per-copy writes of section 3 are the next lever, especially for
