@@ -23,10 +23,19 @@
 >   d=8 21.8 → 10.3 s, speedup 1.9× → 4.0×.
 > - **First lever, landed opt-in (late):** a worker-local nursery closure in the mmtk-core fork
 >   (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix; `MMTK_LOCAL_NURSERY_SPILL` = the parallelism knob, default
->   4096). godel, 3 reps: chameneos_redux 500000 GC 27.8 → 19.6 s at d=1 (−29 %), 8.6 → 7.5 s at d=8
+>   4096 then, 64 since the T15 width guard). godel, 3 reps: chameneos_redux 500000 GC 27.8 → 19.6 s at d=1 (−29 %), 8.6 → 7.5 s at d=8
 >   (−12 %); par_binarytrees 20 d=8 4.35 → 4.0 s (−8 %); binarytrees 20 −4 %. Full GenImmix
 >   testsuite with it on: 1444 passed, 5 host-speed timeouts (godel). Next lever: the per-copy
 >   writes (binarytrees).
+> - **2026-10-01 follow-ups (NOTES 2026-10-01; ROADMAP item 35).** The work-sharing study (141 runs,
+>   godel): binarytrees 1 → 8 workers pause speedup 1.58× off / 2.16× with the closure; spill 64 beats
+>   4096 at 8 workers (nursery pause 2.59 vs 4.65 s; wait-capacity fraction 4.9 vs 46.7 %); chameneos_redux
+>   gets no useful worker speedup either way. The M4's "12 workers slower than 1" on single-domain
+>   binarytrees does not reproduce on godel (cause unknown; >1 worker also disables the UP path). At 4
+>   workers, domains 1–8, the closure improves wall in every cell (chameneos_redux d=8 13.8 → 10.7 s) but
+>   par_binarytrees d=8 peak RSS is +27 % (356 → 451 MiB, overlapping), so it stays opt-in. Per-copy writes:
+>   the promotion unlog store is now skippable (opt-in `MMTK_PROMOTION_SKIP_UNLOG=1`, binarytrees pause
+>   −9.1 %).
 
 > ## ⚠️ UPDATE (2026-06-25) — the anti-scaling headline below is SUBSTANTIALLY REVISED
 >

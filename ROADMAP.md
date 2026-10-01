@@ -33,7 +33,11 @@ per copied object on chameneos (≥ 2× stock; one `malloc` per copy from narrow
 0.63 µs on binarytrees (wide packets; the per-copy writes), plus the E1 barrier-study counters contending
 across domains (removed by PR 58, merged `ee744db495`: chameneos d=8 21.8 → 10.3 s). **First lever landed,
 opt-in (2026-09-30 late):** a worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`, GenImmix) cuts
-chameneos nursery pause time 29 % (d=1) and binarytrees' 4 %; full GenImmix testsuite with it on (godel, spill 64): 1444 passed, 53 skipped, 5 timeouts at the 120 s limit that are host speed, not the closure (`lazy3/5/7` bytecode take 143-144 s with it on and off, output correct; `weaklifetime` 147 s; `forbidden` under the parallel load). **Open:** LXR capacity and failures (items 21, 31 =
+chameneos nursery pause time 29 % (d=1) and binarytrees' 4 %; full GenImmix testsuite with it on (godel, spill 64): 1444 passed, 53 skipped, 5 timeouts at the 120 s limit that are host speed, not the closure (`lazy3/5/7` bytecode take 143-144 s with it on and off, output correct; `weaklifetime` 147 s; `forbidden` under the parallel load). **2026-10-01:** item 33 measured on godel
+(Bactrian's worst pause 43 % lower on binarytrees, 27 % on kb, at a higher median pause, more wall and
+1.6× RSS at 8 domains: RQ7 a *qualified yes*; keep/freeze is the owner's decision); the
+promotion-unlog elision landed opt-in (`MMTK_PROMOTION_SKIP_UNLOG=1`, item 35); the closure stays opt-in
+on its 8-domain RSS. **Open:** LXR capacity and failures (items 21, 31 =
 GH issue 44, 32 = GH issue 45), fork (item 25, GH issue 33), the Bactrian CI out-of-memory (item 26, GH
 issue 36), one-off multi-domain crashes on CI (item 30, plausibly item 28), and item 28's
 process-exit residual. Order: items 21/31, 26, 25, 30, 20(c), 32, 23, 24.
@@ -659,7 +663,7 @@ line reuse (together they keep LXR's results provisional); (3) item 26, GH issue
 intermittent Bactrian out-of-memory in Linux CI (the explicit-request part is closed by PR 41; the
 rest is open); (4) item 25, GH issue 33, a forked child cannot run a collection (explicit requests
 are now no-ops there; an allocation-triggered collection spins); (5) item 30, one-off multi-domain
-crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling gap, the two headline gaps after the macOS memset fix; item 35 is DIAGNOSED (per-copy nursery cost: narrow packets on chameneos, per-copy writes on binarytrees; the E1 counters, PR 58, merged) and its first lever, the opt-in worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`), has landed; the per-copy writes are the next lever and item 34's binarytrees time lever; item 33's per-pause log is done (PR 57, merged); (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays; (8) the unexplained July growth (20(c)); (9) item 32, an LXR
+crashes on Linux CI (possibly item 28); (6) items 34 and 35 — the residual maxRSS gap and the multi-domain scaling gap, the two headline gaps after the macOS memset fix; item 35 is DIAGNOSED (per-copy nursery cost: narrow packets on chameneos, per-copy writes on binarytrees; the E1 counters, PR 58, merged) and its first lever, the opt-in worker-local nursery closure (`MMTK_LOCAL_NURSERY_TRACE=1`), has landed; the per-copy writes are the next lever and item 34's binarytrees time lever; item 33's per-pause log is done (PR 57, merged); (7) item 33, the RQ7 pause-time measurement that decides whether Bactrian stays (measured 2026-10-01: qualified yes; the keep/freeze decision is with the owner); (8) the unexplained July growth (20(c)); (9) item 32, an LXR
 reference-count anomaly in kb; (8) item 23, a possible concurrent-marking infix race; (9) item 24,
 two pre-existing side findings from the store-path audit. Evidence is labelled *verified*
 (reproduced by running), *source reading*, *inferred* or *unknown*.
@@ -1141,7 +1145,9 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     is plausibly the same bug (GenCopy failed the item-28 stress 2/100 before the fix; *inferred*, `tak`
     not reproduced). The ConcurrentImmix `prodcons_domains` double free is the same class by source
     reading (the SATB flush, `flush_satb`, at deregistration); 0/100 on godel, so PR 52 is untested
-    there. → NOTES 2026-09-30, 2026-09-30 (evening).
+    there. **Recurring flake (2026-10-01):** Bactrian `memory-model/forbidden.ml` times out in the
+    all-plans job (PRs 51 and 65), passes on rerun and 5/5 locally; cause unknown, distinct from item 26's
+    `forbidden.ml` compile out-of-memory. → NOTES 2026-09-30, 2026-09-30 (evening), 2026-10-01.
 
 31. **LXR weak references are unsound: `Weak.get` can return freed memory (open; added 2026-09-30; GH
     issue 44).** *Source reading:* LXR never counts or clears weak referents
@@ -1166,8 +1172,8 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     sampled ones are small blocks in blocks promoted in place; output correct. It matters because
     `rc_dead` block freeing and line reuse trust a zero count, so it blocks line reuse with item 31.
     → NOTES 2026-09-30 (later), 2026-09-30 (evening).
-33. **RQ7 decision measurement — pause-time distributions, GenImmix vs Bactrian vs vanilla (open;
-    added 2026-09-30).** Decides whether Bactrian stays. On throughput the 2026-09-30 sweep and panel put
+33. **RQ7 decision measurement — pause-time distributions, GenImmix vs Bactrian vs vanilla (MEASURED
+    2026-10-01; decision pending with the owner; added 2026-09-30).** Decides whether Bactrian stays. On throughput the 2026-09-30 sweep and panel put
     Bactrian's fronts on top of GenImmix's on every bench (binarytrees 101 MiB / 1.74 s vs 94 / 1.64; kb
     22 / 0.48 vs 23 / 0.49; LU identical; chameneos 3.3 vs 3.0 s; par_matmul slightly better at 2–4
     domains, equal at 8), so throughput does not justify a second plan; but Bactrian's claim is pause
@@ -1183,7 +1189,17 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     publishable negative: stock's incremental-marking architecture buys nothing on MMTk's generational
     Immix) and Bactrian is frozen — code and SHAPE.md kept as the record, dropped from the default
     panel, CI gating and the README plan table, no further maintenance. Not to be deleted before the
-    measurement exists. → the RQ7 workstream bullet; RESULTS.md; RESEARCH_QUESTIONS RQ7.
+    measurement exists. **Measured (2026-10-01, godel node 0, matched pinned heaps, 3 reps, pause log;
+    task 2 on godel only, not the M4):** max pause GenImmix → Bactrian binarytrees @ 128 MiB 569 → 326 ms
+    (−43 %), kb @ 48 42 → 31 ms (−27 %), chameneos_redux @ 96 113 → 109 ms, par_binarytrees d=8 @ 512
+    402 → 425 ms; Bactrian's median pause is 4.3× GenImmix's on binarytrees and 8× on par_binarytrees (marking
+    quanta inside nursery pauses; equal on kb, lower on chameneos_redux), its wall 20–29 % higher on binarytrees and chameneos_redux, its RSS
+    1.6× at 8 domains (609 vs 386 MiB), equal elsewhere within 9 MiB. Vanilla gives counts only (per-pause
+    durations need `runtime_events`). **RQ7 answer: qualified yes** — the architecture caps the worst
+    pause, but its best max pause is still set by the per-object nursery cost (item 35), because marking
+    runs as stop-the-world slices; it cannot approach stock latency without marking off the pause.
+    Whether that justifies a second plan is the owner's decision, so step (3) is open. Table: NOTES
+    2026-10-01 (RQ7 decision measurement). → the RQ7 workstream bullet; RESULTS.md; RESEARCH_QUESTIONS RQ7.
 34. **Residual maxRSS gap vs vanilla after the macOS memset fix (open; added 2026-09-30; the first of
     the two headline gaps).** After mmtk-core `5454281016` the fronts meet vanilla's, but MMTk's front
     still starts 8–21 MiB above vanilla's on kb, LU, matmul and chameneos (GenImmix/Bactrian; Immix 11–37;
@@ -1241,7 +1257,10 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
          source forwarding pointer, one line-mark byte per spanned 256 B line, plus a relocated-slot
          store per edge (the T12 list). Why more GC workers slow single-domain binarytrees (M4: 1790 ms
          of pause with 12 workers vs 630 with 1) is **open**: with 5,828 wide packets,
-         packet hand-off is an unlikely explanation.
+         packet hand-off is an unlikely explanation. **It does not reproduce on godel** (T14, 2026-10-01:
+         1, 4 and 8 workers help monotonically); host-dependence (the M4's efficiency cores) is a
+         hypothesis, cause unknown. More than one worker also disables the UP path, so worker-count
+         effects are not purely scheduling.
        After term 2, chameneos is 68 % (d=1) to 82 % (d=8) pause, almost all in nursery pauses (420 ×
        64 ms at d=1; 68 full pauses total 0.7 s).
     2. **The E1 barrier-study counters** (*verified*; **fixed by PR 58, merged `ee744db495`**). Plain
@@ -1253,9 +1272,40 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
        total at d=8. Not a factor; the "STW-bound" reading (SCALABILITY.md updates 3 and 5) is
        corrected to "per-pause cost".
 
-    **T13 unlog — measured independent candidate, opt-in.**
+    **T13 unlog — measured independent candidate, LANDED opt-in (mmtk-core `a2a2315dc0`).**
     `MMTK_PROMOTION_SKIP_UNLOG=1`: GenImmix nursery promotion only. `1` omits the promotion unlog-byte store under OCaml’s explicit region-only barrier contract. Other plans, full collections and defrag retain maintenance. Off by default.
-    Same-binary three-repetition binarytrees median pause improves about 9.12% at eight workers; full-GC counts differ and pause/RSS ranges overlap. Build, 24 small-heap sanity cases and four boundary probes pass. Evidence and limits: NOTES 2026-10-01 T13 unlog.
+    The contract is a VM hook, `ObjectModel::allow_region_only_promotion_unlog_elision()` (every
+    generational write uses the region barrier, never an object-log API); with it, only `PromoteToMature`
+    copies in GenImmix nursery pauses skip the store — full-heap copies, defrag, the LOS and the log
+    metadata's mapping/initialisation are unchanged.
+    Same-binary three-repetition binarytrees median pause improves about 9.12% at eight workers (4.671 → 4.245 s, wall −3.0 %); full-GC counts differ and pause/RSS ranges overlap. Build, 24 small-heap sanity cases and four boundary probes pass; main-loop `sanity` 0 invalid on five benches (binarytrees also with the local closure on), inert on Bactrian, 12/12 goldens at 4 domains with both knobs on. Evidence and limits: NOTES 2026-10-01 T13 unlog.
+
+    **The other two T13 candidates — negatives, not landed** (NOTES 2026-10-01, the T13/T14 entry):
+    local tracing of suspended continuation stacks (chameneos_redux 8 workers pause −5.7 %, wall −3.5 %;
+    ≥ 99.86 % of 6.68 M local continuation scans emit no slot, but the per-stack slot vector is unbounded —
+    259/516 slots native/bytecode at depth 256 — and the spill threshold cannot bound it; only a bounded
+    streaming variant is acceptable) and UP-path line-mark store suppression (binarytrees, one worker,
+    pause −1.4 %, wall −0.9 %: not worth its complexity; parallel suppression and mark-bit batching need an
+    exclusive-line ownership proof that does not exist — raw side-metadata access forbids concurrent or
+    mixed access, `side_metadata/global.rs:497–539`; next: audit baseline line sharing and the access
+    protocol).
+
+    **The closure's RSS question — answered for one domain; stays opt-in.** A pristine 12-run repeat:
+    chameneos_redux max RSS +3.4 % (46.0 → 47.6 MiB, disjoint ranges), binarytrees −7.8 % (overlapping);
+    T15's +9.78 % on binarytrees does not reproduce. Managed-space residency is identical off/on; the
+    chameneos_redux delta is glibc arena retention (free bytes 7.0 → 11.9 MiB, in-use unchanged); a fixed
+    320 MiB / 16 MiB control keeps GC counts equal yet moves 16 MiB from managed to unlabelled RSS, so
+    pinned capacity does not give memory parity. Remaining default-on caveats: par_binarytrees d=8 at 4
+    workers still +27 % median peak RSS (356 → 451 MiB, overlapping, full counts differ), and the T15
+    chameneos_redux pause gain (−26 %) misses the 30 % reference. Default-on needs the d=8 RSS explained or
+    bounded.
+
+    **T14 work-sharing study (141 validated runs, godel).** binarytrees 1 → 8 workers total-pause speedup
+    1.58× off / 2.16× on; spill 64 vs 4096 at 8 workers: nursery pause 2.59 vs 4.65 s, busiest-worker scan
+    share 13.5 vs 22.3 %, wait-capacity fraction 4.9 vs 46.7 %; chameneos_redux packet executions
+    6,764,316 → 21,998 at identical scan visits, no useful worker speedup off or on. With the closure on at
+    4 workers, wall improves in every cell of domains 1–8 (chameneos_redux d=8 13.8 → 10.7 s,
+    par_binarytrees 7.18 → 6.78 s).
 
     **T15 width guard, verified build/timing/sanity:** a VM scanning hook bounds per-object local slot
     buffering before scanning. OCaml uses its header size; wider objects and every continuation
@@ -1283,9 +1333,11 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     - (i) *Research question:* when should tracing stay local versus publish work, given the frontier
       width? The spill threshold is the local-vs-parallel knob, set by hand; chameneos (narrow) and
       binarytrees (wide) bracket it.
-    - (ii) Default-on awaits width/performance and memory acceptance plus correctness validation; (iii) extend to GenCopy and Bactrian (UP-oldify,
+    - (ii) Default-on awaits width/performance and memory acceptance plus correctness validation (2026-10-01:
+      one-domain RSS answered, the d=8 RSS is the remaining blocker — above); (iii) extend to GenCopy and Bactrian (UP-oldify,
       `MMTK_UP_OLDIFY=1`, SHAPE.md round 30, is the single-worker Bactrian precedent).
-    - (iv) **Next lever: the per-copy writes (T12 list)**, especially for binarytrees — *inferred*,
+    - (iv) **Next lever: the per-copy writes (T12 list)**, especially for binarytrees (2026-10-01: the
+      unlog store landed opt-in, line-mark suppression measured negative — above) — *inferred*,
       risk-scoped candidates: skip the unlog-byte store per copy when the object barrier is unused
       (OCaml uses the region barrier) or initialise unlog over exclusive allocation ranges; fold repeated
       line-mark stores over monotonic promotion ranges; batch destination mark initialisation. Upstream
@@ -1510,8 +1562,12 @@ The active research/measurement threads behind the M8 milestone — the index; d
   multi-line objects and names a pool-class fast allocator, not policy, as the cure).
   → RESEARCH_QUESTIONS RQ7; BACTRIAN.md; NOTES 2026-07-02, 2026-08-09/10/12/13/14, 2026-09-29; SHAPE.md
   rounds 23–32.
-  - **RQ7 DECISION MEASUREMENT — pause-time distributions (OPEN, decides whether Bactrian stays; added
-    2026-09-30).** On throughput the 2026-09-30 sweep and panel put Bactrian's fronts on top of GenImmix's
+  - **RQ7 DECISION MEASUREMENT — pause-time distributions (MEASURED 2026-10-01, item 33; the keep/freeze
+    decision is pending with the owner; added 2026-09-30).** *Result:* Bactrian's worst pause is 43 % lower
+    on binarytrees and 27 % lower on kb, at 4–8× the median pause on the binarytrees pair, 20–29 % more wall on binarytrees and
+    chameneos_redux and 1.6× the RSS at 8 domains; its best max pause (326 ms) is still the per-object
+    nursery cost, since the marking runs as stop-the-world slices. RQ7: *qualified yes* (NOTES 2026-10-01).
+    The original framing, kept for the record: On throughput the 2026-09-30 sweep and panel put Bactrian's fronts on top of GenImmix's
     on every bench (binarytrees 101 MiB / 1.74 s vs 94 / 1.64; kb 22 / 0.48 vs 23 / 0.49; LU identical;
     chameneos 3.3 vs 3.0 s; par_matmul slightly better at 2–4 domains, equal at 8), so throughput does not
     justify a second plan. Bactrian's claim was never throughput: stock's architecture (sliced marking inside
