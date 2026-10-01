@@ -5,6 +5,112 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-10-01 - macOS page return lands; it lowers mean RSS, not max RSS
+
+ROADMAP item 34, lever (2c) "page return". mmtk-core `873721f7fe`
+(branch `feat/macos-page-return`, parent `3acfce3465`). Measured on the M4
+Pro, GenImmix, `MMTK_THREADS=1`; RSS only (timing on the M4 is noisy today,
+no wall-time conclusions).
+
+### 1. Mechanism choice (*verified*, C probe on macOS 26)
+
+256 MiB touched, released, then a second 256 MiB touched; task
+`resident_size`, `phys_footprint`, `ru_maxrss`, and whether the released
+pages read back as zero:
+
+| release call | resident after release | footprint after release | max RSS after 2nd touch | contents |
+|---|--:|--:|--:|---|
+| none | 257 | 257 | 513 | old |
+| `MADV_DONTNEED` | 257 | 257 | 513 | old |
+| `MADV_FREE` | 257 | 257 | 513 | old |
+| `MADV_FREE_REUSABLE` | 257 | **1** | 513 | old |
+| `MADV_ZERO` (11) | 257 | 257 | 513 | zero |
+| `mmap(MAP_FIXED)` over the range | **1** | **1** | **257** | zero |
+
+Only replacing the mapping lowers `resident_size` / `ru_maxrss` (the
+metric `/usr/bin/time -l` and `vmmap` report); `MADV_FREE_REUSABLE` moves
+only the footprint ledger (Activity Monitor's number) and leaves stale
+contents. Cost: about 2.4 µs per 32 KiB block release + refault, against
+1.3 µs for `FREE_REUSABLE` + `FREE_REUSE`. So `memory::release_pages` is
+`madvise(MADV_DONTNEED)` on Linux and an `mmap(MAP_FIXED|MAP_ANON|MAP_PRIVATE)`
+on macOS, rounded inward to the 16 KiB OS page.
+
+*Correctness argument:* both branches give the same contract (pages leave
+the resident set; the range reads as zero on next touch), so macOS now has
+exactly the Linux semantics, and the alternative (no release) leaves stale
+contents that every caller already tolerates because block return is off by
+default. Side metadata is never in a released range. The replacing mmap
+must restore the space's protection, so `CommonPageResource.release_prot`
+is set from each space's `mmap_strategy()`; the LOS skips release when
+PageProtect has just mprotected the range. Side effect: each released block
+becomes its own VM map entry (vmmap region count 61 -> 602 on binarytrees).
+
+### 2. RSS (*verified*, 3 runs; MiB, median `ru_maxrss`)
+
+`before` = mainline pin; `after` = this commit at its defaults (block
+return off, LOS return on); `rfp` = `MMTK_RELEASE_FREED_PAGES=1`. GC count
+and full count are identical in all three; GC time with `rfp` is about 5 %
+higher (one mmap per freed block), within noise on this host.
+
+| bench | heap | before | after | rfp |
+|---|---|--:|--:|--:|
+| binarytrees 20 | 64 | 119.8 | 120.1 | 117.9 |
+| binarytrees 20 | 128 | 182.3 | 182.5 | 180.1 |
+| binarytrees 20 | 256 | 216.2 | 215.8 | 212.6 |
+| binarytrees 20 | dynamic | 207.8 | 205.9 | 204.6 |
+| kb 50 | 32 | 32.2 | 32.0 | 28.0 |
+| kb 50 | dynamic | 32.5 | 32.7 | 28.5 |
+| chameneos_redux 500000 | 64 | 91.0 | 96.5 | 88.4 |
+| chameneos_redux 500000 | dynamic | 69.0 | 69.1 | 65.9 |
+
+`after` equals `before`: none of these programs frees a >= 2 MiB large
+object, and block return is opt-in (chameneos @ 64 `after` 96.5 vs 91.0 is run-to-run spread on an identical code path: 90.9-98.8 across the six runs). With `rfp` max RSS drops by 2-4 MiB
+(kb 12 %, chameneos 3-5 %, binarytrees 1-2 %).
+
+*Mean* RSS is a different story (ps sampled every 20 ms, binarytrees 20):
+heap 128 130.8 -> 100.4 MiB, heap 256 130.9 -> 103.8 MiB (-21 to -23 %),
+max unchanged. Paused `vmmap` at t = 0.6 s, heap 256: mature data dirty
+71.6 -> 26.0 MiB, physical footprint 120.5 -> 74.9 MiB; at t = 1.1 s, 96.2
+vs 91.6 MiB (refilled).
+
+### 3. Why max RSS does not move (*verified* for binarytrees)
+
+The RSS trace shows the peak at the end of the run, just before a full GC,
+when the mature space has been refilled up to the trigger: the high-water
+mark is reserved pages at the trigger, not freed-but-resident pages.
+Releasing pages after a full GC removes the trough's residency, which the
+mutator re-faults on the way back up. The "~96 MiB of mature data dead
+between full GCs" reading (2026-09-30 evening) is right about the
+residency, but that residency is the heap budget being used, not a leak
+that page return can remove. **For item 34's max-RSS metric the levers are
+the trigger (how full the mature space gets before a full GC), the nursery
+bound and the work-packet malloc (28-36 MiB on binarytrees), not page
+return.** Page return matters for long-running processes whose phases
+shrink, where time-averaged footprint is the metric.
+
+### 4. Correctness (*verified*)
+
+- `sanity` build, 0 invalid references, GenImmix, both `rfp` and default:
+  binarytrees 18 @ 64 MiB (1 worker), kb 30 @ 32 (2 workers), chameneos
+  50000 @ 64 (1 worker), par_binarytrees 16 x 4 domains @ 160 (4 workers),
+  and a large-object churn test (2000 arrays of 2-3.5 MiB, checksum and
+  an initialisation check) @ 64. Immix and Bactrian with `rfp`, 2 workers:
+  binarytrees 18 @ 64, kb 30 @ 32, the LOS test @ 64: 0 invalid. (The LOS
+  test at 32 MiB raises `Out_of_memory` in both variants: it keeps 8
+  arrays of up to 5 MiB.)
+- 12/12 quick-panel goldens (4 domains) with and without `rfp`, from a
+  rebuilt non-sanity build (`nm | grep -c SanityChecker` = 0).
+- The Linux branch is a rename of the existing call; it was not compiled
+  in this session (no Linux target locally) and needs CI.
+
+### 5. Default
+
+Keep block return opt-in on both OSes: it does not move max RSS, costs
+one syscall per freed block, and fragments the VM map. LOS return stays on
+(as on Linux): it is one syscall per >= 2 MiB free.
+
+---
+
 ## 2026-09-30 (late) - packet census corrects the mechanism; opt-in local nursery closure (−29 % nursery pause on chameneos)
 
 Evidence labels as below. ROADMAP item 35 (first lever LANDED, opt-in),

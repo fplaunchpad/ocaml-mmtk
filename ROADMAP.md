@@ -1190,8 +1190,10 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     binarytrees 26–37, where the gap is collector speed rather than memory — RESULTS.md). Known
     components (NOTES 2026-09-30 evening): the nursery bound of 16 MiB per domain (vanilla's minor heap is
     2 MiB per domain, 8× smaller), GC work-packet vectors (~30 MiB on binarytrees, ~0 on kb; vanilla's mark
-    stack is bounded and pruned), one 4 MiB chunk per space, and no page return on macOS (every release
-    path is Linux-only; `MADV_FREE_REUSABLE` is the macOS call). Research question: what is the
+    stack is bounded and pruned), one 4 MiB chunk per space, and no page return on macOS (**landed 2026-10-01**, mmtk-core
+    `873721f7fe`: `mmap(MAP_FIXED)` over the range, since `MADV_FREE_REUSABLE` lowers only the footprint
+    ledger; it cuts binarytrees' *mean* RSS 21–23 % but max RSS only 1–4 MiB, kb 12 %, because the peak is
+    the mature space refilled to the trigger, not freed-but-resident pages — NOTES 2026-10-01). Research question: what is the
     irreducible footprint tax of a framework collector over a bespoke one — side metadata + nursery + work
     queues — and can it be brought under ~10 % at equal time? Task: (1) a vmmap budget at each bench's
     front point on the fixed build; (2) three levers, each plotted as a space-time front rather than
