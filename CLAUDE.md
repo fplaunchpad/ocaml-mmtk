@@ -171,11 +171,15 @@ short and current; deep rationale belongs in `gc/mmtk/NOTES.md`.
   the default with `MMTK_NURSERY_PER_DOMAIN=0`. Raised 8→64 MiB on 2026-06-25: the old 8 MiB forced
   100s–1000s of near-empty minor GCs on high-alloc workloads → GenImmix 1.3–3× slower single-domain;
   `Bounded` adapts down to fit small heaps), `MMTK_THREADS`
-  (GC worker count; **default = nproc**, MMTk-core's own default. We tried *forcing 1* — it cut the
-  single-domain minor-GC futex park/wake cost ~1.37× — but reverted it as a band-aid: worker count does
-  **not** fix multi-domain throughput scaling (STW-bound, not thread-pool-bound), so pinning 1 only bought
-  a single-domain win at the price of deviating from MMTk's default. Set `MMTK_THREADS=1` yourself for the
-  lowest-overhead single-domain runs; see `api.rs` init + README knobs table), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
+  (GC worker count; **default = nproc**, MMTk-core's own default. Single-domain pauses are much cheaper
+  with 1 worker (M4: binarytrees 20 pause total 630 ms vs 1790 ms with 12), but we keep MMTk's default
+  because the multi-domain gap is not a worker-count problem: it is the work done per copied object inside
+  each nursery pause (narrow work packets on low-fan-out graphs, per-copy metadata writes on wide ones —
+  ROADMAP item 35, NOTES 2026-09-30 night/late), NOT the STW rendezvous. Set `MMTK_THREADS=1` yourself for
+  the lowest-overhead single-domain runs; why extra workers slow a single domain is open (ROADMAP item 35;
+  note that >1 worker also disables the UP fast path). See `api.rs` init + README knobs table),
+  `MMTK_LOCAL_NURSERY_TRACE=1` (opt-in worker-local nursery closure; −29 % nursery pause on chameneos),
+  `MMTK_PAUSE_LOG=1` (one line per pause + exit summary), `MMTK_VERBOSE=1` (prints GC stats at exit; `heap=dynamic` when unpinned).
   MMTk is the only collector — no opt-out; benchmark against stock via a separate vanilla
   OCaml 5.5 opam switch (compare at **memory parity** — report RSS alongside wall time).
 
