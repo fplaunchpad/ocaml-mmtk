@@ -5,6 +5,41 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-10-01 - T13 unlog: independent experimental candidate
+
+**Verified build, small-heap sanity and same-binary measurements.** Base
+superproject `c42d4310ab`, mmtk-core `d0846bd060`. This candidate is isolated
+from the RSS diagnostic and other T13 experiments. `MMTK_PROMOTION_SKIP_UNLOG=1`
+enables it; unset or `0` retains the baseline path.
+
+Permission is latched per pause only for GenImmix nursery collections and
+applied only to PromoteToMature in the hybrid context. Object-log metadata
+mapping, full-heap reconstruction, pretenured allocations and remembered-object
+processing remain active. The contract requires every generational write path
+to use region barriers; adding an object-log-dependent API invalidates it.
+This targets one relaxed byte store per promotion; timings do not estimate
+individual store cycles.
+
+Binarytrees depth 20, one allocating domain, eight GC workers, GenImmix, local
+tracing on, spill 64 unset, dynamic heap/nursery, godel CPUs 14–27 with ASLR
+disabled; three repetitions per toggle using the same binary. Median total
+pause 4.6710105 → 4.2449837 s (about −9.12%), nursery pause
+2.7203897 → 2.367165 s, wall 13.4379658 → 13.0371349 s, peak RSS
+187.0391 → 174.2070 MiB. Full-GC counts are 13/13/13 → 13/12/13.
+All three matched pause pairs favor ON, but results vary and the pause/RSS
+ranges overlap. These dynamic-policy measurements establish neither statistical
+equivalence nor memory parity and do not support a default-on decision.
+
+Focused sanity at 32 MiB passed 24 cases (six tests × workers 1/2 × toggle 0/1)
+plus four boundary probes. Retained native and bytecode artifacts verify actual
+sanity linkage for an additional `resume_counts` repeat. Evidence:
+`/private/tmp/t13-results/unlog-analysis.json`, `unlog-reverified.json`,
+`unlog-build/`, `unlog-sanity/` and `unlog-timing/` under that results root
+(also `/home/kc/t13-results/` on godel). Both this experimental switch and local
+nursery tracing remain opt-in.
+
+---
+
 ## 2026-10-01 - T15 width guard for the opt-in local nursery closure
 
 **Verified build, timings and sanity; source rationale below.** Based on superproject

@@ -15,6 +15,13 @@ use crate::OCamlVM;
 pub struct VMObjectModel;
 
 impl ObjectModel<OCamlVM> for VMObjectModel {
+    fn allow_region_only_promotion_unlog_elision() -> bool {
+        // OCaml's generational write path exclusively uses memory_region_copy_post.
+        // Keep this experimental contract false unless explicitly requested.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("MMTK_PROMOTION_SKIP_UNLOG").as_deref() == Ok("1"))
+    }
+
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec =
         VMGlobalLogBitSpec::side_first();
 

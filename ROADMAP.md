@@ -1253,6 +1253,10 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
        total at d=8. Not a factor; the "STW-bound" reading (SCALABILITY.md updates 3 and 5) is
        corrected to "per-pause cost".
 
+    **T13 unlog — measured independent candidate, opt-in.**
+    `MMTK_PROMOTION_SKIP_UNLOG=1`: GenImmix nursery promotion only. `1` omits the promotion unlog-byte store under OCaml’s explicit region-only barrier contract. Other plans, full collections and defrag retain maintenance. Off by default.
+    Same-binary three-repetition binarytrees median pause improves about 9.12% at eight workers; full-GC counts differ and pause/RSS ranges overlap. Build, 24 small-heap sanity cases and four boundary probes pass. Evidence and limits: NOTES 2026-10-01 T13 unlog.
+
     **T15 width guard, verified build/timing/sanity:** a VM scanning hook bounds per-object local slot
     buffering before scanning. OCaml uses its header size; wider objects and every continuation
     use the ordinary packet path. 36 validated timing runs: eight-worker median
