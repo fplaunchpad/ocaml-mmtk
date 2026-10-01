@@ -1204,7 +1204,13 @@ two pre-existing side findings from the store-path audit. Evidence is labelled *
     copied object), but not its packet term: binarytrees' scan packets carry 2,759 objects and it makes
     0.0027 malloc per copy (NOTES 2026-09-30 late). The opt-in local closure gains it only 4 %; its time
     lever is item 35's per-copy writes (the T12 list) — a slower collector needs more heap for the same
-    time.
+    time. **Fixed 2026-10-01 — the matmul anomaly (task 3), a third packet term:** the object scanner
+    enqueued every field, immediates included, as a 24-byte `FieldSlot` (4096-slot buffers of 96 KiB),
+    dropping immediates only at `load`; scanning int rows made transient slot memory ~4.6× the data
+    (matmul 768: 351 buffers, +33 MiB). The scanner now skips immediate fields (every plan but LXR, whose
+    RC trace unlogs every field; `MMTK_NO_SKIP_IMMEDIATES=1` restores the old path). matmul 768 GenImmix
+    max RSS 71.7 → 39.1 MiB at a 128 MiB heap, 49.5 → 31.5 MiB dynamic; kb, LU, binarytrees unchanged
+    (NOTES 2026-10-01).
 35. **Multi-domain scaling decomposition (DIAGNOSED 2026-09-30 night; first lever LANDED opt-in
     2026-09-30 late; added 2026-09-30; the second headline gap).** The 2026-09-30 panel: par_binarytrees GenImmix 2.5× at 8 domains vs
     vanilla 4.4×; par_spectralnorm 3.4× vs 5.2×; par_matmul 5.2× vs 6.1×; chameneos_redux anti-scales, 3.0 s

@@ -104,6 +104,12 @@ pub extern "C" fn mmtk_ocaml_init(heap_size: usize, plan: *const libc::c_char) {
     let concurrent_plan = matches!(plan_str, "ConcurrentImmix" | "Bactrian" | "LXR");
     let stw_trusted = !concurrent_plan && trusted_allowed;
     mmtk_ocaml_common::slot::set_stw_trusted(stw_trusted);
+    // Skip immediate fields at scan time (common/src/scanning.rs
+    // SKIP_IMMEDIATE_SLOTS): every plan except LXR, whose RC trace must visit
+    // every field of a promoted object to unlog it. MMTK_NO_SKIP_IMMEDIATES=1
+    // restores enqueue-everything (A/B knob).
+    let skip_imm = plan_str != "LXR" && std::env::var_os("MMTK_NO_SKIP_IMMEDIATES").is_none();
+    mmtk_ocaml_common::scanning::set_skip_immediate_slots(skip_imm);
     // Copy counting is telemetry: arm it only when someone will read it. Not
     // under MMTK_PAUSE_LOG: nothing there reads the count, and its locked
     // per-copy add would inflate the very pauses being measured.

@@ -108,6 +108,85 @@ shrink, where time-averaged footprint is the metric.
 Keep block return opt-in on both OSes: it does not move max RSS, costs
 one syscall per freed block, and fragments the VM map. LOS return stays on
 (as on Linux): it is one syscall per >= 2 MiB free.
+## 2026-10-01 - the scanner stops enqueuing immediate fields (the matmul RSS anomaly; ROADMAP item 34)
+
+### 1. Finding (*verified*)
+
+`scan_ocaml_object` (`common/src/scanning.rs`) called `visit_slot` for every
+field of an ordinary block or closure environment; immediates were dropped
+only later, at `FieldSlot::load` (cached `info = NOT_TRACEABLE`). Each slot is
+a 24-byte `FieldSlot` in a 4096-entry packet buffer (98,304 B), so scanning
+int-heavy blocks built transient GC memory ~4.6x the scanned data: matmul 768
+scans 1,945 int rows x 768 fields -> 351 buffers, +33 MiB of malloc at peak;
+a 64 MiB int-row probe -> 293 MiB of buffers. Every one of those slots was
+then loaded and discarded. mmtk-core's `Scanning` docs allow a VM to omit
+non-reference fields ("a tagged non-reference value such as small integer").
+
+### 2. Change
+
+`visit_fields` reads each field once; an immediate (`v & 1 == 1`) is skipped,
+anything else becomes `FieldSlot::from_address_with_value(addr, raw)` (same
+classification as `from_address`, no second load). `Forward_tag`, infix,
+`Cont_tag` stacks and no-scan tags are unchanged. Gated by
+`SKIP_IMMEDIATE_SLOTS`, set at init for every plan except LXR;
+`MMTK_NO_SKIP_IMMEDIATES=1` restores the old path (A/B knob). The UP-oldify
+loop (`binding/src/scanning.rs`) has its own field loop and allocates no
+packets; it is unchanged. The local nursery closure calls `scan_object` and
+inherits the change.
+
+### 3. Safety argument, per plan (*argued*, checked against the code)
+
+- **Key fact:** a `from_address` slot classifies its value at creation and
+  caches it; `load` returns `None` first thing when `info == NOT_TRACEABLE`,
+  in every plan and whether or not `STW_TRUSTED` is set. A slot whose value
+  was immediate at scan time was therefore already a no-op for every consumer
+  that only `load`s (and `store`s what it loaded): ProcessEdges, the
+  generational local closure, the sanity checker, compressor
+  `update_references`. Skipping it changes no trace.
+- **STW plans (GenImmix, Immix, StickyImmix, GenCopy, SemiSpace,
+  MarkSweep):** the field cannot change between scan and load. Safe.
+- **ConcurrentImmix / Bactrian (SATB):** a field immediate at scan time can be
+  overwritten with a pointer before the worker would have loaded it, but the
+  old code dropped that slot too (cached `NOT_TRACEABLE`). Correctness rests,
+  as before, on the barrier: `mmtk_ocaml_satb_barrier` builds deferred slots
+  (`from_address_deferred`, classified at load) and greys the OLD value — an
+  immediate, so nothing to grey — and the NEW value is either young (allocated
+  black, RQ9) or already reachable from something the snapshot marks. No
+  change in what is marked.
+- **LXR: not safe, kept off.** `scan_nursery_object` and the keep-alive scan
+  (`mmtk-core/src/plan/lxr/rc.rs`) call `scan_object` through
+  `SlotIterator::iterate_fields` to UNLOG every field of a freshly promoted
+  object via `slot.to_address()`, immediates included. A skipped field would
+  stay logged, a later pointer store into it would bypass the field barrier,
+  and the new referent would miss its increment. LXR keeps enqueuing every
+  field. (A bulk per-object unlog in mmtk-core would lift this.)
+
+### 4. Verification (*verified*, M4 Pro)
+
+- `sanity` build, 0 invalid references, correct output: binarytrees 18 @ 64,
+  kb 30 @ 32, chameneos_redux 50000 @ 64, matrix_multiplication 768 @ 48,
+  par_binarytrees 16 x 4 domains @ 160 MiB, on GenImmix and Bactrian.
+  The same runs on ConcurrentImmix and LXR (@ 512) give correct output, but
+  neither plan schedules `ScheduleSanityGC` (they do not go through
+  `schedule_common_work`), so there they are correctness smoke only.
+  Production build after reverting: `nm | grep -c SanityChecker` = 0.
+- 12/12 quick-panel goldens under GenImmix (perf sizes, parallel at 1 domain).
+- `tests/gc-roots` 8/8, `tests/effects` 25/25, `tests/weak-ephe-final` 9/9,
+  `tests/lazy` 10/10, on GenImmix and on Bactrian.
+
+### 5. RSS (*measured*, GenImmix, `MMTK_THREADS=1`, default nursery, max RSS by `/usr/bin/time -l`, 3 reps, same binary, before = `MMTK_NO_SKIP_IMMEDIATES=1`)
+
+| bench | heap | before MiB | after MiB | GC time before → after (sanity check only) |
+|---|---|--:|--:|---|
+| matrix_multiplication 768 | 128 MiB | 71.7, 71.7, 71.7 | 39.2, 39.1, 39.1 | 6–9 → 1 ms |
+| matrix_multiplication 768 | dynamic | 49.5, 49.6, 49.5 | 31.5, 31.5, 31.5 | 5 → 1 ms |
+| kb 50 | dynamic | 32.2 x3 | 32.4, 32.2, 32.2 | 144 → 133 ms |
+| LU_decomposition 900 | dynamic | 31.9, 31.9, 32.0 | 31.9, 32.0, 32.0 | 25 → 25 ms |
+| binarytrees 20 | dynamic | 168.1, 168.1, 183.2 | 168.0, 181.2, 175.3 | 647 → 652 ms |
+
+matmul's 32.6 MiB drop at a 128 MiB heap is the slot-buffer term (+33 MiB
+predicted). kb, LU and binarytrees hold mostly pointer fields or boxed floats,
+so they do not move; binarytrees' spread is run-to-run noise in both arms.
 
 ---
 
