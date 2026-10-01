@@ -203,6 +203,16 @@ impl FieldSlot {
         Self { addr, info: Self::classify_inner(raw, trusted), checked: false }
     }
 
+    /// [`from_address`] for a field whose value the caller has already loaded
+    /// (`raw`, read from `address` on this thread) — the scanner reads each field
+    /// once to skip immediates, and must not load it a second time to classify.
+    #[inline]
+    pub fn from_address_with_value(address: Address, raw: usize) -> Self {
+        let addr = address.to_mut_ptr::<AtomicUsize>();
+        let trusted = STW_TRUSTED.load(Ordering::Relaxed);
+        Self { addr, info: Self::classify_inner(raw, trusted), checked: false }
+    }
+
     /// Create a slot for a ROOT value. Identical to [`from_address`] except the
     /// slot is marked `checked`, so `load` always re-validates (roots race with
     /// spawning/terminating domains — GH#15 — even under an STW plan).

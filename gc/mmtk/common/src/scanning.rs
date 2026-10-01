@@ -3,6 +3,8 @@
 //! Every live OCaml block reached during tracing is passed here; we visit
 //! every field that may hold a heap pointer.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use mmtk::util::{Address, ObjectReference};
 use mmtk::vm::SlotVisitor;
 
@@ -34,6 +36,63 @@ pub fn continuation_stack(object: ObjectReference) -> Option<Address> {
         None
     } else {
         Some(unsafe { Address::from_usize(stack) })
+    }
+}
+
+/// Skip fields that hold an immediate (tagged int, LSB = 1) instead of handing
+/// them to the slot visitor. Set once at init by the binding
+/// ([`set_skip_immediate_slots`]); off by default.
+///
+/// Why: every visited field becomes a 24-byte `FieldSlot` in a work-packet buffer
+/// (4096 entries = 96 KiB), and an immediate's slot is only discarded later, at
+/// `FieldSlot::load` (its cached `info` is `NOT_TRACEABLE`). Scanning int-heavy
+/// blocks therefore built transient GC memory ~4.6x the scanned data (matmul 768:
+/// +33 MiB of slot buffers at peak) and loaded every slot only to drop it.
+/// mmtk-core's `Scanning` contract lets a VM omit non-reference fields
+/// ("a tagged non-reference value such as small integer").
+///
+/// Sound wherever a slot's only consumer is `load` (+ `store` of what it loaded):
+/// a `from_address` slot whose value was immediate at scan time is cached as
+/// `NOT_TRACEABLE`, so `load` already returns `None` for it in EVERY plan, even if
+/// a concurrent mutator later writes a pointer into the field — skipping it at scan
+/// time drops exactly the slots that were already dead. (That later write is the
+/// SATB barrier's business: the deletion barrier greys the OLD value, an immediate
+/// = nothing to grey, and the NEW value is young or already marked by
+/// allocate-black — unchanged by this.) NOT sound for LXR: its RC trace visits
+/// every field of a freshly promoted object to UNLOG the field (`slot.to_address()`
+/// in `scan_nursery_object` / the keep-alive scan), including immediate fields; a
+/// skipped field would stay logged, so a later pointer store into it would bypass
+/// the field barrier and its increment. The binding leaves this off for LXR.
+pub static SKIP_IMMEDIATE_SLOTS: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable [`SKIP_IMMEDIATE_SLOTS`]. Called once by the binding at init.
+pub fn set_skip_immediate_slots(enabled: bool) {
+    SKIP_IMMEDIATE_SLOTS.store(enabled, Ordering::Relaxed);
+}
+
+/// Visit the value fields `[from, to)` of the block at `base`.
+#[inline(always)]
+fn visit_fields<SV: SlotVisitor<FieldSlot>>(
+    base: Address,
+    from: usize,
+    to: usize,
+    slot_visitor: &mut SV,
+) {
+    if SKIP_IMMEDIATE_SLOTS.load(Ordering::Relaxed) {
+        for i in from..to {
+            let slot_addr = base + i * WORD_SIZE;
+            // One load per field: classify from the value we just read.
+            let raw = unsafe { (*slot_addr.to_ptr::<AtomicUsize>()).load(Ordering::Relaxed) };
+            if raw & 1 != 0 {
+                continue; // immediate: never a reference (see SKIP_IMMEDIATE_SLOTS)
+            }
+            slot_visitor.visit_slot(FieldSlot::from_address_with_value(slot_addr, raw));
+        }
+    } else {
+        for i in from..to {
+            let slot_addr = base + i * WORD_SIZE;
+            slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
+        }
     }
 }
 
@@ -83,10 +142,7 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
             let closinfo = unsafe { (base + WORD_SIZE).load::<usize>() };
             // Start_env_closinfo(info) = (info << 8) >> 9   (see mlvalues.h)
             let start_env = (closinfo << 8) >> 9;
-            for i in start_env..wosize {
-                let slot_addr = base + i * WORD_SIZE;
-                slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
-            }
+            visit_fields(base, start_env, wosize, slot_visitor);
         }
 
         TAG_FORWARD => {
@@ -100,11 +156,9 @@ pub fn scan_ocaml_object<SV: SlotVisitor<FieldSlot>>(
         _ => {
             // Ordinary block (tag 0..245), Lazy (246), Object (248):
             // all fields are OCaml values — each may be an immediate int or
-            // a heap pointer.  FieldSlot::load() filters out immediates.
-            for i in 0..wosize {
-                let slot_addr = base + i * WORD_SIZE;
-                slot_visitor.visit_slot(FieldSlot::from_address(slot_addr));
-            }
+            // a heap pointer. Immediates are skipped here when
+            // SKIP_IMMEDIATE_SLOTS is on, else filtered by FieldSlot::load().
+            visit_fields(base, 0, wosize, slot_visitor);
         }
     }
 }
