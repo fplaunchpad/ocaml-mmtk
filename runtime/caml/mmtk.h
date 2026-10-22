@@ -249,11 +249,22 @@ extern void caml_mmtk_satb_barrier(volatile value *start, mlsize_t count);
 extern void caml_mmtk_cont_lock(value cont);
 extern void caml_mmtk_cont_unlock(value cont);
 
+/* Whether caml_mmtk_cont_lock really locks, i.e. a GC worker can scan a
+ * suspended stack while mutators run. When it does not, the resume path claims
+ * the stack (field-0 CAS) before snapshotting it, so two domains racing to
+ * resume one continuation never scan a stack the other has taken. */
+extern int caml_mmtk_cont_lock_required(void);
+
 /* SATB snapshot of a continuation's fiber stack, called on the resume path
  * (under the concurrent plan + active marking) BEFORE the cont->stack edge is
  * deleted, so the stack's snapshot roots are greyed into the SATB buffer and
  * survive the cycle. Self-gated; a no-op off the concurrent marking window. */
 extern void caml_mmtk_cont_snapshot(value cont);
+
+/* The same snapshot for a stack already taken out of its continuation. Only
+ * the domain that won the take may call it. */
+struct stack_info;
+extern void caml_mmtk_stack_snapshot(struct stack_info *stk);
 
 /* LXR: continuation `cont` has just been resumed; `stk` is the stack taken
  * out of it (Val_ptr). If `cont` was promoted, the stack's referents were

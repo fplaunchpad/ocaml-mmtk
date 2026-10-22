@@ -13,6 +13,15 @@ Working version (MMTk fork)
   macOS and Windows and on x86-64, AArch64 and 32-bit ARM.
   (Pragyansh Chaturvedi)
 
+- fplaunchpad/ocaml-mmtk#68: MMTk binding: take the continuation resume lock
+  only when the plan can mark while mutators run (ConcurrentImmix, or
+  Bactrian with MMTK_MARK_SLICED=0). Bactrian's sliced marking scans stacks
+  only in pauses, so it resumes without the lock; the resumer now claims the
+  stack with its CAS before taking the SATB snapshot, so a losing resumer
+  never scans a stack the winner is running. chameneos_redux at 8 domains:
+  6.0 s -> 1.1 s. MMTK_CONT_LOCK_ALWAYS=1 restores the old behaviour.
+  (Pragyansh Chaturvedi)
+
 OCaml 5.5.0 (19 June 2026)
 -------------------------
 

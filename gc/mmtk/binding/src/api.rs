@@ -630,6 +630,19 @@ pub extern "C" fn mmtk_ocaml_cont_unlock(cont_addr: usize) {
     crate::cont_lock::unlock(cont_addr);
 }
 
+/// Non-zero iff the active plan runs ALL marking inside stopped-world pauses
+/// (Bactrian's sliced-STW marking, the default). Then a GC worker scans a
+/// continuation's stack only while every domain is stopped, so a resume can
+/// never race that scan and the resume path does not need the cont lock.
+/// Fixed for the run (Bactrian reads MMTK_MARK_SLICED once at plan creation).
+#[no_mangle]
+pub extern "C" fn mmtk_ocaml_marking_confined_to_pauses() -> i32 {
+    crate::mmtk()
+        .get_plan()
+        .concurrent()
+        .map_or(false, |c| c.marking_confined_to_pauses()) as i32
+}
+
 /// True iff the concurrent plan (ConcurrentImmix) is currently in its concurrent
 /// marking phase (between InitialMark resume and FinalMark). Used by the resume
 /// path to decide whether a continuation's stack needs an SATB snapshot before the

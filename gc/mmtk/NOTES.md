@@ -5,6 +5,45 @@ Each entry is dated and self-contained. Newest first.
 
 ---
 
+## 2026-10-22 - Continuation resume: claim the stack before snapshotting it when cont_lock is off
+
+**The lock-off path had a resumer-vs-resumer race.** The cont_lock gate (commit `080092a12`) turns
+off the process-wide resume lock under Bactrian's default sliced-STW marking. That is safe against
+GC workers, which scan suspended stacks only while every domain is stopped. But the lock also
+ordered two domains racing to resume the same continuation. `continuation_take_noexc` (`fiber.c`)
+used to snapshot the stack into the SATB buffer (`caml_mmtk_cont_snapshot`) *before* the field-0
+CAS that claims it. With the lock off, domain A could read field 0 and start scanning while domain B
+snapshotted, won the CAS, switched onto the stack and ran or freed it. The failed CAS stops a double
+resume, not that scan.
+
+The race needs three things:
+- two or more domains;
+- an open mark cycle (InitialMark to FinalMark; eio is inside one almost all the time);
+- two resumes of one continuation at once. That is legal OCaml: the loser must get
+  `Continuation_already_resumed`.
+
+Stock OCaml closes the same window with the per-object `NOT_MARKABLE` header lock in
+`caml_darken_cont` (`major_gc.c`): a second resumer spins until the first has scanned. The global
+cont_lock was this binding's stand-in for that lock. (Found in review of the gate PR.)
+
+**Fix.** When `caml_mmtk_cont_lock_required()` is false, the resume path does three things in order:
+1. Claims the stack first, with the field-0 CAS (a plain store when the domain is alone).
+2. Returns NULL without touching the stack if it lost the race.
+3. Otherwise calls the new `caml_mmtk_stack_snapshot` on the stack it now owns.
+
+Two facts make the order sound:
+- Only the winner can reach the stack.
+- Nothing between the claim and the snapshot allocates or polls (`CAMLnoalloc`), so no pause can
+  start in between. Under sliced marking, no marking can run between the claim and the snapshot.
+  So the stack's referents are greyed before marking can see the deleted cont->stack edge.
+
+The locked path for ConcurrentImmix and `MMTK_MARK_SLICED=0` is unchanged: lock, snapshot, CAS,
+unlock. `MMTK_CONT_LOCK_ALWAYS=1` still selects the locked path everywhere.
+
+Regression test: `testsuite/tests/effects/cont_resume_race.ml`. Two domains race to resume one
+deep continuation whose frames hold heap pointers, 3000 times. A third domain churns a large live
+set to keep mark cycles open.
+
 ## 2026-10-01 - RQ7 decision measurement: pause distributions, GenImmix vs Bactrian vs vanilla (ROADMAP item 33)
 
 *Measured*, godel node 0 (Xeon Gold 5120), matched pinned heaps (the sweep's

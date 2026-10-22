@@ -667,6 +667,24 @@ static value continuation_take_noexc (value cont)
   if (!Is_young(cont) && caml_marking_started())
     caml_darken_cont(cont);
 
+  /* No GC worker can scan this stack while we run (every plan except
+     ConcurrentImmix and Bactrian with MMTK_MARK_SLICED=0), so no lock. But two
+     domains may race to resume [cont], so claim the stack first and snapshot
+     it after: only the winner, which now owns the stack, scans it. Nothing
+     between the claim and the snapshot allocates or polls, so no pause, and
+     hence no marking, can start in between; the stack's referents are greyed
+     before marking can observe the deleted cont->stack edge. The snapshot is
+     a no-op outside an open mark cycle of a concurrent plan. */
+  if (!caml_mmtk_cont_lock_required()) {
+    v = Field(cont, 0);
+    if (caml_domain_alone())
+      Field(cont, 0) = null_stk;
+    else if (!atomic_compare_exchange_strong(Op_atomic_val(cont), &v, null_stk))
+      return null_stk;
+    caml_mmtk_stack_snapshot(Ptr_val(v));
+    return v;
+  }
+
   /* MMTk concurrent plan (ConcurrentImmix): a GC worker may be scanning this
      continuation's suspended fiber stack RIGHT NOW (binding scan_object ->
      caml_scan_stack) while we are about to take that stack and switch onto it.

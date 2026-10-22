@@ -149,6 +149,7 @@ void mmtk_ocaml_satb_barrier(MMTk_Mutator mutator, uintptr_t start, size_t count
  */
 void mmtk_ocaml_cont_lock(uintptr_t cont_addr);
 void mmtk_ocaml_cont_unlock(uintptr_t cont_addr);
+int mmtk_ocaml_marking_confined_to_pauses(void);
 
 /** True iff the concurrent plan is currently in its concurrent marking phase. */
 bool mmtk_ocaml_concurrent_marking_active(void);
